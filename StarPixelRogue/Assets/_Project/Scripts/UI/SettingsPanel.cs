@@ -12,6 +12,10 @@ namespace StarPixel.UI
     {
         private GameObject _root;
 
+        /// <summary>M13：云存档状态文本（异步刷新，需定时重绘）。</summary>
+        private Text _cloudStatus;
+        private float _cloudTimer;
+
         public static void Ensure()
         {
             if (Instance != null) return;
@@ -31,6 +35,12 @@ namespace StarPixel.UI
             Core.Localization.LanguageChanged -= Rebuild;
         }
 
+        /// <summary>
+        /// M18 实测用：面板根（画布）。语言切换会整体重建，本属性随即指向新画布——
+        /// 探针据此精确定位控件，避免用 <c>GameObject.Find</c> 拿到已废弃的旧画布。
+        /// </summary>
+        public Transform PanelRoot => _root != null ? _root.transform : null;
+
         public void Show()
         {
             Ensure();
@@ -41,6 +51,28 @@ namespace StarPixel.UI
         public void Hide()
         {
             if (_root != null) _root.SetActive(false);
+        }
+
+        void Update()
+        {
+            // M13：云存档状态由协程异步改写（拉取/上传成功或失败时才变），
+            // 不定时重绘的话，用户点了「立即同步」也永远看不到结果。
+            if (_root == null || !_root.activeSelf || _cloudStatus == null) return;
+            _cloudTimer -= Time.unscaledDeltaTime;
+            if (_cloudTimer <= 0f)
+            {
+                _cloudTimer = 0.5f;
+                RefreshCloudStatus();
+            }
+        }
+
+        private void RefreshCloudStatus()
+        {
+            if (_cloudStatus == null) return;
+            var svc = Core.CloudSave.CloudSaveService.Instance;
+            _cloudStatus.text = svc != null
+                ? svc.LastStatusText
+                : Core.Localization.T(Core.CloudSave.CloudSaveService.StatusIdle);
         }
 
         private void Rebuild()
@@ -55,13 +87,15 @@ namespace StarPixel.UI
             var canvas = Core.UIFactory.CreateCanvas("SettingsCanvas");
             _root = canvas.gameObject;
 
+            // M13：620 → 700，为云存档区块腾出空间（仍低于 720p 屏高，不会溢出）。
+            // 顺带把此前溢出到面板外的「导出诊断日志」按钮与提示收进面板内。
             var panel = Core.UIFactory.CreatePanel(_root.transform, "Panel", Vector2.zero,
-                new Vector2(640, 620), new Color(0.08f, 0.09f, 0.14f, 0.97f));
+                new Vector2(640, 700), new Color(0.08f, 0.09f, 0.14f, 0.97f));
 
             Core.UIFactory.CreateText(panel.transform, "Title", Core.Localization.T("settings.title"),
                 new Vector2(0, 278), 32);
             Core.UIFactory.CreateText(panel.transform, "Version", Core.VersionInfo.Display,
-                new Vector2(0, -282), 14);
+                new Vector2(0, -302), 14);
 
             var s = Core.SettingsManager.Instance.Current;
 
@@ -102,36 +136,68 @@ namespace StarPixel.UI
                     Core.SettingsManager.Instance.SetLanguage(next);   // 触发 LanguageChanged → 面板重建
                 }, 18);
 
+            // 玩法开关改两列排布：为下方的云存档区块腾出约 80px。
+            // 面板不能无限加高——720p 下超过屏高就会溢出看不见。
             AddToggle(panel.transform, "Fullscreen", Core.Localization.T("settings.fullscreen"), s.fullscreen,
-                new Vector2(-90, -40), v => Core.SettingsManager.Instance.SetFullscreen(v));
-            AddToggle(panel.transform, "Shake", Core.Localization.T("settings.shake"), s.screenShake,
-                new Vector2(-90, -90), v => Core.SettingsManager.Instance.SetScreenShake(v));
+                -20f, -200f, -40f, v => Core.SettingsManager.Instance.SetFullscreen(v));
             AddToggle(panel.transform, "Telemetry", Core.Localization.T("settings.telemetry"), s.telemetry,
-                new Vector2(-90, -140), v => Core.SettingsManager.Instance.SetTelemetry(v));
+                -20f, 120f, 260f, v => Core.SettingsManager.Instance.SetTelemetry(v));
+            AddToggle(panel.transform, "Shake", Core.Localization.T("settings.shake"), s.screenShake,
+                -70f, -200f, -40f, v => Core.SettingsManager.Instance.SetScreenShake(v));
             AddToggle(panel.transform, "MinorMode", Core.Localization.T("settings.minor_mode"), s.minorMode,
-                new Vector2(-90, -190), v => Core.SettingsManager.Instance.SetMinorMode(v));
+                -70f, 120f, 260f, v => Core.SettingsManager.Instance.SetMinorMode(v));
             Core.UIFactory.CreateText(panel.transform, "MinorHint",
-                Core.Localization.T("settings.minor_hint"), new Vector2(30, -222), 13,
+                Core.Localization.T("settings.minor_hint"), new Vector2(30, -108), 13,
                 TextAnchor.MiddleCenter, new Vector2(560, 24));
+
+            // —— 云存档（M13） ——
+            Core.UIFactory.CreateText(panel.transform, "CloudHeader",
+                Core.Localization.T("settings.cloud_header"), new Vector2(-250, -140), 16);
+            AddToggle(panel.transform, "CloudSave", Core.Localization.T("settings.cloud_save"), s.cloudSave,
+                -178f, -200f, -40f, v =>
+                {
+                    Core.SettingsManager.Instance.SetCloudSave(v);
+                    Core.CloudSave.CloudSaveService.Ensure();
+                    // 从「关」拨到「开」时必须补一次拉取裁决：服务若已在 Start 里判定过
+                    // 一次"未启用"并直接返回，此后 Update 不会再主动发起同步——
+                    // 用户会以为开了开关却毫无反应，只能等到下次启动才生效。
+                    if (v) Core.CloudSave.CloudSaveService.Instance?.SyncNow();
+                    RefreshCloudStatus();
+                });
+
+            _cloudStatus = Core.UIFactory.CreateText(panel.transform, "CloudStatus",
+                Core.Localization.T(Core.CloudSave.CloudSaveService.StatusIdle),
+                new Vector2(-110, -212), 13, TextAnchor.MiddleLeft, new Vector2(420, 24));
+            _cloudStatus.color = new Color(0.7f, 0.85f, 1f, 0.9f);
+            RefreshCloudStatus();
+
+            Core.UIFactory.CreateButton(panel.transform, "CloudSyncNow",
+                Core.Localization.T("settings.cloud_sync_now"),
+                new Vector2(215, -212), new Vector2(110, 32), () =>
+                {
+                    Core.CloudSave.CloudSaveService.Ensure();
+                    Core.CloudSave.CloudSaveService.Instance?.SyncNow();   // 未启用时内部直接 return
+                    RefreshCloudStatus();
+                }, 13);
 
             // —— 法律文本与工具 ——
             Core.UIFactory.CreateText(panel.transform, "LegalHeader", Core.Localization.T("settings.legal"),
-                new Vector2(-250, -262), 16);
+                new Vector2(-250, -242), 16);
             Core.UIFactory.CreateButton(panel.transform, "TermsBtn", Core.Localization.T("compliance.terms"),
-                new Vector2(-190, -296), new Vector2(150, 38),
+                new Vector2(-190, -272), new Vector2(150, 38),
                 () => Compliance.LegalViewer.Open(Core.Localization.T("compliance.terms"),
                     Compliance.LegalTexts.Get(Compliance.LegalTexts.TermsKey)), 14);
             Core.UIFactory.CreateButton(panel.transform, "PrivacyBtn", Core.Localization.T("compliance.privacy"),
-                new Vector2(-20, -296), new Vector2(150, 38),
+                new Vector2(-20, -272), new Vector2(150, 38),
                 () => Compliance.LegalViewer.Open(Core.Localization.T("compliance.privacy"),
                     Compliance.LegalTexts.Get(Compliance.LegalTexts.PrivacyKey)), 14);
             Core.UIFactory.CreateButton(panel.transform, "ChildrenBtn", Core.Localization.T("compliance.children"),
-                new Vector2(150, -296), new Vector2(160, 38),
+                new Vector2(150, -272), new Vector2(160, 38),
                 () => Compliance.LegalViewer.Open(Core.Localization.T("compliance.children"),
                     Compliance.LegalTexts.Get(Compliance.LegalTexts.ChildrenKey)), 14);
 
             Core.UIFactory.CreateButton(panel.transform, "ExportBtn", Core.Localization.T("settings.export_log"),
-                new Vector2(-190, -344), new Vector2(200, 38), OnExportLog, 14);
+                new Vector2(-230, -330), new Vector2(180, 38), OnExportLog, 14);
             Core.UIFactory.CreateButton(panel.transform, "CloseBtn", Core.Localization.T("settings.close"),
                 new Vector2(0, 276), new Vector2(120, 40), Hide, 18);
         }
@@ -147,12 +213,17 @@ namespace StarPixel.UI
             slider.onValueChanged.AddListener(v => onChanged(v));
         }
 
+        /// <summary>
+        /// 开关行。labelX / toggleX 由调用方显式给出（而非固定 -220/110），
+        /// 是为了支持玩法区的两列排布——面板高度有限，云存档区块的空间只能靠横向省出来。
+        /// 约定：标签左对齐、宽 200，故文本左边缘 = labelX - 100。
+        /// </summary>
         private void AddToggle(Transform parent, string name, string label, bool value,
-            Vector2 pos, System.Action<bool> onChanged)
+            float y, float labelX, float toggleX, System.Action<bool> onChanged)
         {
-            Core.UIFactory.CreateText(parent, name + "Label", label, new Vector2(-220, pos.y), 16,
-                TextAnchor.MiddleLeft, new Vector2(240, 30));
-            Core.UIFactory.CreateToggle(parent, name + "Toggle", value, new Vector2(110, pos.y),
+            Core.UIFactory.CreateText(parent, name + "Label", label, new Vector2(labelX, y), 16,
+                TextAnchor.MiddleLeft, new Vector2(200, 30));
+            Core.UIFactory.CreateToggle(parent, name + "Toggle", value, new Vector2(toggleX, y),
                 new Vector2(80, 36), onChanged);
         }
 
@@ -165,8 +236,8 @@ namespace StarPixel.UI
             if (tip == null && _root != null)
             {
                 var t = Core.UIFactory.CreateText(_root.transform, "ExportTip",
-                    Core.Localization.T("settings.export_done", path), new Vector2(0, -370), 13,
-                    TextAnchor.MiddleCenter, new Vector2(700, 24));
+                    Core.Localization.T("settings.export_done", path), new Vector2(80, -330), 13,
+                    TextAnchor.MiddleLeft, new Vector2(340, 24));
                 t.color = new Color(0.7f, 0.85f, 1f, 0.9f);
             }
         }

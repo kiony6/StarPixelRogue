@@ -7,8 +7,8 @@
 > | `StarPixelRogue/` | Unity 2022.3 工程本体——完整源码 / 资源 / 配置 / 技术文档 |
 > | `net_smoke.py` | M18 联机双开实测脚本：普通联机 / `--spectator` 观战(M14) / `--drop-at`·`--host-drop-at` 断线重连(M11) |
 > | `net_smoke_m11_m14.md` | M11 断线重连 / M14 观战的无头实测报告（含判据设计与缺陷修复） |
-> | `cloudsave_probe.py` | M13 云存档无头实测脚本：5 个开关场景，双向断言「未启用即零网络请求」 |
-> | `cloudsave_m13.md` | M13 云存档无头实测报告（请求计数器 / 判据区分力 / 实测矩阵） |
+> | `cloudsave_probe.py` | M13 云存档无头实测脚本：5 个开关场景（双向断言「未启用即零网络请求」）+ 设置面板探针 `--ui` |
+> | `cloudsave_m13.md` | M13 云存档无头实测报告（请求计数器 / 判据区分力 / 实测矩阵 / 设置页 UI） |
 > | `audit_project.py` | 工程静态审计（退出码 0 = 无问题） |
 > | `balance_sim.py` + `balance_*.md` / `balance_*.txt` | 数值平衡模拟器与实验报告 |
 > | `gen_assets.py` | 像素精灵 / 音效资源生成脚本 |
@@ -370,6 +370,8 @@ M13 在既有本地 `SaveManager` 之上叠加**可选、默认关闭**的云端
 | 编排服务 | `Core/CloudSave/CloudSaveService.cs` | 三重开关门禁、启动时拉取裁决、上行节流 15s、失败退避重试 3 次、切后台/退出 flush、schema 版本保护 |
 | 存档层改造 | `Core/SaveManager.cs` | `Record` 增 `schemaVersion`/`savedAt`（冲突裁决依据）；拆出 `WriteLocal`（静默落盘，避免"拉下来又推回去"的回环）；新增 `Saved` 事件、`ReplaceFromCloud()`、`UtcNowIso()`/`CompareSavedAt()` |
 | 用户开关 | `Core/SettingsManager.cs` | 新增 `cloudSave`（**默认 false**）+ `SetCloudSave()`；仅置位开关，是否真联网由服务端到端判定 |
+| 设置页入口 | `UI/SettingsPanel.cs` | 「云存档」区块：开关 + 实时状态 + 「立即同步」。开关拨到「开」时**补一次拉取裁决**——服务若已在 `Start` 里判定过一次"未启用"并直接返回，此后 `Update` 不会主动同步，不补的话用户要等到下次启动才生效；状态每 0.5s 重绘（同步在协程里异步完成） |
+| 状态本地化 | `Core/Localization.cs`、`CloudSaveService` | 云存档状态原为硬编码中文，切英文界面会冒出中文。改为**存本地化键 + 渲染**（`LastStatus` 存键、`LastStatusText` 出文案），补 16 条中英词条 |
 | 合规 | `Resources/Legal/privacy.txt`、`Core/VersionInfo.cs` | 隐私政策增补云存档条款（原第三条写着"不会上传"，与功能冲突）；`ComplianceVersion` 递增至 `2026.10.1`，**强制老用户重新阅读并同意** |
 | 配置 | `Resources/cloudsave.json` | `baseUrl` 留空即禁用；部署时填入后端地址即可启用，无需改代码 |
 
@@ -387,7 +389,7 @@ PUT  {baseUrl}/save/{slotId}   <- 存档 JSON 整体覆盖；2xx = 成功
 
 **校验**：8 个改动/新增 .cs 括号全平衡；`SchemaVersion`/`savedAt`/`ReplaceFromCloud`/`UtcNowIso`/`CompareSavedAt`/`WriteLocal`/`Saved`/`SetCloudSave`/`cloudSave`/`EvCloudSync`/`IsSecure` 等引用点（定义 + 调用）交叉核对通过；已修复 `PullAndReconcile` 中 `SaveManager.Instance` 为空时的潜在空引用。当时无 Unity 编译器，**仅静态校验**。M18 已补齐无头实测（见下方「M18 续二：M13 云存档无头实测」）：给传输层加了请求计数器，把「未开启/未配置时零网络请求」从代码推断升级为可断言的事实，5 个开关场景全部通过、运行时异常 0 条。仍需真实后端才能验的部分：① 冲突裁决（需两端对同一 slot 写入）；② 404 首次同步与 schema 版本保护；③ token 鉴权头；④ 杀进程重开后进度确实恢复。
 
-**已知限制（M13）**：配置留空/开关关闭时为纯单机，功能等于不存在；冲突取新会让「多端同时游玩」以最后写入为准（原型不做实时合并）；`OnApplicationQuit` 的推送不保证完成，由下次启动的拉取裁决兜底收敛；**当前 `slotId` 即身份凭证，任何知悉者均可读写该槽**——生产必须改为服务端按账号派生 slotId 并做越权校验，同时补齐账号体系与服务端鉴权；设置页「云存档」开关的 UI 未做（`SetCloudSave()` 接口已就绪，待接 UI）；云端数据未做端到端加密。
+**已知限制（M13）**：配置留空/开关关闭时为纯单机，功能等于不存在；冲突取新会让「多端同时游玩」以最后写入为准（原型不做实时合并）；`OnApplicationQuit` 的推送不保证完成，由下次启动的拉取裁决兜底收敛；**当前 `slotId` 即身份凭证，任何知悉者均可读写该槽**——生产必须改为服务端按账号派生 slotId 并做越权校验，同时补齐账号体系与服务端鉴权；云端数据未做端到端加密。
 
 ### M14 观战模式（本次新增，含一处既存缺陷修复）
 
@@ -710,6 +712,37 @@ python cloudsave_probe.py --only E              # 只跑指定场景
 > **仍未覆盖**：本实测证明的是「门禁与降级行为正确」，没有验证云端真的能存取——
 > 冲突裁决（需两端对同一 slot 写入）、404 首次同步、schema 版本保护、token 鉴权头、进度跨设备恢复，
 > 都需要一个真实后端。这几项与「门禁是否会在未配置时泄露请求」是两件事，后者已闭环。
+
+### M18 续三：M13 设置页 UI 与状态本地化
+
+M13 此前留了一条待办：「设置页『云存档』开关的 UI 未做（`SetCloudSave()` 接口已就绪）」。本轮补上，
+并顺带修掉两个只有真正把面板建出来才会暴露的问题。
+
+| 改动 | 说明 |
+| --- | --- |
+| 设置页「云存档」区块 | 开关 + 实时状态文本 + 「立即同步」按钮；状态每 0.5s 重绘（同步在协程里异步完成，不重绘就永远停在旧值） |
+| 开关拨到「开」时补一次拉取裁决 | **真实缺陷修复**：服务若已在 `Start` 里判定过一次"未启用"并直接 return，此后 `Update` 不会再主动发起同步——不补这一次，用户开了开关却毫无反应，只能等到下次启动 |
+| 状态改为「存键 + 渲染」 | `LastStatus` 存本地化键、`LastStatusText` 出成品文案，补 16 条中英词条。原实现是硬编码中文，**英文界面会冒出一串中文状态** |
+| 面板布局 | 620 → 700（仍低于 720p 屏高），玩法开关改两列腾出空间；顺带把此前溢出到面板外的「导出诊断日志」按钮与提示收进面板内 |
+
+**为什么还需要一个 UI 探针**：设置面板在无头冒烟里根本不会被创建（那是单机/联机对局路径），
+于是这次 UI 改动等于零验证。故新增 `-uiProbe`：把面板建出来、**真的点一下开关**、再切一次语言，
+断言三件事——① 控件齐全；② 开关确实写进 `SettingsManager`（不是只画了个样子）；
+③ 中英文案都是成品而非裸键名（`Localization.T` 漏翻时会原样返回键，UI 上就会冒出 `cloud.status.off`）。
+
+```bash
+python cloudsave_probe.py --ui      # 只跑设置面板探针
+python cloudsave_probe.py           # 5 个联网场景 + 设置面板探针
+```
+
+实测：三个控件存在、点击生效 **是**、中文「未启用（可在设置中开启）」/ 英文「Not enabled (can be turned on in Settings)」、
+运行期异常 0 条。两条文案不同，证明本地化真的生效而非回退到同一份硬编码。
+
+> **探针踩坑**：首轮报了 170 条「运行期异常」，但日志里 grep 不到任何 exception——
+> 那是 NullGfxDevice 下 Canvas 每帧刷的同一条 **Error 级渲染噪声**。
+> 处理方式与联机实测一致：进白名单，而不是当成缺陷（真错误会被噪声淹没，故探针同时输出首条错误内容备查）。
+> 另有一处：语言切换会整体重建面板，而 `Destroy` 延迟到帧末——用 `GameObject.Find` 定位控件会命中尚未销毁的
+> **旧**画布，读到的仍是切换前的文案。改由 `SettingsPanel.PanelRoot` 取当前面板根。
 
 ## 架构与目录
 

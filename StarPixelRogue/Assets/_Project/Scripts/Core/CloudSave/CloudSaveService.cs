@@ -32,11 +32,43 @@ namespace StarPixel.Core.CloudSave
         /// <summary>存档槽 id（预留多槽扩展）。</summary>
         public string SlotId { get; private set; } = "default";
 
-        /// <summary>最近一次同步结果（设置页展示用）。</summary>
-        public string LastStatus { get; private set; } = "未启用";
+        /// <summary>
+        /// 最近一次同步结果——存的是**本地化键**而非成品文案。
+        /// 为什么：状态文案此前是硬编码中文，切到英文界面时设置页会冒出中文。
+        /// 存键 + <see cref="LastStatusText"/> 渲染，中英两边才都成立。
+        /// </summary>
+        public string LastStatus { get; private set; } = StatusIdle;
+
+        /// <summary>已本地化的状态文案（设置页与诊断输出直接用这个）。</summary>
+        public string LastStatusText => Localization.T(LastStatus, _statusArg0, _statusArg1);
 
         /// <summary>最近一次同步是否成功。</summary>
         public bool LastSyncOk { get; private set; }
+
+        // —— 状态键（与 Localization 中 cloud.status.* 一一对应） ——
+        public const string StatusIdle = "cloud.status.idle";
+        public const string StatusOff = "cloud.status.off";
+        public const string StatusPullFail = "cloud.status.pull_fail";
+        public const string StatusEmpty = "cloud.status.empty";
+        public const string StatusBadData = "cloud.status.bad_data";
+        public const string StatusNewerSchema = "cloud.status.newer_schema";
+        public const string StatusLocalNotReady = "cloud.status.local_not_ready";
+        public const string StatusTookCloud = "cloud.status.took_cloud";
+        public const string StatusKeepLocal = "cloud.status.keep_local";
+        public const string StatusPushed = "cloud.status.pushed";
+        public const string StatusPushGiveUp = "cloud.status.push_give_up";
+        public const string StatusPushRetry = "cloud.status.push_retry";
+
+        private string _statusArg0 = "";
+        private string _statusArg1 = "";
+
+        /// <summary>记录状态键及其占位参数（状态文案里要带秒数/错误原因）。</summary>
+        private void SetStatus(string key, object arg0 = null, object arg1 = null)
+        {
+            LastStatus = key;
+            _statusArg0 = arg0 != null ? arg0.ToString() : "";
+            _statusArg1 = arg1 != null ? arg1.ToString() : "";
+        }
 
         public ICloudSaveProvider Provider { get; private set; }
 
@@ -106,7 +138,7 @@ namespace StarPixel.Core.CloudSave
         void Start()
         {
             SaveManager.Ensure();   // 保证本地存档先就位，避免裁决时读到空数据
-            if (!Enabled) { LastStatus = "未启用（可在设置中开启）"; return; }
+            if (!Enabled) { SetStatus(StatusOff); return; }
             StartCoroutine(PullAndReconcile());
         }
 
@@ -168,7 +200,7 @@ namespace StarPixel.Core.CloudSave
             if (!ok)
             {
                 LastSyncOk = false;
-                LastStatus = "拉取失败（继续使用本地存档）";
+                SetStatus(StatusPullFail);
                 Telemetry.Log(Telemetry.EvCloudSync, "op", "pull", "ok", false);
                 _busy = false;
                 yield break;
@@ -178,7 +210,7 @@ namespace StarPixel.Core.CloudSave
             {
                 // 云端为空（首次同步）：把本地推上去建档
                 LastSyncOk = true;
-                LastStatus = "云端为空，正在建档";
+                SetStatus(StatusEmpty);
                 _busy = false;
                 SchedulePush(true);
                 yield break;
@@ -188,7 +220,7 @@ namespace StarPixel.Core.CloudSave
             if (remote == null)
             {
                 LastSyncOk = false;
-                LastStatus = "云端数据无法解析，已保留本地存档";
+                SetStatus(StatusBadData);
                 _busy = false;
                 yield break;
             }
@@ -196,7 +228,7 @@ namespace StarPixel.Core.CloudSave
             if (remote.schemaVersion > SaveManager.SchemaVersion)
             {
                 // 云端是更高版本的存档结构，本地无法安全解析 -> 保留本地，绝不覆盖
-                LastStatus = "云端存档版本较新，已保留本地存档";
+                SetStatus(StatusNewerSchema);
                 _busy = false;
                 yield break;
             }
@@ -204,7 +236,7 @@ namespace StarPixel.Core.CloudSave
             // 本地存档未就绪时不合并——绝不拿云端数据冒险覆盖（Start 已 Ensure，此处为防御性兜底）
             if (SaveManager.Instance == null)
             {
-                LastStatus = "本地存档未就绪，跳过云端合并";
+                SetStatus(StatusLocalNotReady);
                 _busy = false;
                 yield break;
             }
@@ -215,11 +247,11 @@ namespace StarPixel.Core.CloudSave
             if (cmp > 0)
             {
                 SaveManager.Instance.ReplaceFromCloud(remote);
-                LastStatus = "已采用云端存档（云端较新）";
+                SetStatus(StatusTookCloud);
             }
             else
             {
-                LastStatus = "本地较新，保持本地";
+                SetStatus(StatusKeepLocal);
                 SchedulePush(true);   // 顺手收敛两端
             }
 
@@ -244,16 +276,15 @@ namespace StarPixel.Core.CloudSave
             LastSyncOk = ok;
             if (ok)
             {
-                LastStatus = "已上传至云端";
+                SetStatus(StatusPushed);
                 _retries = 0;
             }
             else
             {
                 _retries++;
                 _retryTimer = RetryBase * _retries;
-                LastStatus = _retries > MaxRetries
-                    ? "上传失败，已停止重试（本地存档不受影响）"
-                    : "上传失败，" + _retryTimer + "s 后重试：" + err;
+                if (_retries > MaxRetries) SetStatus(StatusPushGiveUp);
+                else SetStatus(StatusPushRetry, _retryTimer, err);
             }
             Telemetry.Log(Telemetry.EvCloudSync, "op", "push", "ok", ok);
             _busy = false;

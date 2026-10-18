@@ -40,6 +40,9 @@ namespace StarPixel
             // M18 / M13 云存档无头实测：按开关矩阵跑一个场景（正常启动不受影响）
             if (HasArg("-cloudSaveProbe")) { StartCloudSaveProbe(); return; }
 
+            // M18：设置面板无头实测（正常启动不受影响）
+            if (HasArg("-uiProbe")) { StartUIProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -305,6 +308,20 @@ namespace StarPixel
                     cb.Invoke();
                 }
             }
+        }
+
+        /// <summary>
+        /// M18 设置面板无头实测入口：只搭舞台 + 建设置面板，不开局。
+        /// 设置面板在正常无头冒烟里根本不会被创建（那是单机/联机对局路径），
+        /// 于是 UI 改动等于零验证——本入口把它建出来并交给 <see cref="Dev.UISettingsProbe"/> 检查。
+        /// </summary>
+        private static void StartUIProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();            // 面板会显示版本号/存档派生信息，先就位
+            Application.targetFrameRate = 60;
+            PrepareStage();                       // uGUI 需要相机与 EventSystem
+            StarPixel.Dev.UISettingsProbe.Start();
         }
 
         private static void OpenLobby()

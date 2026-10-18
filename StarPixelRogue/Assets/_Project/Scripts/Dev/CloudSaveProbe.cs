@@ -175,7 +175,9 @@ namespace StarPixel.Dev
             Debug.Log("[SMOKE] 未启用原因  " + reason);
             // 注意：键与值之间必须留 2 个以上空格——解析脚本的 [SMOKE] 正则靠它切分
             Debug.Log("[SMOKE] 网络请求数  " + requests);
-            Debug.Log("[SMOKE] 最近状态    " + (svc != null ? svc.LastStatus : "-"));
+            // 用 LastStatusText（本地化后的成品文案）而非 LastStatus（本地化键），
+            // 保证 [SMOKE] 输出对人或对脚本都可读。
+            Debug.Log("[SMOKE] 最近状态    " + (svc != null ? svc.LastStatusText : "-"));
             Debug.Log("[SMOKE] 同步成功    " + (svc != null && svc.LastSyncOk ? "是" : "否"));
             Debug.Log("[SMOKE] 击杀        " + _kills);
             Debug.Log("[SMOKE] 波次        " + wave);

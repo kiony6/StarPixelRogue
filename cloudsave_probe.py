@@ -19,6 +19,10 @@
     D 已配置已开启但未同意隐私    → 期望禁用、请求 0
     E 已配置 + 已开启 + 已同意    → 期望**真的发了请求**；后端不可达时静默降级、玩法不受影响
 
+外加一个设置面板探针 `-uiProbe`（默认一并跑）：建出设置页、真的点一下云存档开关、
+再切一次语言，验证控件存在 + 开关确实写进设置 + 中英文案都是成品而非本地化键。
+设置面板在无头冒烟里根本不会被创建，没有这个探针本次 UI 改动就等于零验证。
+
 判据的区分力从哪来（这是本脚本最要紧的地方）：
     1) 「是否应当启用」由本脚本**独立**按 HTTPS 规则推导后传给被测进程，
        绝不读 CloudSaveService.Enabled 当期望值——否则实现若误把 http 判为已配置，
@@ -238,11 +242,84 @@ def check(r):
     return problems
 
 
+def run_ui_probe(exe, limit_mb):
+    """设置面板探针：云存档控件 / 开关生效 / 中英双语状态渲染。"""
+    log = os.path.join(ROOT, "cloudsave_ui.log")
+    if os.path.exists(log):
+        os.remove(log)
+
+    print("  [UI] 设置面板探针 —— 云存档控件 / 开关生效 / 中英双语状态")
+    try:
+        proc = subprocess.Popen(
+            [exe, "-batchmode", "-nographics", "-uiProbe", "-logFile", log],
+            cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        print("        [错误] 无法启动进程: %s" % e)
+        return None
+
+    killed = False
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            break
+        if log_too_big(log, limit_mb):
+            proc.kill()
+            killed = True
+            break
+        time.sleep(1.0)
+    else:
+        proc.kill()
+        killed = True
+
+    d, _ = parse_smoke(log)
+    return {"code": proc.returncode, "killed": killed, "data": d, "log": log}
+
+
+def check_ui(r):
+    """设置面板探针的判据。判据在本脚本重写一遍，不读被测自判的结论。"""
+    problems = []
+    d = r["data"]
+    if not d:
+        return ["未产出任何 [SMOKE] 指标，无法判定"]
+    if r["killed"]:
+        problems.append("进程被强制结束，详见 %s" % rel(r["log"]))
+    if r["code"] != 0:
+        problems.append("进程退出码 %s（0=通过）" % r["code"])
+
+    # 控件：三个都得在，缺一个就说明面板构建没走完
+    for key, name in (("云存档开关控件", "开关"), ("云存档状态控件", "状态文本"),
+                      ("立即同步控件", "立即同步按钮")):
+        if d.get(key) != "存在":
+            problems.append("云存档%s控件缺失（%s）——设置页改动未生效" % (name, d.get(key)))
+
+    if d.get("开关点击生效") != "是":
+        problems.append("点击云存档开关后设置未改变（%s）——开关只是画了个样子"
+                        % d.get("开关点击生效"))
+
+    zh = d.get("中文状态文案", "")
+    en = d.get("英文状态文案", "")
+    # 漏翻时 Localization.T 原样返回键名，UI 上会冒出 "cloud.status.off"
+    for lang, v in (("中文", zh), ("英文", en)):
+        if not v:
+            problems.append("%s状态文案为空" % lang)
+        elif v.startswith("cloud.status."):
+            problems.append("%s状态文案是本地化键而非成品文案（%s）——词条漏翻" % (lang, v))
+    if zh and en and zh == en:
+        problems.append("中英文状态文案完全相同（%s）——本地化未生效，疑似硬编码" % zh)
+
+    if as_int(d, "运行期异常") > 0:
+        problems.append("运行期异常 %s 条：%s" % (as_int(d, "运行期异常"), d.get("首条错误", "?")))
+
+    return problems
+
+
 def main():
-    ap = argparse.ArgumentParser(description="M13 云存档无头实测（开关矩阵）")
+    ap = argparse.ArgumentParser(description="M13 云存档无头实测（开关矩阵 + 设置面板）")
     ap.add_argument("--seconds", type=int, default=20, help="每个场景的对局时长（秒）")
     ap.add_argument("--exe", default=DEFAULT_EXE, help="构建产物路径")
     ap.add_argument("--only", default="", help="只跑指定场景编号，如 E（可逗号分隔：A,C,E）")
+    ap.add_argument("--ui", action="store_true", help="只跑设置面板探针，不跑 5 个联网场景")
+    ap.add_argument("--skip-ui", action="store_true", help="跳过设置面板探针")
     ap.add_argument("--log-limit-mb", type=int, default=200,
                     help="单场景日志体积上限（MB），超过即熔断")
     args = ap.parse_args()
@@ -254,6 +331,27 @@ def main():
         print("       Unity.exe -batchmode -nographics -quit -projectPath StarPixelRogue \\")
         print("         -executeMethod StarPixel.EditorTools.BuildScript.HeadlessBuild")
         return 2
+
+    if args.ui:
+        print("=" * 74)
+        print("M13 云存档无头实测 · 仅设置面板探针")
+        print("  产物   %s" % rel(exe))
+        print("=" * 74)
+        r = run_ui_probe(exe, args.log_limit_mb)
+        if r is None:
+            return 2
+        for k in ("云存档开关控件", "云存档状态控件", "立即同步控件", "开关点击生效",
+                  "中文状态文案", "英文状态文案", "运行期异常", "首条错误"):
+            if k in r["data"]:
+                print("  %-14s %s" % (k, r["data"][k]))
+        ps = check_ui(r)
+        if ps:
+            print("\n结论：未通过")
+            for p in ps:
+                print("  - " + p)
+            return 1
+        print("\n结论：通过 —— 设置页云存档控件齐全、开关真实生效、中英双语状态均为成品文案")
+        return 0
 
     wanted = [s.strip().upper() for s in args.only.split(",") if s.strip()]
     scene_list = [s for s in SCENARIOS if not wanted or s[0] in wanted]
@@ -292,6 +390,21 @@ def main():
             print("  [%s] 未启用原因=%s / 最近状态=%s / 退出码=%s" %
                   (r["key"], d.get("未启用原因", "?"), d.get("最近状态", "?"), r["code"]))
 
+    # —— 设置面板探针（默认一并跑；--only 只关注单个联网场景时跳过）——
+    ui_problems = []
+    if not args.skip_ui and not wanted:
+        print()
+        ur = run_ui_probe(exe, args.log_limit_mb)
+        if ur is None:
+            return 2
+        d = ur["data"]
+        print("  设置面板   开关控件=%s / 状态控件=%s / 同步按钮=%s / 点击生效=%s" %
+              (d.get("云存档开关控件", "?"), d.get("云存档状态控件", "?"),
+               d.get("立即同步控件", "?"), d.get("开关点击生效", "?")))
+        print("  双语状态   中文=「%s」" % d.get("中文状态文案", "?"))
+        print("             英文=「%s」" % d.get("英文状态文案", "?"))
+        ui_problems = check_ui(ur)
+
     # —— 判定 ——
     print()
     all_problems = []
@@ -303,15 +416,20 @@ def main():
     total_exc = sum(r["exc"] for r in results)
     print("日志异常合计：%d 条" % total_exc)
 
-    if all_problems:
+    if all_problems or ui_problems:
         print("\n结论：未通过")
         for key, name, ps, log in all_problems:
             print("  [%s] %s（日志 %s）" % (key, name, rel(log)))
             for p in ps:
                 print("      - " + p)
+        if ui_problems:
+            print("  [UI] 设置面板探针")
+            for p in ui_problems:
+                print("      - " + p)
         return 1
 
-    print("\n结论：通过 —— A~D 零网络请求且玩法未受影响，E 真的联网并在不可达时静默降级")
+    tail = "，设置页云存档开关与双语状态亦已验证" if not args.skip_ui and not wanted else ""
+    print("\n结论：通过 —— A~D 零网络请求且玩法未受影响，E 真的联网并在不可达时静默降级%s" % tail)
     print('       （双向断言成立：既不是「压根没实现同步」，也不是「关了开关还在联网」）')
     return 0
 
