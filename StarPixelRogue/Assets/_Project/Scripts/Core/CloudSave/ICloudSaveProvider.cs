@@ -17,6 +17,14 @@ namespace StarPixel.Core.CloudSave
         bool Configured { get; }
 
         /// <summary>
+        /// 已发出的网络请求总数（M18 实测用）。
+        /// 为什么需要：云存档的核心承诺是「未开启/未配置时零网络请求」，
+        /// 而"没发请求"这件事仅凭读代码无法证明——必须有一个可观测计数器，
+        /// 才能在无头实测里断言"配置缺失时请求数恒为 0"。
+        /// </summary>
+        int RequestCount { get; }
+
+        /// <summary>
         /// 拉取存档。onDone(是否成功, 成功时为 JSON 文本；云端无存档时成功且返回空串；失败时为错误原因)。
         /// </summary>
         IEnumerator Download(string slotId, Action<bool, string> onDone);

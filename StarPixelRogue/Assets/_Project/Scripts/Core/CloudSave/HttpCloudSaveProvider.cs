@@ -33,6 +33,8 @@ namespace StarPixel.Core.CloudSave
         /// </summary>
         public bool Configured => IsSecure(_baseUrl);
 
+        public int RequestCount { get; private set; }
+
         private static bool IsSecure(string url)
         {
             if (string.IsNullOrEmpty(url)) return false;
@@ -45,11 +47,16 @@ namespace StarPixel.Core.CloudSave
 
         public IEnumerator Download(string slotId, Action<bool, string> onDone)
         {
+            // M18：未配置（含非 HTTPS）时一律不发请求。「零网络请求」不能只依赖调用方守规矩，
+            // 传输层自己也必须设闸——否则任何一处漏判都会让隐私承诺在代码层面失效。
+            if (!Configured) { onDone?.Invoke(false, "未配置"); yield break; }
+
             var url = _baseUrl + "/save/" + UnityWebRequest.EscapeURL(slotId);
             using (var req = UnityWebRequest.Get(url))
             {
                 req.timeout = _timeoutSeconds;
                 ApplyAuth(req);
+                RequestCount++;
                 yield return req.SendWebRequest();
 
                 if (!Ok(req))
@@ -65,6 +72,8 @@ namespace StarPixel.Core.CloudSave
 
         public IEnumerator Upload(string slotId, string json, Action<bool, string> onDone)
         {
+            if (!Configured) { onDone?.Invoke(false, "未配置"); yield break; }
+
             var url = _baseUrl + "/save/" + UnityWebRequest.EscapeURL(slotId);
             var body = Encoding.UTF8.GetBytes(json ?? "{}");
             using (var req = new UnityWebRequest(url, UnityWebRequest.kHttpVerbPUT))
@@ -74,6 +83,7 @@ namespace StarPixel.Core.CloudSave
                 req.downloadHandler = new DownloadHandlerBuffer();
                 req.SetRequestHeader("Content-Type", "application/json");
                 ApplyAuth(req);
+                RequestCount++;
                 yield return req.SendWebRequest();
 
                 bool ok = Ok(req);

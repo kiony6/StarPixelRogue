@@ -52,16 +52,38 @@ namespace StarPixel.Core.CloudSave
         private bool _busy;
 
         /// <summary>三重开关后的最终可用态（未启用时本服务不发任何网络请求）。</summary>
-        public bool Enabled
+        public bool Enabled => string.IsNullOrEmpty(DisabledReason);
+
+        /// <summary>后端是否已配置（三重开关中的第 ③ 道，与用户开关相互独立）。</summary>
+        public bool ProviderConfigured => Provider != null && Provider.Configured;
+
+        /// <summary>已发出的网络请求总数（来自 Provider，用于实测断言「零请求」）。</summary>
+        public int RequestCount => Provider != null ? Provider.RequestCount : 0;
+
+        /// <summary>
+        /// M18 实测专用：内存覆盖后端配置。
+        /// 正常启动路径永远只读 <c>Resources/cloudsave.json</c>，本属性仅由无头实测在
+        /// <see cref="Ensure"/> 之前置位，用来构造「已配置 / 未配置」等不同开关组合，
+        /// 不落盘、不影响正常游戏。
+        /// </summary>
+        public static Config OverrideConfig { get; set; }
+
+        /// <summary>
+        /// 未启用的具体原因（已启用时返回空串）。
+        /// 刻意让 <see cref="Enabled"/> 直接由本属性推导：两处各写一份判定迟早会漂移，
+        /// 而实测需要能断言"是因为哪道开关被关掉的"，而不只是一个笼统的 false。
+        /// </summary>
+        public string DisabledReason
         {
             get
             {
-                if (Provider == null || !Provider.Configured) return false;
+                if (Provider == null) return "Provider 缺失";
+                if (!Provider.Configured) return "后端未配置（或地址非 HTTPS）";
                 var s = SettingsManager.Instance;
-                if (s == null) return false;
-                if (!s.Current.cloudSave) return false;                                 // ① 用户未开启（默认关）
-                if (!s.TermsAgreed(VersionInfo.ComplianceVersion)) return false;        // ② 未同意最新版隐私政策
-                return true;
+                if (s == null) return "设置管理器缺失";
+                if (!s.Current.cloudSave) return "用户未开启";                          // ① 用户未开启（默认关）
+                if (!s.TermsAgreed(VersionInfo.ComplianceVersion)) return "未同意最新版隐私政策";   // ②
+                return "";
             }
         }
 
@@ -75,7 +97,7 @@ namespace StarPixel.Core.CloudSave
         protected override void Awake()
         {
             base.Awake();
-            var cfg = LoadConfig() ?? new Config();
+            var cfg = OverrideConfig ?? LoadConfig() ?? new Config();
             Provider = new HttpCloudSaveProvider(cfg.baseUrl, cfg.token, cfg.timeoutSeconds);
             SlotId = string.IsNullOrEmpty(cfg.slotId) ? "default" : cfg.slotId;
             SaveManager.Saved += OnLocalSaved;

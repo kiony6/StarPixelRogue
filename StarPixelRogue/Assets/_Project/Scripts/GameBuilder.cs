@@ -37,6 +37,9 @@ namespace StarPixel
             if (HasArg("-netHost")) { StartNetSmoke(true); return; }
             if (HasArg("-netClient")) { StartNetSmoke(false); return; }
 
+            // M18 / M13 云存档无头实测：按开关矩阵跑一个场景（正常启动不受影响）
+            if (HasArg("-cloudSaveProbe")) { StartCloudSaveProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -155,6 +158,62 @@ namespace StarPixel
             }
             catch { }
             return fallback;
+        }
+
+        /// <summary>M18：读取 "-key n" 形式的整数参数。</summary>
+        private static int ArgInt(string key, int fallback)
+        {
+            try
+            {
+                var args = System.Environment.GetCommandLineArgs();
+                for (int i = 0; i < args.Length - 1; i++)
+                    if (args[i] == key && int.TryParse(args[i + 1], out int v)) return v;
+            }
+            catch { }
+            return fallback;
+        }
+
+        /// <summary>
+        /// M18 / M13 云存档无头实测入口：按命令行给出的开关组合构建一个场景，
+        /// 由 <see cref="Dev.CloudSaveProbe"/> 断言「该不该联网」与「玩法有没有被砸」。
+        /// 参数（全部可选）：
+        ///   -cloudSaveScene  &lt;名&gt;   场景名，仅用于日志标注
+        ///   -cloudSaveUrl    &lt;url&gt;  后端地址；不给 = 保持未配置的真实默认态
+        ///   -cloudSaveUserOn 0|1      设置里的用户开关（默认 1）
+        ///   -cloudSaveAgree  0|1      是否已同意最新版隐私政策（默认 1）
+        ///   -cloudSaveTimeout &lt;秒&gt;   单次请求超时（默认 3，加快失败收敛）
+        ///   -cloudSaveExpect 0|1      **外部**给定的"是否应当启用"期望值（默认 0）
+        /// 期望值刻意由外部脚本给出而非在此推导：若由被测对象自己判断自己该不该启用，
+        /// 实现出错时就会自我印证（M11 已踩过一次假通过的坑）。
+        /// </summary>
+        private static void StartCloudSaveProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Core.PlaytimeGuard.Ensure();
+
+            Application.targetFrameRate = 60;   // 同 StartNetSmoke：不锁帧会把每帧告警刷成 GB 级日志
+
+            string scene = ArgValue("-cloudSaveScene", "未命名");
+            string url = ArgValue("-cloudSaveUrl", "");
+            bool userOn = ArgInt("-cloudSaveUserOn", 1) != 0;
+            bool agreed = ArgInt("-cloudSaveAgree", 1) != 0;
+            int timeout = ArgInt("-cloudSaveTimeout", 3);
+            bool expect = ArgInt("-cloudSaveExpect", 0) != 0;
+
+            // 未显式给时长时取 20s：云存档场景只需证明"玩法未被砸 + 请求数符合预期"，
+            // 跑到 60s 纯属浪费（单机冒烟已有独立入口覆盖长时程）。
+            float seconds = HasArg("-smokeSeconds") ? SmokeSeconds() : 20f;
+
+            PrepareStage();
+
+            // 探针先建：它要尽早订阅日志以统计运行期异常；
+            // 观察时长比 SmokeTest 短 1s，确保由探针收尾并输出云存档指标。
+            StarPixel.Dev.CloudSaveProbe.Start(Mathf.Max(6f, seconds - 1f),
+                scene, url, userOn, agreed, timeout, expect);
+
+            Build();                                      // 单机世界
+            StarPixel.Dev.SmokeTest.Start(seconds);        // 复用已验证的自动驾驶，负责驱动对局
         }
 
         /// <summary>
