@@ -16,13 +16,17 @@
     1) 默认      —— 房主 + 普通客户端，核对波次/击杀/玩家数（共同底座）
     2) --spectator —— 客户端以观战身份加入（M14）：核对「自身玩家对象被房主回收」
                      + 仍能收到世界同步（波次/击杀 > 0）
-    3) --drop-at N —— 客户端在第 N 秒模拟意外掉线（M11）：核对自动重连是否成功、
-                     且波次/等级/击杀三项进度没有回退；房主侧还要观测到「2→1→2」
+    3) --drop-at N —— 客户端在第 N 秒模拟意外掉线（M11 客户端分支）：先拆本地镜像，
+                     重连后重建；核对自动重连成功 + 进度未回退 + 房主观测到「2→1→2」
+    4) --host-drop-at N —— 房主在第 N 秒模拟意外掉线（M11 房主分支）：**服务端仍在运行、
+                     权威世界保留不拆**，只重连房主的本地客户端；核对掉线期间
+                     场上敌人/波次仍在（世界未被拆）+ 进度未回退 + 对端客户端不受影响
 
 用法：
     python net_smoke.py [--seconds 60] [--address 127.0.0.1] [--start-delay 8] [--exe 路径]
-    python net_smoke.py --spectator            # M14 观战
-    python net_smoke.py --drop-at 15           # M11 断线重连
+    python net_smoke.py --spectator                # M14 观战
+    python net_smoke.py --drop-at 50               # M11 客户端掉线
+    python net_smoke.py --host-drop-at 50          # M11 房主掉线（权威世界保留）
 
 退出码：
     0 = 双端一致且判定通过；1 = 不一致 / 超时 / 异常；2 = 前置条件不满足
@@ -208,12 +212,24 @@ def main():
                     help="M14：客户端以观战身份加入（不生成可操作角色）")
     ap.add_argument("--drop-at", type=float, default=0,
                     help="M11：客户端在第 N 秒模拟一次意外掉线并验证自动重连（0=不触发）")
+    ap.add_argument("--host-drop-at", type=float, default=0,
+                    help="M11：房主在第 N 秒模拟一次意外掉线（权威世界保留、不拆世界）")
     args = ap.parse_args()
 
-    if args.spectator and args.drop_at > 0:
-        print("[错误] --spectator 与 --drop-at 不能同时使用（观战者不参与 M11 重连路径）")
+    if args.spectator and (args.drop_at > 0 or args.host_drop_at > 0):
+        print("[错误] --spectator 与 --drop-at / --host-drop-at 不能同时使用（观战者不参与 M11 重连路径）")
         return 2
-    mode = "观战(M14)" if args.spectator else ("断线重连(M11)" if args.drop_at > 0 else "普通联机")
+    if args.drop_at > 0 and args.host_drop_at > 0:
+        print("[错误] --drop-at 与 --host-drop-at 不能同时使用（M11 两条分支需分别验证）")
+        return 2
+    if args.spectator:
+        mode = "观战(M14)"
+    elif args.drop_at > 0:
+        mode = "断线重连·客户端掉线(M11)"
+    elif args.host_drop_at > 0:
+        mode = "断线重连·房主掉线(M11)"
+    else:
+        mode = "普通联机"
 
     exe = args.exe
     if not os.path.exists(exe):
@@ -244,12 +260,16 @@ def main():
     if args.spectator:
         print("  观战   客户端以观战身份加入，自身玩家对象应由房主回收")
     if args.drop_at > 0:
-        print("  掉线   客户端在第 %.0fs 模拟意外掉线，随后验证自动重连" % args.drop_at)
+        print("  掉线   客户端在第 %.0fs 模拟意外掉线（先拆本地镜像，重连后重建）" % args.drop_at)
+    if args.host_drop_at > 0:
+        print("  掉线   房主在第 %.0fs 模拟意外掉线（服务端仍在，权威世界保留不拆）" % args.host_drop_at)
     print("=" * 68)
 
     # 1) 房主
-    host = launch(exe, ["-batchmode", "-nographics", "-netHost",
-                        "-smokeSeconds", str(args.seconds)], host_log)
+    host_args = ["-batchmode", "-nographics", "-netHost", "-smokeSeconds", str(args.seconds)]
+    if args.host_drop_at > 0:
+        host_args += ["-netHostDropAt", str(args.host_drop_at)]
+    host = launch(exe, host_args, host_log)
     if host is None:
         return 2
     print("[1/3] 房主已启动，等待服务端就绪（最多 %ds）…" % args.start_delay)
@@ -301,18 +321,24 @@ def main():
         rows.append(("自身角色已回收", host_data.get("自身角色已回收", "-"),
                      client_data.get("自身角色已回收", "?")))
 
-    # M11 断线重连：掉线前后各采一次样，比对进度是否回退
-    if args.drop_at > 0:
+    # M11 断线重连：掉线前 / 掉线期间 / 重连后各采一次样，比对进度是否回退
+    if args.drop_at > 0 or args.host_drop_at > 0:
+        # 掉线发生在哪一端，指标就从哪一端取；另一端显示 "-"
+        d, o = (host_data, "-") if args.host_drop_at > 0 else (client_data, "-")
         rows += [
-            ("断线时刻", host_data.get("断线时刻", "-"), client_data.get("断线时刻", "?")),
-            ("重连完成", host_data.get("重连完成", "-"), client_data.get("重连完成", "?")),
-            ("重连耗时", host_data.get("重连耗时", "-"), client_data.get("重连耗时", "?")),
-            ("断线前波次", "-", client_data.get("断线前波次", "?")),
-            ("重连后波次", "-", client_data.get("重连后波次", "?")),
-            ("断线前等级", "-", client_data.get("断线前等级", "?")),
-            ("重连后等级", "-", client_data.get("重连后等级", "?")),
-            ("断线前击杀", "-", client_data.get("断线前击杀", "?")),
-            ("重连后击杀", "-", client_data.get("重连后击杀", "?")),
+            ("断线时刻", d.get("断线时刻", "?"), o),
+            ("重连完成", d.get("重连完成", "?"), o),
+            ("重连耗时", d.get("重连耗时", "?"), o),
+            ("断线前波次", d.get("断线前波次", "?"), o),
+            ("断线期间波次", d.get("断线期间波次", "?"), o),
+            ("断线期间敌人", d.get("断线期间敌人", "?"), o),
+            ("断线期间击杀", d.get("断线期间击杀", "?"), o),
+            ("断线期间世界存活", d.get("断线期间世界存活", "?"), o),
+            ("重连后波次", d.get("重连后波次", "?"), o),
+            ("断线前等级", d.get("断线前等级", "?"), o),
+            ("重连后等级", d.get("重连后等级", "?"), o),
+            ("断线前击杀", d.get("断线前击杀", "?"), o),
+            ("重连后击杀", d.get("重连后击杀", "?"), o),
             ("对端掉线", host_data.get("对端掉线", "?"), "-"),
             ("对端重连", host_data.get("对端重连", "?"), "-"),
         ]
@@ -383,13 +409,18 @@ def main():
     # —— M11 断线重连专项判定 ——
     # 三层证据缺一不可：客户端自述重连成功 + 进度没回退 + 房主侧真的观测到「2→1→2」。
     # 只信客户端自述会被"根本没掉线也算通过"糊弄过去；只看房主则无法确认进度重放。
-    if args.drop_at > 0:
-        if client_data.get("重连完成") != "是":
-            problems.append("M11：客户端在模拟掉线后未重连成功（%s）" % client_data.get("重连完成"))
+    if args.drop_at > 0 or args.host_drop_at > 0:
+        # 掉线端 / 对端：房主掉线时掉线端是房主，反之是客户端
+        d = host_data if args.host_drop_at > 0 else client_data
+        who = "房主" if args.host_drop_at > 0 else "客户端"
 
-        pre_w, post_w = as_int(client_data, "断线前波次"), as_int(client_data, "重连后波次")
-        pre_l, post_l = as_int(client_data, "断线前等级"), as_int(client_data, "重连后等级")
-        pre_k, post_k = as_int(client_data, "断线前击杀"), as_int(client_data, "重连后击杀")
+        if d.get("重连完成") != "是":
+            problems.append("M11：%s在模拟掉线后未重连成功（%s）" % (who, d.get("重连完成")))
+
+        pre_w, post_w = as_int(d, "断线前波次"), as_int(d, "重连后波次")
+        pre_l, post_l = as_int(d, "断线前等级"), as_int(d, "重连后等级")
+        pre_k, post_k = as_int(d, "断线前击杀"), as_int(d, "重连后击杀")
+        mid_w = as_int(d, "断线期间波次")
 
         if pre_w < 0 or post_w < 0:
             problems.append("M11：掉线前后波次采样缺失（前 %d / 后 %d）" % (pre_w, post_w))
@@ -403,18 +434,41 @@ def main():
         elif pre_l <= 1:
             # 区分力守卫：掉线时才 1 级的话，"重连后 >= 断线前" 会平凡成立，
             # 进度重放失败也能蒙混过关（实测就吃过这个亏）。故直接判为无效样本。
-            problems.append("M11：断线时等级仅为 %d，进度重放判据无区分力——请调大 --drop-at 让客户端先升几级"
-                            % pre_l)
+            problems.append("M11：断线时等级仅为 %d，进度重放判据无区分力——请调大 --%s 先升几级"
+                            % (pre_l, "host-drop-at" if args.host_drop_at > 0 else "drop-at"))
 
         if pre_k < 0 or post_k < 0:
             problems.append("M11：掉线前后击杀采样缺失（前 %d / 后 %d）" % (pre_k, post_k))
         elif post_k < pre_k:
             problems.append("M11：重连后击杀 %d 低于断线前 %d——世界状态回退" % (post_k, pre_k))
 
-        if host_data.get("对端掉线") != "是":
-            problems.append("M11：房主未观测到客户端掉线（玩家数从未 2→1）")
-        if host_data.get("对端重连") != "是":
-            problems.append("M11：房主未观测到客户端重连（玩家数未回到 2）")
+        if args.host_drop_at > 0:
+            # 房主分支的核心判据：权威世界必须保留（不调 TeardownWorld）。
+            # 判据用「EnemyManager 是否仍在」，**不能**用「场上敌人是否 > 0」——
+            # 房主本地客户端断开时 Fish-Net 会清空本地网络视图（NetEnemy 被销毁），
+            # 敌人数归零是预期行为，与服务端的权威世界是否存活无关。
+            # 一旦误走 TeardownWorld：EnemyManager 被销毁、波次重置回 1、重连后等级也会掉回 1。
+            if d.get("断线期间世界存活") != "是":
+                problems.append("M11：房主掉线期间权威世界管理器已消失——世界被拆掉了（房主分支本不该拆）")
+            if mid_w < 0:
+                problems.append("M11：掉线期间波次采样缺失（%d）" % mid_w)
+            elif mid_w < pre_w:
+                problems.append("M11：房主掉线期间波次 %d 低于断线前 %d——权威世界回退" % (mid_w, pre_w))
+            if 0 <= as_int(d, "断线期间击杀") < pre_k:
+                problems.append("M11：房主掉线期间击杀 %d 低于断线前 %d——权威世界回退"
+                                % (as_int(d, "断线期间击杀"), pre_k))
+            # 对端（客户端）挂在同一个服务端上，房主本地客户端掉线不应波及它
+            if client_data.get("会话角色") != "客户端":
+                problems.append("M11：房主掉线后对端客户端不再是「客户端」（%s）——服务端疑似一并停了"
+                                % client_data.get("会话角色"))
+            if as_int(client_data, "同步击杀") <= 0:
+                problems.append("M11：房主掉线后对端客户端同步击杀为 %d——对端被波及"
+                                % as_int(client_data, "同步击杀"))
+        else:
+            if host_data.get("对端掉线") != "是":
+                problems.append("M11：房主未观测到客户端掉线（玩家数从未 2→1）")
+            if host_data.get("对端重连") != "是":
+                problems.append("M11：房主未观测到客户端重连（玩家数未回到 2）")
 
     h_exc = count_exceptions(host_log)
     c_exc = count_exceptions(client_log)
@@ -439,6 +493,8 @@ def main():
         print("结论：通过 —— 观战者自身角色已被房主回收，且仍能收到房主权威世界同步")
     elif args.drop_at > 0:
         print("结论：通过 —— 客户端掉线后自动重连成功，波次/等级/击杀进度均未回退")
+    elif args.host_drop_at > 0:
+        print("结论：通过 —— 房主掉线后自动重连成功，权威世界全程保留（敌人/波次未归零）且对端未受波及")
     else:
         print("结论：通过 —— 双端玩家数/波次/击杀一致，房主权威同步链路工作正常")
     print("-" * 48)

@@ -60,6 +60,23 @@ namespace StarPixel.Dev
         private int _preWave = -1, _preLevel = -1, _preKills = -1;
         private int _postWave = -1, _postLevel = -1, _postKills = -1;
 
+        /// <summary>
+        /// M11：掉线**期间**的采样（重连就绪之前）。
+        /// 这是区分房主分支与客户端分支的关键证据——房主掉线时权威世界保留不拆，
+        /// 断线期间场上敌人/波次应当照常存在并推进；客户端掉线时本地镜像已被拆掉，两者都会归零。
+        /// </summary>
+        private bool _midSampled;
+        private int _midWave = -1, _midEnemies = -1, _midKills = -1;
+
+        /// <summary>
+        /// M11：掉线期间「权威世界管理器」是否仍存活。
+        /// 为什么不能用「场上敌人」判断世界是否保留：房主本地客户端断开时，Fish-Net 会清空
+        /// **本地网络视图**（NetEnemy 对象被销毁），AliveEnemyCount 因此归零——但服务端仍在跑、
+        /// 权威世界并未被拆。真正能证明"没调用 TeardownWorld"的是 EnemyManager 是否还在：
+        /// TeardownWorld 会销毁并清空它，而房主分支本就不该拆世界。
+        /// </summary>
+        private bool _midWorldAlive;
+
         /// <summary>M18 / M14 观战：本端是否以观战身份加入（不生成可操作角色）。</summary>
         private bool _spectator;
         private bool _ownerAliveNow;
@@ -184,11 +201,23 @@ namespace StarPixel.Dev
                 _preLevel = AuthoritativeLevel();
                 _preKills = SyncedKills();
 #if FISHNET_ENABLED
-                if (!StarPixel.Net.NetSession.IsHost)
-                    (StarPixel.Net.NetBackend.Instance as StarPixel.Net.FishNetBackend)?.SimulateDrop();
+                // 房主与客户端都走同一入口，分支由后端按 _intentHost 区分（见 GameBuilder 的注释）
+                (StarPixel.Net.NetBackend.Instance as StarPixel.Net.FishNetBackend)?.SimulateDrop();
 #endif
                 Debug.Log("[SMOKE] 模拟掉线  " + _t.ToString("F1") + "s（波次 " + _preWave +
                           " / 等级 " + _preLevel + " / 击杀 " + _preKills + "）");
+            }
+
+            // M11：掉线 1s 后、且尚未重连时采样一次，用于判断「掉线期间世界是否保留」
+            if (_dropped && !_reconnected && !_midSampled && _t >= _dropTime + 1.0f)
+            {
+                _midSampled = true;
+                _midWave = SyncedWave();
+                _midEnemies = StarPixel.Combat.CombatTargets.AliveEnemyCount;
+                _midKills = SyncedKills();
+                _midWorldAlive = EnemyManager.Instance != null;
+                Debug.Log("[SMOKE] 掉线期间采样  波次 " + _midWave + " / 场上敌人 " + _midEnemies +
+                          " / 击杀 " + _midKills + " / 权威世界存活=" + (_midWorldAlive ? "是" : "否"));
             }
 
             // M11：重连就绪 2s 后再采样——此时世界已重建、玩家对象已重新生成并回放完进度
@@ -408,6 +437,10 @@ namespace StarPixel.Dev
                 Debug.Log("[SMOKE] 断线前波次  " + _preWave);
                 Debug.Log("[SMOKE] 断线前等级  " + _preLevel);
                 Debug.Log("[SMOKE] 断线前击杀  " + _preKills);
+                Debug.Log("[SMOKE] 断线期间波次  " + _midWave);
+                Debug.Log("[SMOKE] 断线期间敌人  " + _midEnemies);
+                Debug.Log("[SMOKE] 断线期间击杀  " + _midKills);
+                Debug.Log("[SMOKE] 断线期间世界存活  " + (_midWorldAlive ? "是" : "否"));
                 Debug.Log("[SMOKE] 重连完成    " + (_reconnected ? "是" : "否"));
                 Debug.Log("[SMOKE] 重连耗时    " +
                           (_reconnected ? (_reconnectTime - _dropTime).ToString("F1") + "s" : "-"));

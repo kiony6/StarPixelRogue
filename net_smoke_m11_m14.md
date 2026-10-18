@@ -8,12 +8,23 @@
 | 入口 | 位置 | 说明 |
 | --- | --- | --- |
 | `-netSpectator` | `GameBuilder.StartNetSmoke` | 在 `backend.StartClient()` **之前**调 `NetSession.SetSpectator(true)`。必须在连接前置位——Fish-Net 的 PlayerSpawner 会在连接就绪时立刻生成玩家对象，事后置位来不及（只能走「先生成再回收」） |
-| `-netDropAt N` | `GameBuilder` → `SmokeTest.StartNet(seconds, dropAt)` | 客户端跑到第 N 秒主动模拟一次意外掉线 |
-| `FishNetBackend.SimulateDrop()` | 后端 | 只停本地客户端且**不置** `_intentionalStop`，从而走真实 M11 路径：`Stopped → TeardownWorld → NetReconnect → RetryLastConnection → Ready → Build` |
-| `SmokeTest` 采样 | 采集器 | 掉线前 / 重连后各采一次波次·等级·击杀；房主侧记录玩家数「2→1→2」；观战侧记录自身玩家对象是否被回收 |
+| `-netDropAt N` | `GameBuilder` → `SmokeTest.StartNet(seconds, dropAt)` | **客户端**跑到第 N 秒主动模拟一次意外掉线（M11 客户端分支） |
+| `-netHostDropAt N` | 同上 | **房主**跑到第 N 秒主动模拟一次意外掉线（M11 房主分支） |
+| `FishNetBackend.SimulateDrop()` | 后端 | 只停本地客户端且**不置** `_intentionalStop`，从而走真实 M11 路径 |
+| `SmokeTest` 采样 | 采集器 | 掉线前 / **掉线期间** / 重连后各采一次；房主侧记录玩家数「2→1→2」；观战侧记录自身玩家对象是否被回收 |
 
 > 为什么不能用现成的 `Stop()`：它表示「主动离开」，会置 `intentionalStop` 并退订连接状态事件，
 > 重连分支根本不会进入——那样测的是「退出房间」，不是 M11。
+
+### M11 的两条分支（FishNetBackend.OnClientConnectionState）
+
+```
+房主掉线   → 服务端仍在运行、权威世界保留不拆，仅重连本地客户端
+             （NetReconnect.OnReconnectReady 里 if (!_wasHost) Build() —— 房主不重建）
+客户端掉线 → 先 TeardownWorld 拆本地镜像，重连成功后由 Ready 重建同一局
+```
+
+两者必须用不同参数分别驱动，否则只能测到其中一条。
 
 ## 二、判据设计
 
@@ -25,12 +36,36 @@
 2. 仍能收到房主权威世界同步：同步波次 ≥1、同步击杀 >0（观战者不参战，靠 SyncVar 观察对局）。
 3. 玩家数期望相应放宽为 ≥1。
 
-### M11 断线重连（三层证据，缺一不可）
+### M11 断线重连
+
+**客户端分支**（`--drop-at N`）——三层证据，缺一不可：
+
 1. 客户端自述 `重连完成 == 是`；
 2. 掉线前后 **波次 / 等级 / 击杀** 三项进度均未回退（证明世界续上 + 进度快照真的重放了）；
 3. 房主侧观测到玩家数 **2 → 1 → 2**（不依赖对端自述）。
 
 只看 1 会被「根本没掉线也算通过」糊弄；只看 3 则无法确认进度重放。
+
+**房主分支**（`--host-drop-at N`）——核心是「权威世界没有被拆」：
+
+1. `重连完成 == 是`；
+2. **掉线期间世界存活 == 是**（`EnemyManager.Instance` 仍在 → 没有走 `TeardownWorld`）；
+3. 掉线期间 **波次 / 击杀** 未回退（服务端仍在推进）；
+4. 对端客户端不受波及：仍是「客户端」角色且同步击杀 > 0。
+
+> **判据踩坑**：最初我用「掉线期间场上敌人 > 0」判断世界是否保留，结果误报失败。
+> 房主本地客户端断开时，Fish-Net 会清空**本地网络视图**（NetEnemy 对象被销毁），
+> `AliveEnemyCount` 归零是**预期行为**，与服务端权威世界是否存活无关。
+> 真正能证明「没调用 TeardownWorld」的是权威管理器 `EnemyManager` 是否还在。
+
+### 两条分支的实测对照（判据有区分力）
+
+| 掉线期间指标 | 房主掉线（世界保留） | 客户端掉线（本地镜像被拆） |
+| --- | --- | --- |
+| 世界存活 | **是** | 否 |
+| 波次 | 4（= 断线前 4，未回退） | **0**（本地世界状态对象已随镜像销毁） |
+| 场上敌人 | 0（本地网络视图被清空，属预期） | 0 |
+| 重连后等级 | 2 → 3 | 3 → 5 |
 
 ## 三、发现并修复的真实缺陷（缺陷 9，M11）
 
@@ -77,10 +112,9 @@
 | --- | --- |
 | 普通联机 60s（回归） | 波次 7 / 5，击杀 108 / 73，Boss 是 / 是 |
 | 观战 60s（M14） | 会话角色「观战」，自身角色已回收 **是**，同步波次 7 / 6，击杀 118 / 84 |
-| 断线重连 90s（M11） | 掉线 @50.0s，重连耗时 1.6s，波次 6→7，**等级 6→6**，击杀 105→113，房主观测对端掉线 / 重连 **是 / 是** |
+| 客户端掉线 90s（M11） | 掉线 @50s，重连 1.5s，波次 6→6，**等级 3→5**，击杀 84→104，房主观测对端掉线 / 重连 **是 / 是** |
+| 房主掉线 90s（M11） | 掉线 @40s，重连 1.5s，**掉线期间世界存活 是**，波次 4→4→4，击杀 68→72，等级 2→3，对端未受波及 |
 | 单机回归 45s | 击杀 72，波次 4，等级 7，EXIT=0 |
-
-M11 那轮等级为 6，判据区分力充足（若重放失败会退回 1）。
 
 ## 六、命令
 
@@ -91,8 +125,11 @@ python net_smoke.py --seconds 60 --start-delay 10 --exe StarPixelRogue/Build/Smo
 # M14 观战
 python net_smoke.py --spectator --seconds 60 --start-delay 10 --exe StarPixelRogue/Build/SmokeNet/StarPixelRogue.exe
 
-# M11 断线重连（建议 --drop-at 足够大，让客户端先升到 3 级以上，判据才有区分力）
+# M11 客户端掉线（建议 --drop-at 足够大，让客户端先升到 3 级以上，判据才有区分力）
 python net_smoke.py --drop-at 50 --seconds 90 --start-delay 10 --exe StarPixelRogue/Build/SmokeNet/StarPixelRogue.exe
+
+# M11 房主掉线（权威世界保留、不拆世界）
+python net_smoke.py --host-drop-at 40 --seconds 90 --start-delay 10 --exe StarPixelRogue/Build/SmokeNet/StarPixelRogue.exe
 ```
 
 前置：先构建联机包

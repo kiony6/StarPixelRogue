@@ -190,9 +190,13 @@ namespace StarPixel
             bool spectator = HasArg("-netSpectator");
             Net.NetSession.SetSpectator(spectator);
 
-            // M11 断线重连实测：>0 时客户端跑到该秒数主动模拟一次意外掉线，随后验证自动重连。
-            // 只有客户端需要——房主掉线是另一条分支（保留权威世界不拆），本轮先测纯客户端路径。
-            float dropAt = spectator ? 0f : ArgFloat("-netDropAt", 0f);
+            // M11 断线重连实测：>0 时本机跑到该秒数主动模拟一次意外掉线，随后验证自动重连。
+            // 房主与客户端是**两条不同的分支**（见 FishNetBackend.OnClientConnectionState）：
+            //   房主掉线 → 服务端仍运行、权威世界保留不拆，只重连本地客户端；
+            //   客户端掉线 → 先 TeardownWorld 拆本地镜像，重连成功后由 Ready 重建。
+            // 故用两个参数分别驱动，才能单独验证其中一条。
+            float dropAt = spectator ? 0f
+                : (host ? ArgFloat("-netHostDropAt", 0f) : ArgFloat("-netDropAt", 0f));
 
             bool built = false;
 
