@@ -1,0 +1,32 @@
+# Unity 自动生成目录（不入库）
+/Library/
+/Temp/
+/Obj/
+/Build/
+/Builds/
+/Logs/
+/UserSettings/
+/MemoryCaptures/
+
+# 包管理
+/UnityPackageManager/
+
+# Visual Studio / Rider / VS Code
+*.csproj
+*.unityproj
+*.sln
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+/.idea/
+.vscode/
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 本地敏感/临时
+*.local

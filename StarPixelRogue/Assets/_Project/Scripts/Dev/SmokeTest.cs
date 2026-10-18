@@ -1,0 +1,426 @@
+using StarPixel.Core;
+using StarPixel.Enemy;
+using StarPixel.Player;
+using StarPixel.UI;
+using UnityEngine;
+
+namespace StarPixel.Dev
+{
+    /// <summary>
+    /// 无头冒烟实测（M17）：仅当进程带 -smokeTest 命令行参数时，由 <c>GameBuilder</c> 创建。
+    ///
+    /// 存在的理由：本项目全部内容由 <c>GameBuilder</c> 在运行时构建，正常启动要先过合规门、
+    /// 再由人工点主菜单才能开局——无人值守环境下根本跑不起来。本组件让"真实跑一局"变成一条命令。
+    ///
+    /// 行为：
+    /// - 经 <see cref="PlayerInput.Override"/> 注入「远离最近敌人」的自动驾驶（不改动任何玩法代码）；
+    /// - 采集关键运行状态：击杀数 / 波次 / 等级 / 是否遇到 Boss / 存活时长 / 是否阵亡；
+    /// - 到时或玩家阵亡后以 [SMOKE] 前缀输出结论，并 Application.Quit(0=通过 / 1=失败)。
+    ///
+    /// 正常构建不带该参数时，本组件不会被创建，对游戏零影响。
+    /// </summary>
+    public class SmokeTest : MonoBehaviour
+    {
+        private float _limit = 60f;
+        private float _t;
+        private int _kills;
+        private int _maxLevel = 1;
+        private bool _bossSeen;
+        private bool _died;
+        private float _deathAt = -1f;
+        private bool _done;
+        private int _cardsPicked;
+
+        /// <summary>
+        /// M18：联机双开模式。单机冒烟里「玩家阵亡即结束」是对的（要采集存活时长），
+        /// 但联机下若房主 6 秒就被围死退出，另一端根本来不及连上（本次实测正是如此：
+        /// 房主 6.3s 退出，客户端 10s 才启动，全程无服务端可连）。故联机模式改为：
+        /// 阵亡只记录、不终止，并持续保活，让两端都能跑满预定时长再做交叉核对。
+        /// </summary>
+        private bool _netMode;
+
+        /// <summary>
+        /// M18：联机期间见过的最大玩家数。
+        /// 为什么不能只看收尾瞬时值：双开时两端时长不同步（客户端 50s、房主 60s），
+        /// 短的那端会先退出并断线，房主收尾时注册表已掉回 1——实测里就出现过
+        /// 「客户端看到 2、房主看到 1」的假失败。峰值才是"客户端是否成功加入"的判据。
+        /// </summary>
+        private int _maxPlayers;
+
+        /// <summary>
+        /// M18 / M11 断线重连：>0 表示本机跑到该秒数时主动模拟一次「意外掉线」，
+        /// 随后验证 M11 自动重连是否把波次与玩家进度接回。0 = 不触发。
+        /// </summary>
+        private float _dropAt;
+        private bool _dropped;
+        private float _dropTime;
+        private bool _reconnected;
+        private float _reconnectTime;
+        private float _postSampleAt = -1f;
+        private int _preWave = -1, _preLevel = -1, _preKills = -1;
+        private int _postWave = -1, _postLevel = -1, _postKills = -1;
+
+        /// <summary>M18 / M14 观战：本端是否以观战身份加入（不生成可操作角色）。</summary>
+        private bool _spectator;
+        private bool _ownerAliveNow;
+
+        /// <summary>
+        /// M18 / M11：房主视角下是否观测到「玩家数 2 → 1 → 2」。
+        /// 这是房主侧对"对端掉线又重连"的直接证据——不依赖对端自述。
+        /// </summary>
+        private bool _peerDropSeen;
+        private bool _peerRejoinSeen;
+
+        /// <summary>由 GameBuilder 调用，开始一轮实测。</summary>
+        public static void Start(float seconds)
+        {
+            var go = new GameObject("SmokeTest");
+            var st = go.AddComponent<SmokeTest>();
+            st._limit = Mathf.Max(5f, seconds);
+            st.Subscribe();
+            Debug.Log("[SMOKE] 冒烟实测启动，时长上限 " + st._limit + "s");
+        }
+
+        /// <summary>
+        /// M18：联机双开实测入口。与 <see cref="Start"/> 的区别是阵亡不终止 + 本地玩家保活，
+        /// 保证房主能撑满时长等待客户端加入（详见 <see cref="_netMode"/> 注释）。
+        /// </summary>
+        /// <param name="dropAt">M11：>0 时在该秒数模拟一次意外掉线并验证自动重连。</param>
+        public static void StartNet(float seconds, float dropAt = 0f)
+        {
+            var go = new GameObject("SmokeTest");
+            var st = go.AddComponent<SmokeTest>();
+            st._limit = Mathf.Max(5f, seconds);
+            st._netMode = true;
+            st._dropAt = dropAt;
+            st._spectator = StarPixel.Net.NetSession.Spectator;
+            st.Subscribe();
+            st.SubscribeNet();
+            Debug.Log("[SMOKE] 冒烟实测启动（联机" + (st._spectator ? "·观战" : "") +
+                      (dropAt > 0f ? "·掉线@" + dropAt + "s" : "") + "），时长上限 " + st._limit + "s");
+        }
+
+        /// <summary>M11：订阅后端 Ready，用于判定「重连是否已就绪」。</summary>
+        private void SubscribeNet()
+        {
+#if FISHNET_ENABLED
+            var backend = StarPixel.Net.NetBackend.Instance;
+            if (backend != null) backend.Ready += OnBackendReady;
+#endif
+        }
+
+        private void UnsubscribeNet()
+        {
+#if FISHNET_ENABLED
+            var backend = StarPixel.Net.NetBackend.Instance;
+            if (backend != null) backend.Ready -= OnBackendReady;
+#endif
+        }
+
+        /// <summary>
+        /// M11：掉线后再次收到 Ready 即视为重连成功。
+        /// 注意此刻 <c>NetReconnect.OnReconnectReady</c> 的 Build() 可能还没跑完、玩家对象也还没重新生成，
+        /// 因此不在这里采样，只记时刻，实际采样延后 2s（见 Update 中的 _postSampleAt）。
+        /// </summary>
+        private void OnBackendReady()
+        {
+            if (!_dropped || _reconnected) return;
+            _reconnected = true;
+            _reconnectTime = _t;
+            _postSampleAt = _t + 2.5f;
+            Debug.Log("[SMOKE] 重连就绪  " + _t.ToString("F1") + "s（掉线持续 " +
+                      (_t - _dropTime).ToString("F1") + "s）");
+        }
+
+        /// <summary>
+        /// M18：连接始终未就绪时也要产出一份完整的 [SMOKE] 报告。
+        /// 为什么需要：此前客户端连不上房主时 backend.Ready 永不触发，既不建世界也不打印，
+        /// 只能空转到超时，net_smoke.py 拿不到任何指标、只能报「无法核对」，
+        /// 而空转期间又把每帧告警刷成 200MB 日志。这里改为直接输出全零报告并退出，
+        /// 让脚本能明确判定「未连上」而不是「结果缺失」。
+        /// </summary>
+        public static void ReportUnready(string reason)
+        {
+            var go = new GameObject("SmokeTest");
+            var st = go.AddComponent<SmokeTest>();
+            st._netMode = true;
+            st.Subscribe();
+            Debug.Log("[SMOKE] 冒烟实测启动（联机），时长上限 0s");
+            Debug.LogError("[SMOKE] 连接未就绪：" + reason);
+            st.Finish();
+        }
+
+        private void Subscribe()
+        {
+            EventBus.OnEnemyKilled += _ => _kills++;
+            EventBus.OnLevelUp += lv => { if (lv > _maxLevel) _maxLevel = lv; };
+            EventBus.OnBossSpawned += (_, __) => _bossSeen = true;
+            EventBus.OnGameOver += () =>
+            {
+                if (_died) return;
+                _died = true;
+                _deathAt = _t;
+                Debug.Log("[SMOKE] 玩家阵亡，存活 " + _t.ToString("F1") + "s");
+            };
+        }
+
+        void OnDestroy()
+        {
+            PlayerInput.Override = null;
+            UnsubscribeNet();
+        }
+
+        void Update()
+        {
+            if (_done) return;
+            _t += Time.unscaledDeltaTime;   // 选卡暂停时时间缩放为 0，用未缩放时间才不会停摆
+
+            // M11：到点模拟一次意外掉线（走真实自动重连路径，不走 Stop() 的"主动离开"分支）
+            if (_dropAt > 0f && !_dropped && _t >= _dropAt)
+            {
+                _dropped = true;
+                _dropTime = _t;
+                _preWave = SyncedWave();
+                _preLevel = AuthoritativeLevel();
+                _preKills = SyncedKills();
+#if FISHNET_ENABLED
+                if (!StarPixel.Net.NetSession.IsHost)
+                    (StarPixel.Net.NetBackend.Instance as StarPixel.Net.FishNetBackend)?.SimulateDrop();
+#endif
+                Debug.Log("[SMOKE] 模拟掉线  " + _t.ToString("F1") + "s（波次 " + _preWave +
+                          " / 等级 " + _preLevel + " / 击杀 " + _preKills + "）");
+            }
+
+            // M11：重连就绪 2s 后再采样——此时世界已重建、玩家对象已重新生成并回放完进度
+            if (_reconnected && _postWave < 0 && _t >= _postSampleAt)
+            {
+                _postWave = SyncedWave();
+                _postLevel = AuthoritativeLevel();
+                _postKills = SyncedKills();
+                Debug.Log("[SMOKE] 重连后采样  波次 " + _postWave + " / 等级 " + _postLevel +
+                          " / 击杀 " + _postKills);
+            }
+
+            // M17：升级选卡会把 timeScale 归零等待玩家点击，无头环境无人点击将永远卡住——代玩家选第一张
+            if (Time.timeScale <= 0f && !_died)
+            {
+                var lum = LevelUpManager.Instance;
+                if (lum != null && lum.AutoChooseFirst()) _cardsPicked++;
+            }
+
+            DrivePlayer();
+
+            var pc = PlayerController.Instance;
+            if (pc != null && pc.level > _maxLevel) _maxLevel = pc.level;
+
+            // M18：联机模式保活。房主一旦阵亡，敌人不再被击杀、波次停止推进，
+            // 两端同步数值会同时冻结，交叉核对就失去意义——故持续把血补满。
+            if (_netMode && pc != null && pc.damageable != null && pc.damageable.maxHp > 0f)
+            {
+                if (pc.damageable.currentHp < pc.damageable.maxHp * 0.6f)
+                    pc.Heal(pc.damageable.maxHp);
+            }
+#if FISHNET_ENABLED
+            // 房主权威侧顺便给所有玩家保活：血量由房主结算，客户端自己补血无效，
+            // 放任不管的话客户端角色会在中途阵亡（实测 103.9s 阵亡），后续同步样本失真。
+            if (_netMode && StarPixel.Net.NetSession.IsHost)
+            {
+                StarPixel.Net.NetPlayerRegistry.ForEachAlive(p =>
+                {
+                    var d = p != null ? p.Damageable : null;
+                    var c = p != null ? p.Controller : null;
+                    if (d == null || c == null || d.maxHp <= 0f) return;
+                    if (d.currentHp < d.maxHp * 0.6f) c.Heal(d.maxHp);
+                });
+            }
+#endif
+
+#if FISHNET_ENABLED
+            // 峰值玩家数：收尾瞬时值会因对端先退出而失真，详见 _maxPlayers 注释
+            int players = StarPixel.Net.NetPlayerRegistry.Count;
+            if (players > _maxPlayers) _maxPlayers = players;
+
+            // M11：房主视角的「2 → 1 → 2」观测（对端掉线又重连的直接证据）
+            if (_maxPlayers >= 2 && players < 2) _peerDropSeen = true;
+            else if (_peerDropSeen && players >= 2) _peerRejoinSeen = true;
+
+            // M14：观战者是否仍持有一个属于自己的（IsOwner）玩家对象。
+            // 观战链路正确时，房主应在收到 RequestSpectatorServerRpc 后把该对象反生成，这里应为 false。
+            if (_spectator)
+            {
+                bool ownerAlive = false;
+                StarPixel.Net.NetPlayerRegistry.ForEachAlive(p =>
+                {
+                    if (p != null && p.IsLocalOwned) ownerAlive = true;
+                });
+                _ownerAliveNow = ownerAlive;
+            }
+#endif
+
+            // 联机模式下阵亡只记录不终止（否则房主早退会让客户端永远连不上）
+            if (_t >= _limit || (_died && !_netMode)) Finish();
+        }
+
+        /// <summary>
+        /// 自动驾驶：与最近的敌人保持「能打到、但不被打到」的距离带（武器射程约 7）。
+        /// 太近后撤、太远靠近、带内站桩输出。
+        ///
+        /// 初版写成「无脑远离最近敌人」，实测 45s 仅 7 杀、卡在 Wave 1、一次没升级——
+        /// 玩家全程逃窜导致武器够不着。那是测试脚本自身的缺陷，不是游戏问题，故改为距离带策略。
+        /// </summary>
+        private void DrivePlayer()
+        {
+            var pc = PlayerController.Instance;
+            if (pc == null) { PlayerInput.Override = null; return; }
+
+            Vector2 me = pc.transform.position;
+
+            // M18：改用统一索敌入口。此前读 EnemyManager.ActiveEnemies，而联机敌人是
+            // NetEnemy、根本不在那份列表里 → 判定为"没有敌人"→ 玩家全程站桩，
+            // 只能打死自己撞上来的怪（150s 实测仅 10 杀、卡在第 1 波）。
+            var nearest = StarPixel.Combat.CombatTargets.NearestAny(me);
+            if (nearest == null) { PlayerInput.Override = Vector2.zero; return; }
+
+            float dist = Vector2.Distance(me, nearest.position);
+
+            Vector2 toEnemy = (Vector2)nearest.position - me;
+            Vector2 away = -toEnemy;
+            Vector2 orbit = new Vector2(-toEnemy.y, toEnemy.x);   // 垂直方向：绕圈游走
+
+            if (dist < 4f)
+            {
+                // 太近：一边后撤一边绕圈，避免被贴脸围死
+                Vector2 mv = (away.sqrMagnitude > 0.0001f ? away.normalized : Vector2.zero)
+                           + (orbit.sqrMagnitude > 0.0001f ? orbit.normalized * 0.6f : Vector2.zero);
+                PlayerInput.Override = mv.sqrMagnitude > 0.0001f ? mv.normalized : Vector2.zero;
+            }
+            else if (dist > 6f)
+            {
+                // 太远：靠近（否则武器够不着，测试会退化成"干瞪眼"）
+                PlayerInput.Override = toEnemy.sqrMagnitude > 0.0001f ? toEnemy.normalized : Vector2.zero;
+            }
+            else
+            {
+                // 距离带内：持续绕圈走位。
+                // 注意不能站桩——第二版在带内站桩输出，结果 6.1s 就被围死，
+                // 那是测试脚本的缺陷，真人玩家会一直移动。
+                PlayerInput.Override = orbit.sqrMagnitude > 0.0001f ? orbit.normalized : Vector2.zero;
+            }
+        }
+
+        /// <summary>联机下读房主权威波次（两端口径一致）；单机回退本地 EnemyManager。</summary>
+        private int SyncedWave()
+        {
+#if FISHNET_ENABLED
+            var ws = StarPixel.Net.NetWorldState.Instance;
+            if (ws != null) return ws.Wave;
+#endif
+            var em = EnemyManager.Instance;
+            return em != null ? em.CurrentWave : 0;
+        }
+
+        private int SyncedKills()
+        {
+#if FISHNET_ENABLED
+            var ws = StarPixel.Net.NetWorldState.Instance;
+            if (ws != null) return ws.Kills;
+#endif
+            return _kills;
+        }
+
+        /// <summary>
+        /// 房主权威等级。
+        /// 注意不能读 <c>PlayerController.level</c>：客户端本地控制器不参与 XP 结算、恒为初始值，
+        /// 只有 NetPlayer 的等级 SyncVar 才是房主对该玩家的权威值。
+        /// </summary>
+        private int AuthoritativeLevel()
+        {
+#if FISHNET_ENABLED
+            // 联机下只认 NetPlayer 的等级 SyncVar。
+            // 绝不能回退到 PlayerController.level：它不参与 XP 结算、恒为初始值 1，
+            // 一旦本地玩家对象缺失就会静默返回 1，把「进度重放失败」伪装成「等级本来就是 1」
+            // （本次实测正是这样被假通过糊弄过去的）。
+            var lp = StarPixel.Net.NetPlayerRegistry.Local;
+            return lp != null ? lp.SyncedLevel : -1;
+#else
+            var pc = PlayerController.Instance;
+            return pc != null ? pc.level : -1;
+#endif
+        }
+
+        private void Finish()
+        {
+            _done = true;
+            PlayerInput.Override = null;
+
+            var em = EnemyManager.Instance;
+            int wave = em != null ? em.CurrentWave : 0;
+#if FISHNET_ENABLED
+            var ws = StarPixel.Net.NetWorldState.Instance;
+            // 联机下纯客户端没有 EnemyManager（波次由房主权威同步下来），
+            // 若沿用本地 Wave 会恒为 0，把一局成功的实测判成"未通过"——改用同步值。
+            if (_netMode && ws != null && wave <= 0) wave = ws.Wave;
+#endif
+            var pc = PlayerController.Instance;
+            int level = pc != null ? pc.level : 0;
+            // M18：联机下的敌人是 NetEnemy，不会进 EnemyManager.ActiveEnemies（那是单机 Enemy 的列表），
+            // 直接读它会恒为 0——实测里出现过「击杀 45、波次 3，却报场上敌人 0」的自相矛盾输出。
+            // 改用与 EnemyManager 波次推进同一个统一入口，两种模式口径一致。
+            int aliveEnemies = StarPixel.Combat.CombatTargets.AliveEnemyCount;
+
+            // 判定门槛刻意保守：只要"能刷怪、能打死怪、波次在推进"即视为核心循环成立。
+            // 等级/Boss 属于期望项（信息输出），不作为通过条件，避免把数值平衡问题误判为功能故障。
+            bool pass = _kills > 0 && wave >= 1;
+
+            // M14 观战：核心判据是"没有自己的可操作角色"——若房主没回收，说明观战 ServerRpc 链路断了
+            if (_spectator) pass = pass && !_ownerAliveNow;
+
+            // M11 断线重连：必须真的重连成功，且波次/等级/击杀三项进度没有回退
+            if (_dropAt > 0f)
+                pass = pass && _reconnected && _postWave >= _preWave
+                       && _postLevel >= _preLevel && _postKills >= _preKills;
+
+            Debug.Log("[SMOKE] ===== 实测结果 =====");
+            Debug.Log("[SMOKE] 时长      " + _t.ToString("F1") + "s");
+            Debug.Log("[SMOKE] 击杀      " + _kills);
+            Debug.Log("[SMOKE] 波次      " + wave);
+            Debug.Log("[SMOKE] 等级      " + level);
+            Debug.Log("[SMOKE] 场上敌人  " + aliveEnemies);
+            Debug.Log("[SMOKE] 升级选卡  " + _cardsPicked + " 次");
+#if FISHNET_ENABLED
+            Debug.Log("[SMOKE] 会话角色    " + (_spectator ? "观战"
+                : StarPixel.Net.NetSession.IsHost ? "房主"
+                : StarPixel.Net.NetSession.IsClient ? "客户端" : "单机"));
+            Debug.Log("[SMOKE] 网络玩家数  " + StarPixel.Net.NetPlayerRegistry.Count);
+            // 注意：键与值之间必须留 2 个以上空格——net_smoke.py 的 [SMOKE] 解析正则靠它切分
+            Debug.Log("[SMOKE] 网络玩家峰值  " + _maxPlayers);
+            Debug.Log("[SMOKE] 同步波次    " + (ws != null ? ws.Wave : -1));
+            Debug.Log("[SMOKE] 同步击杀    " + (ws != null ? ws.Kills : -1));
+            // M11：房主视角的掉线/重连观测（不依赖对端自述）
+            Debug.Log("[SMOKE] 对端掉线    " + (_peerDropSeen ? "是" : "否"));
+            Debug.Log("[SMOKE] 对端重连    " + (_peerRejoinSeen ? "是" : "否"));
+            // M14：观战者不该还留着自己的玩家对象
+            if (_spectator)
+                Debug.Log("[SMOKE] 自身角色已回收  " + (_ownerAliveNow ? "否" : "是"));
+            if (_dropAt > 0f)
+            {
+                Debug.Log("[SMOKE] 断线时刻    " + (_dropped ? _dropTime.ToString("F1") + "s" : "未触发"));
+                Debug.Log("[SMOKE] 断线前波次  " + _preWave);
+                Debug.Log("[SMOKE] 断线前等级  " + _preLevel);
+                Debug.Log("[SMOKE] 断线前击杀  " + _preKills);
+                Debug.Log("[SMOKE] 重连完成    " + (_reconnected ? "是" : "否"));
+                Debug.Log("[SMOKE] 重连耗时    " +
+                          (_reconnected ? (_reconnectTime - _dropTime).ToString("F1") + "s" : "-"));
+                Debug.Log("[SMOKE] 重连后波次  " + _postWave);
+                Debug.Log("[SMOKE] 重连后等级  " + _postLevel);
+                Debug.Log("[SMOKE] 重连后击杀  " + _postKills);
+            }
+#endif
+            Debug.Log("[SMOKE] 遇到Boss  " + (_bossSeen ? "是" : "否"));
+            Debug.Log("[SMOKE] 玩家阵亡  " + (_died ? "是（" + _deathAt.ToString("F1") + "s）" : "否"));
+            Debug.Log("[SMOKE] 结论      " + (pass ? "通过" : "未通过"));
+
+            Application.Quit(pass ? 0 : 1);
+        }
+    }
+}
