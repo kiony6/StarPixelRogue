@@ -1,0 +1,40 @@
+Star Pixel Surge - Rules on Protection of Children's Personal Information
+
+[Version] 2026.10
+These Rules supplement the Star Pixel Surge Privacy Policy and apply to users under the age of 14 (hereinafter "children"). Guardians should read these Rules carefully and decide whether to allow the child to use the Game.
+
+1. Children's Personal Information We Process
+The Game does not ask for name, school, contact details or other personally identifying information. While a child plays, we may process only:
+(a) anonymous gameplay data (statistics such as wave, playtime, kills and upgrade choices);
+(b) settings and record data generated locally on the device;
+(c) IP address and in-game state data necessary during an online session.
+
+None of the above is used to identify a child personally.
+
+2. How We Use and Protect Children's Personal Information
+(a) Anonymous statistics are used only for balance tuning and experience improvements. In the current version they are kept locally only and are not reported over the network.
+(b) Online data is used only for the duration of a match session and is deleted when the session ends.
+(c) We protect the above information through local storage and minimised collection. Should a breach unfortunately occur, we will notify guardians promptly as required by law.
+
+3. Youth Mode
+We provide a "Youth Mode": once enabled, daily playtime is limited (the current framework version caps cumulative play at 1 hour). When the limit is reached, the Game prompts the player and returns to the main menu. The release version will integrate with the real-name authentication system of the National Press and Publication Administration, so that minor status and playtime rules are determined by the official verification result.
+
+4. Rights of Guardians
+As a guardian, you may:
+(a) delete all local data of the Game through your device's application data management;
+(b) enable or disable Youth Mode in Settings;
+(c) contact us using the details in Article 8 if you have any question, comment or complaint about these Rules or our handling of children's personal information.
+
+5. What We Do Not Do
+We do not serve personalised commercial advertising to children; we do not build user profiles based on children's personal information; we do not share children's personal information with third parties (except where required by law).
+
+6. Third-Party Components
+The current version integrates no third-party advertising or analytics SDK. If a future version does, we will update these Rules beforehand and obtain the guardian's separate consent.
+
+7. Updates to These Rules
+When these Rules are updated, we will prompt you in-game to read and agree to them again.
+
+8. Contact
+E-mail: children-privacy@example.com (placeholder - replace with the real address before release)
+
+(This document is a template. It must be reviewed by legal counsel and all placeholders replaced before the official launch.)

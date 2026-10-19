@@ -1,0 +1,38 @@
+Star Pixel Surge - Terms of Service
+
+[Version] 2026.10
+[Effective] These Terms take effect when you tap "Agree and Continue". Minors should read them together with a guardian before deciding whether to agree.
+
+1. Scope
+These Terms are an agreement between you and Star Pixel Studio (hereinafter "we", "us") regarding the download, installation and use of the game Star Pixel Surge (hereinafter "the Game"). The Game includes its client, assets, game data and related services provided by us.
+
+2. Accounts and Login
+The current version does not require mandatory registration. If you choose to sign in with a third-party account (for example a channel account), that third party's own account rules apply. You are responsible for keeping your account credentials safe; losses caused by your own actions are borne by you.
+
+3. Game Rules
+(a) You may use the Game provided that you comply with these Terms and the in-game rules.
+(b) The Game offers both single-player and online play. In online play, please treat other players with respect and do not exploit bugs, cheats or scripts in a way that undermines fair play.
+(c) We may roll back benefits obtained through exploits and may restrict accounts confirmed to have cheated.
+
+4. Intellectual Property
+All copyrights, trademarks and other intellectual property rights in the Game belong to us or the respective right holders. Without permission you may not reverse engineer, decompile or disassemble the Game, nor use, modify or distribute the Game or its assets for commercial purposes.
+
+5. Service Changes and Termination
+(a) We may change or discontinue part of the service due to version updates or operational adjustments, and will endeavour to announce this in advance.
+(b) We may suspend or terminate the service to you if: you breach these Terms or applicable law; you undermine fair play; or a competent authority so requires.
+
+6. Disclaimer
+(a) The Game is provided "as is". To the maximum extent permitted by law, we do not warrant that the Game will be uninterrupted or error-free.
+(b) We are not liable for problems caused by force majeure, third-party network failures, or your own device or network environment.
+
+7. Protection of Minors
+We attach importance to the protection of minors. If you are under 18, please read these Terms together with a guardian, read the Rules on Protection of Children's Personal Information, and observe the time limits applied under Youth Mode.
+
+8. Dispute Resolution
+These Terms are governed by the laws of the People's Republic of China. Disputes arising from these Terms shall first be resolved through friendly negotiation; failing that, either party may bring an action before the people's court with jurisdiction at our place of domicile.
+
+9. Contact
+Support e-mail: support@example.com (placeholder - replace with the real address before release)
+Office hours: 10:00-18:00 on working days
+
+(This document is a template. It must be reviewed by legal counsel and all placeholders replaced before the official launch.)

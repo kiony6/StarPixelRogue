@@ -1,0 +1,44 @@
+Star Pixel Surge - Privacy Policy
+
+[Version] 2026.10.1
+We understand how important your personal information is to you. This Policy explains what we collect, how we use it and how we protect it. Please read it carefully before using the Game.
+
+1. Information We Collect
+The current version is primarily an offline single-player product with light online features. We follow the principle of "minimum necessity":
+
+(a) Gameplay data (anonymous): gameplay statistics such as wave, survival time, kill count, upgrade choices and settings distribution, used for balance tuning and experience improvements. This data contains no identity information.
+(b) Locally stored data: settings, run records, Youth Mode state and daily playtime, stored only on your device (see "Data Storage and Retention").
+(c) Information necessary for online play: when you actively create or join a room, we need to transmit your IP address and in-game position/state during the session in order to render multiple players on one screen. It is not retained after the session ends.
+(d) Crash and diagnostic logs: stack traces captured when the application crashes, used to fix defects.
+
+We do not collect: your contacts, SMS, call history, precise geo-location or biometric identifiers.
+
+2. How We Use Information
+To provide and maintain the game service; to keep online matches fair and secure; to improve balance and experience; to fix crashes and defects; and to fulfil legal obligations (such as playtime compliance for minors).
+
+3. Data Storage and Retention
+(a) Settings, records and playtime data are stored only in your device's application data directory by default and are not uploaded.
+(b) Cloud save (optional, off by default): you can enable it manually under "Settings - Cloud Save". Once enabled, your records and codex data (purely numeric values such as wave, survival time, kill count, level and discovered weapons/enemies/combos - no identity information whatsoever) are transmitted to our servers over HTTPS only, so that you can restore progress after changing device or reinstalling the game. Nothing is uploaded unless you actively enable it; if the network is unavailable the game automatically falls back to the local save and play is not affected.
+(c) Anonymous gameplay statistics are staged in a local log (Logs directory) and are reported over the network only after your separate consent (network reporting is not enabled in the current version).
+(d) Online session data is deleted when the session ends; crash logs are retained for no more than 90 days.
+
+4. Network Reporting and Your Choices
+With "anonymous statistics" on by default, only local logs are produced - nothing is uploaded automatically. If a future version enables network reporting, we will update this Policy and ask for your consent again before doing so. You can turn anonymous statistics off at any time under "Settings - Gameplay"; after that we stop recording new statistics (existing local logs can be viewed and deleted via "Export diagnostic log").
+Cloud save is entirely your choice: it is off by default, and is enabled only after you turn it on yourself and have agreed to this Policy. If the network is unavailable while it is on, the game automatically falls back to the local save and normal play is unaffected. After you turn cloud save off, we stop further uploads, and you may request deletion of data already stored in the cloud using the contact details in Article 9.
+
+5. Sharing with Third Parties
+We do not sell or rent your personal information to any third party, except where we have your explicit consent, or where required by law or by a judicial or competent authority.
+
+6. Your Rights
+You can erase all local data by deleting the application data (uninstalling the game). If you previously enabled cloud save, you can first turn it off to stop further uploads, and request deletion of data already stored in the cloud using the contact details in Article 9 of this Policy. If you have questions about how we handle your personal information, you can contact us using the contact details in Article 9.
+
+7. Protection of Minors
+We do not proactively collect personal information from minors. If you are a child under 14, please use the Game together with a guardian and read the Rules on Protection of Children's Personal Information. Once Youth Mode is enabled, we will limit your daily playtime in accordance with the applicable rules.
+
+8. Updates to This Policy
+We may revise this Policy from time to time. Where a revision is material, we will prompt you in-game to read and agree to it again.
+
+9. Contact
+E-mail: privacy@example.com (placeholder - replace with the real address before release)
+
+(This document is a template. It must be reviewed by legal counsel and all placeholders replaced before the official launch.)

@@ -98,6 +98,9 @@ namespace StarPixel
             // M33：本地化覆盖完整性（扫描器自检 / 中文态基线 / 英文态零中文 / 动态键不回退 / 恢复）
             if (HasArg("-locProbe")) { StartLocProbe(); return; }
 
+            // M35：法务文本双语（扫描器自检 / 中文态基线 / 英文态零中文零回退 / 法务窗上屏 / 就地刷新）
+            if (HasArg("-legalProbe")) { StartLegalProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -584,6 +587,15 @@ namespace StarPixel
             Application.targetFrameRate = 60;
             PrepareStage();
             StarPixel.Dev.LocProbe.Start(ArgValue("-locScene", "BASE"));
+        }
+
+        private static void StartLegalProbe()
+        {
+            // 法务探针只碰 Resources/Legal 与法务窗，不需要搭完整世界
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;
+            StarPixel.Dev.LegalProbe.Start(ArgValue("-legalScene", "BASE"));
         }
 
         private static void StartSubProbe()

@@ -115,13 +115,13 @@ namespace StarPixel.Compliance
             // 三个法律文本入口
             Core.UIFactory.CreateButton(panel.transform, "TermsBtn",
                 Core.Localization.T("compliance.terms"), new Vector2(-180, -26), new Vector2(210, 46),
-                () => LegalViewer.Open(Core.Localization.T("compliance.terms"), LegalTexts.Get(LegalTexts.TermsKey)));
+                () => LegalViewer.OpenLocalized("compliance.terms", LegalTexts.TermsKey));
             Core.UIFactory.CreateButton(panel.transform, "PrivacyBtn",
                 Core.Localization.T("compliance.privacy"), new Vector2(60, -26), new Vector2(210, 46),
-                () => LegalViewer.Open(Core.Localization.T("compliance.privacy"), LegalTexts.Get(LegalTexts.PrivacyKey)));
+                () => LegalViewer.OpenLocalized("compliance.privacy", LegalTexts.PrivacyKey));
             Core.UIFactory.CreateButton(panel.transform, "ChildrenBtn",
                 Core.Localization.T("compliance.children"), new Vector2(0, -84), new Vector2(260, 46),
-                () => LegalViewer.Open(Core.Localization.T("compliance.children"), LegalTexts.Get(LegalTexts.ChildrenKey)));
+                () => LegalViewer.OpenLocalized("compliance.children", LegalTexts.ChildrenKey));
 
             // 同意 / 不同意
             Core.UIFactory.CreateButton(panel.transform, "AgreeBtn",

@@ -1427,6 +1427,133 @@ def check_language_refresh():
                 % (rp, ln_no, text, field, method or "?"))
 
 
+LEGAL_VER_RE = re.compile(r'^\s*[\[【]\s*(?:版本|Version)\s*[\]】]\s*(\S+)')
+LEGAL_SEC_ZH_RE = re.compile(r'^\s*([一二三四五六七八九十]+)、')
+LEGAL_SEC_EN_RE = re.compile(r'^\s*\d+\.\s+[A-Z]')
+# 刻意不复用上面第 12 项的 CJK_RE（那个只查汉字）：法务文本要把中文标点与全角
+# 也算进去——只查汉字会放过"英文版里残留书名号《》"这种看着像英文、其实没翻译的情况。
+# 也绝不能反过来覆盖它：第 12 项一旦用上这个宽范围，MainMenu 里 `T(...) + "：-"`
+# 这种全角冒号会被当成硬编码中文，一晚上冒出 17 条误报（本轮真实踩到）。
+LEGAL_CJK_RE = re.compile(r'[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]')
+
+
+def legal_dir():
+    return os.path.join(ASSETS_DIR, "_Project", "Resources", "Legal")
+
+
+def _legal_files():
+    """返回（中文版 {键: 路径}, 英文版 {键: 路径}）。目录不存在时返回空——自检夹具靠这个开关。"""
+    d = legal_dir()
+    zh, en = {}, {}
+    if not os.path.isdir(d):
+        return zh, en
+    for fn in sorted(os.listdir(d)):
+        if fn.endswith(".txt"):
+            zh[fn[:-4]] = os.path.join(d, fn)
+    ed = os.path.join(d, "en")
+    if os.path.isdir(ed):
+        for fn in sorted(os.listdir(ed)):
+            if fn.endswith(".txt"):
+                en[fn[:-4]] = os.path.join(ed, fn)
+    return zh, en
+
+
+def _legal_version(path):
+    for ln in read(path).split('\n'):
+        m = LEGAL_VER_RE.match(ln)
+        if m:
+            return m.group(1)
+    return None
+
+
+def check_legal_texts_localized():
+    """
+    法务文本必须双语且同步（M35）。
+
+    三份法律正文（用户协议 / 隐私政策 / 儿童个人信息保护规则）住在
+    Resources/Legal/*.txt，是**唯一一类不在 .cs 里的玩家可见文案**。于是前面每一层
+    断言都绕过了它：第 12 项扫 .cs 字面量（txt 不是 .cs）、第 13 项扫 Text 字段赋值
+    （正文是 Resources.Load 出来的整段字符串）、运行时 L10N 场景只扫合规门面板的
+    按钮标签——**三个法律文档从未被打开过**。
+
+    而 LegalTexts.Get() 原本只认 Legal/<key>.txt 一条路径，那三份是纯中文的：
+    英文界面下用户点开「Terms of Service」，弹出来的是整篇中文。这不是体验瑕疵——
+    不同语言的用户拿到的法务文本不对等，是实打实的合规风险。
+
+    四条判据（都在构建期就能判，不必等到运行时）：
+      ① 成对：每个中文文档都必须在 Legal/en/ 下有同名英文版（反之亦然，孤儿也不许）
+      ② 版本一致：两份的版本号必须逐字相同。中英版本不同步意味着用户同意的是
+         一个版本、看到的是另一个版本——这是本项最要命的一条
+      ③ 英文版零中文：残留中文 = 漏译（检测含中文标点与全角，不止汉字）
+      ④ 章节数一致：中文章节「一、」与英文章节「1. Title」条数必须相等，
+         条数不等说明某一侧漏了整段
+    """
+    zh, en = _legal_files()
+    if not zh and not en:
+        return
+
+    for key in sorted(set(en) - set(zh)):
+        err("法务文本孤儿英文版: Legal/en/%s.txt 在中文目录里没有对应文档 ——\n"
+            "      中文版是唯一数据源（英文缺失时运行时回退中文），英文版不能孤立存在。\n"
+            "      要么补上中文版，要么删掉这份英文版。" % key)
+
+    for key in sorted(zh):
+        zp = zh[key]
+        rp = rel(zp)
+
+        # ① 成对
+        if key not in en:
+            err("法务文本缺英文版: %s ——\n"
+                "      Legal/en/%s.txt 不存在，英文界面下这份法律正文会整篇回退成中文。\n"
+                "      M35 实测：三份文档（terms / privacy / children）原本全是中文，\n"
+                "      英文用户点开「Terms of Service」看到的是中文全文——不同语言的用户\n"
+                "      拿到的法务文本不对等，这是合规风险，不是体验问题。\n"
+                "      修法：补一份 Resources/Legal/en/%s.txt，章节与版本号与中文版对齐。"
+                % (rp, key, key))
+            continue
+
+        ep = en[key]
+        rpe = rel(ep)
+
+        # ② 版本一致
+        vz, ve = _legal_version(zp), _legal_version(ep)
+        if vz is None:
+            err("法务文本缺版本号: %s ——\n"
+                "      找不到「【版本】xxxx」行，无法与英文版比对。\n"
+                "      版本号是合规门判定用户是否已同意的依据（VersionInfo.ComplianceVersion），\n"
+                "      中英两份必须写得出来、且逐字相同。" % rp)
+        elif ve is None:
+            err("法务文本缺版本号: %s ——\n"
+                "      找不到「[Version] xxxx」行，无法与中文版（%s）比对。" % (rpe, vz))
+        elif vz != ve:
+            err("法务文本版本号不一致: %s（%s）与 %s（%s）——\n"
+                "      中英两份法律正文的版本号不同步：用户按一个版本点下「同意」，\n"
+                "      读到的却是另一个版本的内容。合规门靠版本号判断要不要重新征得同意，\n"
+                "      两侧漂移会让「已同意」这件事失去意义。\n"
+                "      修法：两份对齐同一版本号，并同步递增 VersionInfo.ComplianceVersion。"
+                % (rp, vz, rpe, ve))
+
+        # ③ 英文版零中文
+        hits = LEGAL_CJK_RE.findall(read(ep))
+        if hits:
+            err("英文法务文本残留中文: %s（%d 处，如「%s」）——\n"
+                "      英文版里出现中文（含中文标点与全角字符）说明这一段没翻译。\n"
+                "      玩家切成英文后读到的仍是不可读的中文。\n"
+                "      注：检测范围含 \\u3000-\\u303f 中文标点、\\u4e00-\\u9fff 汉字、\\n"
+                "      \\uff00-\\uffef 全角——书名号「《》」与全角括号同样算漏译。"
+                % (rpe, len(hits), "".join(sorted(set(hits)))[:12]))
+
+        # ④ 章节数一致
+        nz = len([l for l in read(zp).split('\n') if LEGAL_SEC_ZH_RE.match(l)])
+        ne = len([l for l in read(ep).split('\n') if LEGAL_SEC_EN_RE.match(l)])
+        if nz != ne:
+            err("法务文本章节数不一致: %s（中文 %d 章）与 %s（英文 %d 章）——\n"
+                "      章节条数不等说明某一侧漏了整段。法务文本最怕「悄悄少一节」：\n"
+                "      它不报错、不崩，只有把两份并排读完才看得出来。\n"
+                "      修法：补齐缺失章节；确实无需对应章节时，调整成两侧一致的编排。"
+                % (rp, nz, rpe, ne))
+
+
 # ── 自检：证明"判据真的会红" ──────────────────────────────
 # 静态检查最容易出现的失败是"永远不报错"——第 7 项若写成摆设，工程照样一片绿，
 # 而 M24/M26/M27 那三处缺陷会继续静静地堆在场景里。
@@ -2294,6 +2421,87 @@ namespace A
 """),
 ]
 
+# 第 14 项夹具：格式是（夹具名, 期望是否报错, 中文版正文, 英文版正文）
+# 与前面几项不同——这里造的不是 .cs 而是 Resources/Legal 下的 .txt，
+# 因为第 14 项检查的正是"不在 .cs 里的那片文案"。
+_LG_ZH_OK = """用户服务协议
+
+【版本】2026.10
+
+一、协议范围
+本协议是您与本工作室之间就使用本游戏所订立的协议。
+
+二、账号与登录
+本游戏当前版本不提供强制注册。
+
+三、游戏规则
+您可以在遵守本协议的前提下使用本游戏。
+"""
+
+_LG_EN_OK = """Terms of Service
+
+[Version] 2026.10
+
+1. Scope
+These Terms are an agreement between you and the studio.
+
+2. Accounts and Login
+The current version does not require mandatory registration.
+
+3. Game Rules
+You may use the Game provided that you comply with these Terms. Article 9 - Contact
+"""
+
+SELFTEST_LEGAL = [
+    ("lg01_成对且同步", False, _LG_ZH_OK, _LG_EN_OK),
+    # ② 缺英文版：M35 三份文档原本的状态
+    ("lg02_缺英文版", True, _LG_ZH_OK, None),
+    # ② 版本号漂移：用户同意一个版本、读到另一个版本
+    ("lg03_版本不一致", True, _LG_ZH_OK,
+     _LG_EN_OK.replace("[Version] 2026.10", "[Version] 2026.09")),
+    # ③ 漏译残留（含中文标点——只查汉字会漏掉书名号那种）
+    ("lg04_英文残留中文", True, _LG_ZH_OK,
+     _LG_EN_OK.replace("1. Scope", "1. 协议范围")),
+    # ④ 章节条数不等：某一侧悄悄少了一节
+    ("lg05_章节数不一致", True, _LG_ZH_OK,
+     _LG_EN_OK.replace("3. Game Rules\n", "")),
+    # ① 孤儿英文版：中文才是唯一数据源，英文不能孤立存在
+    ("lg06_孤儿英文版", True, None, _LG_EN_OK),
+    # ② 中文版写不出版本号 → 无法比对
+    ("lg07_中文缺版本号", True, _LG_ZH_OK.replace("【版本】2026.10", "版本：2026.10"), _LG_EN_OK),
+    # ② 英文版写不出版本号
+    ("lg08_英文缺版本号", True, _LG_ZH_OK, _LG_EN_OK.replace("[Version] 2026.10", "Version: 2026.10")),
+]
+
+
+def _run_legal_fixtures(fixtures, checks=None):
+    """把夹具写成 Resources/Legal 下的 txt 跑第 14 项，返回被报错的夹具名集合。"""
+    import shutil
+    import tempfile
+
+    global ASSETS_DIR
+    tmp = tempfile.mkdtemp(prefix="starpixel-audit-legal-")
+    saved, saved_errors, saved_infos = ASSETS_DIR, errors[:], infos[:]
+    try:
+        d = os.path.join(tmp, "_Project", "Resources", "Legal")
+        os.makedirs(os.path.join(d, "en"))
+        for name, _expect, zh, en in fixtures:
+            if zh is not None:
+                with open(os.path.join(d, name + ".txt"), "w", encoding="utf-8") as f:
+                    f.write(zh)
+            if en is not None:
+                with open(os.path.join(d, "en", name + ".txt"), "w", encoding="utf-8") as f:
+                    f.write(en)
+        ASSETS_DIR = tmp
+        errors.clear()
+        infos.clear()
+        check_legal_texts_localized()
+        return {name for name, _e, _z, _en in fixtures if any(name in e for e in errors)}
+    finally:
+        ASSETS_DIR = saved
+        errors[:], infos[:] = saved_errors, saved_infos
+        shutil.rmtree(tmp, ignore_errors=True)
+
 
 def _run_fixtures(fixtures, checks):
     """把夹具写进临时目录跑一遍指定检查，返回被报错的夹具名集合。"""
@@ -2329,17 +2537,21 @@ def selftest():
         ("本地守卫对称性检查（第 11 项）", SELFTEST_GUARD, [check_local_guard_symmetry]),
         ("UI 文案本地化检查（第 12 项）", SELFTEST_LG, [check_ui_text_localized]),
         ("切语言刷新检查（第 13 项）", SELFTEST_LR, [check_language_refresh]),
+        # 第 14 项造的是 .txt 而不是 .cs，用专属驱动（前 7 项统一走 _run_fixtures）
+        ("法务文本双语检查（第 14 项）", SELFTEST_LEGAL, None),
     ]
 
     all_bad = 0
     for title, fixtures, checks in groups:
-        flagged = _run_fixtures(fixtures, checks)
-        bad = [(n, e) for n, e, _c in fixtures if (n in flagged) != e]
+        flagged = _run_legal_fixtures(fixtures) if checks is None \
+            else _run_fixtures(fixtures, checks)
+        # 第 14 项夹具是 4 元组（多了英文版正文），其余是 3 元组
+        bad = [(f[0], f[1]) for f in fixtures if (f[0] in flagged) != f[1]]
         all_bad += len(bad)
         print("=" * 68)
         print("%s · %d 个夹具" % (title, len(fixtures)))
         print("=" * 68)
-        for name, expect, _c in fixtures:
+        for name, expect, *_rest in fixtures:
             got = name in flagged
             mark = "  OK" if got == expect else "FAIL"
             print("  [%s] %-26s 期望%s 实际%s"
@@ -2373,6 +2585,7 @@ def main():
     check_local_guard_symmetry()
     check_ui_text_localized()
     check_language_refresh()
+    check_legal_texts_localized()
 
     n = len(cs_files())
     print("=" * 68)
