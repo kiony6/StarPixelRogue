@@ -106,7 +106,7 @@ namespace StarPixel.UI
             brt.offsetMin = Vector2.zero;
             brt.offsetMax = Vector2.zero;
 
-            var title = CreateText(canvasGO.transform, "LEVEL UP!  选择强化", new Vector2(0, 200), 32);
+            var title = CreateText(canvasGO.transform, Core.Localization.T("levelup.title"), new Vector2(0, 200), 32);
 
             var cards = new List<RectTransform>();
             for (int i = 0; i < offers.Count; i++)

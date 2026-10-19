@@ -49,7 +49,7 @@ namespace StarPixel.Core.CloudSave
         {
             // M18：未配置（含非 HTTPS）时一律不发请求。「零网络请求」不能只依赖调用方守规矩，
             // 传输层自己也必须设闸——否则任何一处漏判都会让隐私承诺在代码层面失效。
-            if (!Configured) { onDone?.Invoke(false, "未配置"); yield break; }
+            if (!Configured) { onDone?.Invoke(false, Localization.T("cloud.err.not_configured")); yield break; }
 
             var url = _baseUrl + "/save/" + UnityWebRequest.EscapeURL(slotId);
             using (var req = UnityWebRequest.Get(url))
@@ -72,7 +72,7 @@ namespace StarPixel.Core.CloudSave
 
         public IEnumerator Upload(string slotId, string json, Action<bool, string> onDone)
         {
-            if (!Configured) { onDone?.Invoke(false, "未配置"); yield break; }
+            if (!Configured) { onDone?.Invoke(false, Localization.T("cloud.err.not_configured")); yield break; }
 
             var url = _baseUrl + "/save/" + UnityWebRequest.EscapeURL(slotId);
             var body = Encoding.UTF8.GetBytes(json ?? "{}");

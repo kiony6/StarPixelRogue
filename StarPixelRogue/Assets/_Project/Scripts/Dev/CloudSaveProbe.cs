@@ -150,7 +150,10 @@ namespace StarPixel.Dev
             int requests = svc != null ? svc.RequestCount : -1;
             bool configured = svc != null && svc.ProviderConfigured;
             bool enabled = svc != null && svc.Enabled;
-            string reason = svc != null ? svc.DisabledReason : "服务缺失";
+            // 用 DisabledReasonText（本地化后的成品文案）而非 DisabledReason（本地化键），
+            // 保证 [SMOKE] 输出对人或对脚本都可读——cloudsave_probe.py 正是靠它判断
+            // 「B 场景的禁用原因是否指向 HTTPS 校验」。
+            string reason = svc != null ? svc.DisabledReasonText : "服务缺失";
             if (string.IsNullOrEmpty(reason)) reason = "无（已启用）";
 
             // —— 判据 ——

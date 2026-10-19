@@ -113,7 +113,7 @@ namespace StarPixel.UI
                 bool found = save != null && Contains(save.Data.discoveredWeapons, id);
                 var def = Combat.UpgradeCatalog.CreateById(id);
                 string line = found
-                    ? def.skillName + " — " + Combat.UpgradeCatalog.WeaponDesc(def)
+                    ? def.DisplayName + " — " + Combat.UpgradeCatalog.WeaponDesc(def)
                     : Core.Localization.T("codex.locked");
                 var t = Core.UIFactory.CreateText(parent, "W" + id, line,
                     new Vector2(0, y), 16, TextAnchor.MiddleLeft, new Vector2(800, 30));

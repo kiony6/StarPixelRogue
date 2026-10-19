@@ -15,6 +15,13 @@ namespace StarPixel.Net
         private Text _statusText;
         private string _address = "127.0.0.1";
 
+        /// <summary>
+        /// 当前大厅 UI 根（M18 续四：为无头 UI 探针提供定位入口）。
+        /// 与 <see cref="UI.SettingsPanel.PanelRoot"/> 同理——不能用 GameObject.Find("NetLobbyCanvas")：
+        /// 语言切换 / 断线重建后旧画布要等帧末才真正销毁，Find 会命中旧的，读到切换前的文案。
+        /// </summary>
+        public GameObject PanelRoot => _root;
+
         void Awake()
         {
             BuildUI();
@@ -31,19 +38,19 @@ namespace StarPixel.Net
             scaler.referenceResolution = new Vector2(1280, 720);
             _root.AddComponent<GraphicRaycaster>();
 
-            CreateText(_root.transform, "星界像素狂潮 · 联机大厅", new Vector2(0, 240), 40);
-            CreateText(_root.transform, "状态同步 + 半权威房主（ADR-001）", new Vector2(0, 200), 20);
+            CreateText(_root.transform, Core.Localization.T("net.lobby_title"), new Vector2(0, 240), 40);
+            CreateText(_root.transform, Core.Localization.T("net.lobby_subtitle"), new Vector2(0, 200), 20);
 
-            _statusText = CreateText(_root.transform, "选择模式开始游戏", new Vector2(0, -230), 20);
+            _statusText = CreateText(_root.transform, Core.Localization.T("net.pick_mode"), new Vector2(0, -230), 20);
             _statusText.color = new Color(0.8f, 0.9f, 1f, 0.9f);
 
-            CreateButton(_root.transform, "单人游戏", new Vector2(-260, 80), OnSinglePlayer);
-            CreateButton(_root.transform, "创建房间（房主）", new Vector2(0, 80), OnHost);
-            CreateButton(_root.transform, "加入房间", new Vector2(260, 80), OnJoin);
-            CreateButton(_root.transform, "以观战身份加入（M14）", new Vector2(0, -70), OnSpectate);
+            CreateButton(_root.transform, Core.Localization.T("net.single"), new Vector2(-260, 80), OnSinglePlayer);
+            CreateButton(_root.transform, Core.Localization.T("net.host"), new Vector2(0, 80), OnHost);
+            CreateButton(_root.transform, Core.Localization.T("net.join"), new Vector2(260, 80), OnJoin);
+            CreateButton(_root.transform, Core.Localization.T("net.spectate"), new Vector2(0, -70), OnSpectate);
 
             // 地址输入（加入房间用；同一局域网填房主 IP）
-            CreateText(_root.transform, "目标地址", new Vector2(0, 20), 18);
+            CreateText(_root.transform, Core.Localization.T("net.address"), new Vector2(0, 20), 18);
             var inputGO = new GameObject("AddressInput", typeof(RectTransform));
             inputGO.transform.SetParent(_root.transform, false);
             var inputImg = inputGO.AddComponent<Image>();
@@ -77,25 +84,25 @@ namespace StarPixel.Net
         private bool CheckNetScene()
         {
             if (NetConfig.Instance != null) return true;
-            SetStatus("当前场景缺少 NetConfig，请打开 Assets/Scenes/NetBootstrap.unity（或先用菜单 StarPixel/Setup FishNet 装配）");
+            SetStatus(Core.Localization.T("net.err_no_netconfig"));
             return false;
         }
 
         private void OnHost()
         {
             var backend = NetBackend.Instance;
-            if (backend == null) { SetStatus("未检测到 Fish-Net，请先按 README 安装并联机"); return; }
+            if (backend == null) { SetStatus(Core.Localization.T("net.err_no_fishnet")); return; }
             if (!CheckNetScene()) return;
             backend.Ready -= OnBackendReady;
             backend.Ready += OnBackendReady;
             backend.StartHost();
-            SetStatus("正在创建房间…");
+            SetStatus(Core.Localization.T("net.creating"));
         }
 
         private void OnJoin()
         {
             var backend = NetBackend.Instance;
-            if (backend == null) { SetStatus("未检测到 Fish-Net，请先按 README 安装并联机"); return; }
+            if (backend == null) { SetStatus(Core.Localization.T("net.err_no_fishnet")); return; }
             if (!CheckNetScene()) return;
             if (string.IsNullOrEmpty(_address)) _address = "127.0.0.1";
             NetSession.RemoteAddress = _address;
@@ -103,7 +110,7 @@ namespace StarPixel.Net
             backend.Ready -= OnBackendReady;
             backend.Ready += OnBackendReady;
             backend.StartClient(_address);
-            SetStatus("正在连接 " + _address + " …");
+            SetStatus(Core.Localization.T("net.connecting", _address));
         }
 
         /// <summary>
@@ -114,7 +121,7 @@ namespace StarPixel.Net
         private void OnSpectate()
         {
             var backend = NetBackend.Instance;
-            if (backend == null) { SetStatus("未检测到 Fish-Net，请先按 README 安装并联机"); return; }
+            if (backend == null) { SetStatus(Core.Localization.T("net.err_no_fishnet")); return; }
             if (!CheckNetScene()) return;
             if (string.IsNullOrEmpty(_address)) _address = "127.0.0.1";
             NetSession.RemoteAddress = _address;
@@ -122,7 +129,7 @@ namespace StarPixel.Net
             backend.Ready -= OnBackendReady;
             backend.Ready += OnBackendReady;
             backend.StartClient(_address);
-            SetStatus("正在以观战身份连接 " + _address + " …");
+            SetStatus(Core.Localization.T("net.connecting_spectate", _address));
         }
 
         private void OnBackendReady()
@@ -148,7 +155,7 @@ namespace StarPixel.Net
             if (lobby == null) return;
             if (lobby._root != null) Destroy(lobby._root);
             lobby.BuildUI();
-            lobby.SetStatus("已断开连接，请重新选择模式");
+            lobby.SetStatus(Core.Localization.T("net.disconnected"));
         }
 
         private void SetStatus(string s)

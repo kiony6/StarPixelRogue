@@ -92,7 +92,7 @@ namespace StarPixel.UI
 
             Core.UIFactory.CreateText(card.transform, "Weapon",
                 Core.Localization.T("char.start_weapon") + "：" +
-                Combat.UpgradeCatalog.CreateById(def.startingWeaponId).skillName,
+                Combat.UpgradeCatalog.CreateById(def.startingWeaponId).DisplayName,
                 new Vector2(0, 12), 14, TextAnchor.MiddleCenter, new Vector2(330, 26));
 
             Core.UIFactory.CreateButton(card.transform, "SelectBtn",

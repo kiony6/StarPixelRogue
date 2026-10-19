@@ -19,9 +19,15 @@
     D 已配置已开启但未同意隐私    → 期望禁用、请求 0
     E 已配置 + 已开启 + 已同意    → 期望**真的发了请求**；后端不可达时静默降级、玩法不受影响
 
-外加一个设置面板探针 `-uiProbe`（默认一并跑）：建出设置页、真的点一下云存档开关、
-再切一次语言，验证控件存在 + 开关确实写进设置 + 中英文案都是成品而非本地化键。
-设置面板在无头冒烟里根本不会被创建，没有这个探针本次 UI 改动就等于零验证。
+外加一个 UI 探针 `-uiProbe`（默认一并跑），覆盖三块在普通冒烟里**根本不会被创建**的界面：
+    ① 设置页：建出面板、真的点一下云存档开关、再切一次语言，
+       验证控件存在 + 开关确实写进设置 + 中英文案都是成品而非本地化键；
+    ② 联机大厅：中英各建一次，收集全部文案；
+    ③ 升级选卡：建出面板，收集渲染文案，并逐项取遍它能拼出的全部文案素材。
+
+② ③ 的判据比 ① 更硬：除"不许出现裸键"外，还断言**英文界面不含任何中日韩字符**。
+只比对"中英两条不同"是不够的——一条硬编码中文 + 一条英文同样能满足"两者不同"，
+而不含 CJK 才是"没有中文漏出来"的直接反向指标。
 
 判据的区分力从哪来（这是本脚本最要紧的地方）：
     1) 「是否应当启用」由本脚本**独立**按 HTTPS 规则推导后传给被测进程，
@@ -243,7 +249,7 @@ def check(r):
 
 
 def run_ui_probe(exe, limit_mb):
-    """设置面板探针：云存档控件 / 开关生效 / 中英双语状态渲染。"""
+    """UI 探针：设置面板（云存档控件/开关/双语）+ 联机大厅 + 升级选卡。"""
     log = os.path.join(ROOT, "cloudsave_ui.log")
     if os.path.exists(log):
         os.remove(log)
@@ -296,6 +302,30 @@ def check_ui(r):
         problems.append("点击云存档开关后设置未改变（%s）——开关只是画了个样子"
                         % d.get("开关点击生效"))
 
+    # 联机大厅：中英各建一次，两边都得收集到成套文案（标题/副标题/提示/地址/4 个按钮 ≥ 6 条）
+    for k, lang in (("大厅中文文案数", "中文"), ("大厅英文文案数", "英文")):
+        n = as_int(d, k)
+        if n < 6:
+            problems.append("%s大厅只收集到 %s 条文案（期望 ≥6）——大厅未完整建出" % (lang, n))
+
+    # 升级选卡：面板真渲染出文案（标题 + 至少 3 张卡），且素材枚举覆盖到位
+    if as_int(d, "升级卡文案数") < 4:
+        problems.append("升级选卡面板只渲染出 %s 条文案（期望 ≥4）——卡片未画出来"
+                        % d.get("升级卡文案数"))
+    if as_int(d, "升级素材数") < 30:
+        problems.append("升级文案素材只收集到 %s 条（期望 ≥30）——武器/强化枚举未覆盖全"
+                        % d.get("升级素材数"))
+
+    # 裸键：Localization 漏翻时 T() 原样返回键名，玩家会直接看到 "weapon.name.3"
+    raw = d.get("裸键文案", "")
+    if raw not in ("", "无"):
+        problems.append("界面出现裸本地化键「%s」——词条漏翻" % raw)
+
+    # 英文界面不许残留中文：本轮缺陷的正向判据（"中英不同"抓不到混排漏翻）
+    left = d.get("英文界面中文残留", "")
+    if left not in ("", "无"):
+        problems.append("英文界面残留中文「%s」——仍有硬编码中文未走本地化" % left)
+
     zh = d.get("中文状态文案", "")
     en = d.get("英文状态文案", "")
     # 漏翻时 Localization.T 原样返回键名，UI 上会冒出 "cloud.status.off"
@@ -318,8 +348,9 @@ def main():
     ap.add_argument("--seconds", type=int, default=20, help="每个场景的对局时长（秒）")
     ap.add_argument("--exe", default=DEFAULT_EXE, help="构建产物路径")
     ap.add_argument("--only", default="", help="只跑指定场景编号，如 E（可逗号分隔：A,C,E）")
-    ap.add_argument("--ui", action="store_true", help="只跑设置面板探针，不跑 5 个联网场景")
-    ap.add_argument("--skip-ui", action="store_true", help="跳过设置面板探针")
+    ap.add_argument("--ui", action="store_true",
+                    help="只跑 UI 探针（设置面板 + 联机大厅 + 升级选卡），不跑 5 个联网场景")
+    ap.add_argument("--skip-ui", action="store_true", help="跳过 UI 探针")
     ap.add_argument("--log-limit-mb", type=int, default=200,
                     help="单场景日志体积上限（MB），超过即熔断")
     args = ap.parse_args()
@@ -334,23 +365,26 @@ def main():
 
     if args.ui:
         print("=" * 74)
-        print("M13 云存档无头实测 · 仅设置面板探针")
+        print("M13 云存档无头实测 · 仅 UI 探针（设置面板 / 联机大厅 / 升级选卡）")
         print("  产物   %s" % rel(exe))
         print("=" * 74)
         r = run_ui_probe(exe, args.log_limit_mb)
         if r is None:
             return 2
         for k in ("云存档开关控件", "云存档状态控件", "立即同步控件", "开关点击生效",
-                  "中文状态文案", "英文状态文案", "运行期异常", "首条错误"):
+                  "中文状态文案", "英文状态文案",
+                  "大厅中文文案数", "大厅英文文案数", "升级卡文案数", "升级素材数",
+                  "裸键文案", "英文界面中文残留", "运行期异常", "首条错误"):
             if k in r["data"]:
-                print("  %-14s %s" % (k, r["data"][k]))
+                print("  %-16s %s" % (k, r["data"][k]))
         ps = check_ui(r)
         if ps:
             print("\n结论：未通过")
             for p in ps:
                 print("  - " + p)
             return 1
-        print("\n结论：通过 —— 设置页云存档控件齐全、开关真实生效、中英双语状态均为成品文案")
+        print("\n结论：通过 —— 设置页控件齐全且开关真实生效，大厅与升级卡中英双语均为成品文案，"
+              "英文界面无中文残留")
         return 0
 
     wanted = [s.strip().upper() for s in args.only.split(",") if s.strip()]
@@ -403,6 +437,11 @@ def main():
                d.get("立即同步控件", "?"), d.get("开关点击生效", "?")))
         print("  双语状态   中文=「%s」" % d.get("中文状态文案", "?"))
         print("             英文=「%s」" % d.get("英文状态文案", "?"))
+        print("  大厅文案   中文=%s 条 / 英文=%s 条   升级卡=%s 条 / 素材=%s 条" %
+              (d.get("大厅中文文案数", "?"), d.get("大厅英文文案数", "?"),
+               d.get("升级卡文案数", "?"), d.get("升级素材数", "?")))
+        print("  裸键=%s   英文界面中文残留=%s" %
+              (d.get("裸键文案", "?"), d.get("英文界面中文残留", "?")))
         ui_problems = check_ui(ur)
 
     # —— 判定 ——
@@ -423,12 +462,13 @@ def main():
             for p in ps:
                 print("      - " + p)
         if ui_problems:
-            print("  [UI] 设置面板探针")
+            print("  [UI] UI 探针（设置面板 / 联机大厅 / 升级选卡）")
             for p in ui_problems:
                 print("      - " + p)
         return 1
 
-    tail = "，设置页云存档开关与双语状态亦已验证" if not args.skip_ui and not wanted else ""
+    tail = ("，设置页云存档开关、联机大厅与升级选卡的中英双语亦已验证"
+            if not args.skip_ui and not wanted else "")
     print("\n结论：通过 —— A~D 零网络请求且玩法未受影响，E 真的联网并在不可达时静默降级%s" % tail)
     print('       （双向断言成立：既不是「压根没实现同步」，也不是「关了开关还在联网」）')
     return 0

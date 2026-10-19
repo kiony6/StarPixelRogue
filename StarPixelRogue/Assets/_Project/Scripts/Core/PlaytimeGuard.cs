@@ -141,7 +141,7 @@ namespace StarPixel.Core
                 {
                     _minorWarned = true;
                     ShowMinorWarning(Localization.T("settings.minor_mode"),
-                        "今日游戏时间即将达到上限，请注意休息。");
+                        Localization.T("playtime.warn"));
                 }
                 if (!_minorForcedExit && _today.seconds >= MinorDailyLimitSeconds)
                 {
@@ -154,7 +154,8 @@ namespace StarPixel.Core
             else if (_sinceAdultHint >= AdultHintIntervalSeconds)
             {
                 _sinceAdultHint = 0f;
-                ShowMinorWarning("健康游戏提示", "您已连续游戏 45 分钟，适度游戏益脑，沉迷游戏伤身。");
+                ShowMinorWarning(Localization.T("playtime.health_title"),
+                    Localization.T("playtime.health"));
             }
 
             if (Mathf.FloorToInt(_today.seconds) != _lastSavedSecond)   // 每秒最多落盘一次
@@ -175,7 +176,7 @@ namespace StarPixel.Core
         {
             Debug.Log("[Playtime] 青少年模式达到每日时长上限，强制返回主菜单");
             if (UI.MainMenu.Instance != null)
-                UI.MainMenu.Instance.ShowWithNotice("今日游戏时间已达上限（青少年模式），请明天再来。");
+                UI.MainMenu.Instance.ShowWithNotice(Localization.T("playtime.force_exit"));
             GameBuilder.TeardownWorld();
         }
 

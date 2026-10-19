@@ -32,6 +32,19 @@ namespace StarPixel.Combat.Skill
 
         public int id;
         public string skillName;
+
+        /// <summary>
+        /// M18 续四：武器名的本地化键（<see cref="DisplayName"/> 用它取中英双语文案）。
+        /// 为什么不直接把 <see cref="skillName"/> 做成双语：它还承担开发期可读标识
+        /// （日志、资产名、配置对齐），混用会导致"改文案"和"改标识"两件事纠缠。
+        /// 留空时 <see cref="DisplayName"/> 回退到 skillName，老数据不会因此显示空串。
+        /// </summary>
+        public string locKey = "";
+
+        /// <summary>按当前语言渲染的展示名（升级卡 / HUD / 图鉴统一走这里）。</summary>
+        public string DisplayName =>
+            !string.IsNullOrEmpty(locKey) ? Core.Localization.T(locKey) : skillName;
+
         public WeaponType weaponType = WeaponType.Projectile;
         public string[] tags;             // 元素/流派标签（组合技用）
 
@@ -120,26 +133,37 @@ namespace StarPixel.Combat.Skill
             return aoeRadius;
         }
 
-        /// <summary>下一级的效果描述（升级选卡用）。</summary>
-        public string NextLevelDesc(int nextLevel)
+        /// <summary>
+        /// 下一级效果描述对应的**本地化键**（升级选卡用）。
+        /// M18 续四：原先这里直接返回成品中文，英文界面下升级卡会冒出中文。
+        /// 改返回键后由调用方 <c>Localization.T(...)</c> 渲染，与武器名/状态文案同一套做法。
+        /// </summary>
+        public string NextLevelDescKey(int nextLevel)
         {
             switch (weaponType)
             {
                 case WeaponType.Projectile:
-                    if (nextLevel == 3) return "伤害 +25%，弹体 +1";
-                    if (nextLevel == 4) return "伤害 +25%，弹体 +1，穿透 +1";
-                    return "伤害 +25%";
-                case WeaponType.Scatter: return "弹体 +1，伤害 +10%";
-                case WeaponType.Nova:    return "范围 +15%，伤害 +20%";
-                case WeaponType.Orbit:   return "刃 +1，伤害 +10%";
-                case WeaponType.Chain:   return "跳电目标 +1，伤害 +18%";
+                    if (nextLevel == 3) return "weapon.next.projectile.3";
+                    if (nextLevel == 4) return "weapon.next.projectile.4";
+                    return "weapon.next.projectile";
+                case WeaponType.Scatter: return "weapon.next.scatter";
+                case WeaponType.Nova:    return "weapon.next.nova";
+                case WeaponType.Orbit:   return "weapon.next.orbit";
+                case WeaponType.Chain:   return "weapon.next.chain";
                 case WeaponType.Boomerang:
-                    return nextLevel >= 3 ? "弹体 +1，伤害 +22%" : "伤害 +22%";
-                case WeaponType.Homing:  return "弹体 +1，伤害 +20%";
-                case WeaponType.Aura:    return "范围 +12%，伤害 +15%";
-                case WeaponType.Mine:    return nextLevel >= 3 ? "地雷 +1，伤害 +20%" : "伤害 +20%";
+                    return nextLevel >= 3 ? "weapon.next.boomerang.3" : "weapon.next.boomerang";
+                case WeaponType.Homing:  return "weapon.next.homing";
+                case WeaponType.Aura:    return "weapon.next.aura";
+                case WeaponType.Mine:    return nextLevel >= 3 ? "weapon.next.mine.3" : "weapon.next.mine";
             }
             return "";
+        }
+
+        /// <summary>下一级效果描述（已按当前语言渲染，直接可展示）。</summary>
+        public string NextLevelDesc(int nextLevel)
+        {
+            var key = NextLevelDescKey(nextLevel);
+            return string.IsNullOrEmpty(key) ? "" : Core.Localization.T(key);
         }
     }
 }

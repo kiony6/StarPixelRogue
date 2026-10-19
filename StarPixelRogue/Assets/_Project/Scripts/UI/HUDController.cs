@@ -169,7 +169,7 @@ namespace StarPixel.UI
                 var w = p.Weapons[i];
                 if (w == null || w.def == null) continue;
                 if (sb.Length > 0) sb.Append("   ");
-                sb.Append(w.def.skillName).Append(" Lv").Append(w.level);
+                sb.Append(w.def.DisplayName).Append(" Lv").Append(w.level);
             }
             weaponText.text = sb.ToString();
         }

@@ -28,7 +28,7 @@ namespace StarPixel.Combat
         public static SkillDef CreateBolt()
         {
             var s = ScriptableObject.CreateInstance<SkillDef>();
-            s.id = 1; s.skillName = "星能弹"; s.weaponType = WeaponType.Projectile;
+            s.id = 1; s.skillName = "星能弹"; s.locKey = "weapon.name.1"; s.weaponType = WeaponType.Projectile;
             s.tags = new[] { "fire" };
             s.cooldown = 0.35f; s.damage = 18f; s.projectileSpeed = 9f; s.pierce = 0; s.range = 7f;
             return s;
@@ -37,7 +37,7 @@ namespace StarPixel.Combat
         public static SkillDef CreateScatter()
         {
             var s = ScriptableObject.CreateInstance<SkillDef>();
-            s.id = 2; s.skillName = "散射枪"; s.weaponType = WeaponType.Scatter;
+            s.id = 2; s.skillName = "散射枪"; s.locKey = "weapon.name.2"; s.weaponType = WeaponType.Scatter;
             s.tags = new[] { "storm" };
             s.cooldown = 0.55f; s.damage = 10f; s.projectileCount = 3; s.projectileSpeed = 9f; s.range = 7f;
             return s;
@@ -46,7 +46,7 @@ namespace StarPixel.Combat
         public static SkillDef CreateNova()
         {
             var s = ScriptableObject.CreateInstance<SkillDef>();
-            s.id = 3; s.skillName = "寒霜新星"; s.weaponType = WeaponType.Nova;
+            s.id = 3; s.skillName = "寒霜新星"; s.locKey = "weapon.name.3"; s.weaponType = WeaponType.Nova;
             s.tags = new[] { "ice" };
             s.cooldown = 1.8f; s.damage = 22f; s.aoeRadius = 3f;
             return s;
@@ -55,7 +55,7 @@ namespace StarPixel.Combat
         public static SkillDef CreateQuake()
         {
             var s = ScriptableObject.CreateInstance<SkillDef>();
-            s.id = 4; s.skillName = "裂地波"; s.weaponType = WeaponType.Nova;
+            s.id = 4; s.skillName = "裂地波"; s.locKey = "weapon.name.4"; s.weaponType = WeaponType.Nova;
             s.tags = new[] { "earth" };
             s.cooldown = 2.6f; s.damage = 32f; s.aoeRadius = 4.5f;
             return s;
@@ -64,7 +64,7 @@ namespace StarPixel.Combat
         public static SkillDef CreateOrbit()
         {
             var s = ScriptableObject.CreateInstance<SkillDef>();
-            s.id = 5; s.skillName = "雷环刃"; s.weaponType = WeaponType.Orbit;
+            s.id = 5; s.skillName = "雷环刃"; s.locKey = "weapon.name.5"; s.weaponType = WeaponType.Orbit;
             s.tags = new[] { "lightning" };
             s.cooldown = 0f; s.damage = 12f; s.orbitRadius = 2f; s.orbitCount = 1;
             return s;
@@ -75,7 +75,7 @@ namespace StarPixel.Combat
         public static SkillDef CreateChain()
         {
             var s = ScriptableObject.CreateInstance<SkillDef>();
-            s.id = 6; s.skillName = "雷霆之链"; s.weaponType = WeaponType.Chain;
+            s.id = 6; s.skillName = "雷霆之链"; s.locKey = "weapon.name.6"; s.weaponType = WeaponType.Chain;
             s.tags = new[] { "lightning" };
             s.cooldown = 1.6f; s.damage = 26f; s.range = 7f;
             s.chainCount = 3; s.chainRange = 4f; s.damageFalloff = 0.8f;
@@ -85,7 +85,7 @@ namespace StarPixel.Combat
         public static SkillDef CreateBoomerang()
         {
             var s = ScriptableObject.CreateInstance<SkillDef>();
-            s.id = 7; s.skillName = "月刃"; s.weaponType = WeaponType.Boomerang;
+            s.id = 7; s.skillName = "月刃"; s.locKey = "weapon.name.7"; s.weaponType = WeaponType.Boomerang;
             s.tags = new[] { "storm" };
             s.cooldown = 1.4f; s.damage = 20f; s.projectileCount = 1;
             s.projectileSpeed = 10f; s.range = 7f; s.boomerangRange = 6f;
@@ -95,7 +95,7 @@ namespace StarPixel.Combat
         public static SkillDef CreateHoming()
         {
             var s = ScriptableObject.CreateInstance<SkillDef>();
-            s.id = 8; s.skillName = "蜂群导弹"; s.weaponType = WeaponType.Homing;
+            s.id = 8; s.skillName = "蜂群导弹"; s.locKey = "weapon.name.8"; s.weaponType = WeaponType.Homing;
             s.tags = new[] { "storm" };
             s.cooldown = 1.8f; s.damage = 12f; s.projectileCount = 2;
             s.projectileSpeed = 7f; s.range = 9f; s.homingTurn = 8f;
@@ -105,7 +105,7 @@ namespace StarPixel.Combat
         public static SkillDef CreateAura()
         {
             var s = ScriptableObject.CreateInstance<SkillDef>();
-            s.id = 9; s.skillName = "圣光领域"; s.weaponType = WeaponType.Aura;
+            s.id = 9; s.skillName = "圣光领域"; s.locKey = "weapon.name.9"; s.weaponType = WeaponType.Aura;
             s.tags = new[] { "holy" };
             s.cooldown = 0f; s.damage = 10f; s.aoeRadius = 3.2f; s.auraInterval = 0.5f;
             return s;
@@ -115,7 +115,7 @@ namespace StarPixel.Combat
         public static SkillDef CreateMine()
         {
             var s = ScriptableObject.CreateInstance<SkillDef>();
-            s.id = 10; s.skillName = "脉冲地雷"; s.weaponType = WeaponType.Mine;
+            s.id = 10; s.skillName = "脉冲地雷"; s.locKey = "weapon.name.10"; s.weaponType = WeaponType.Mine;
             s.tags = new[] { "earth" };
             s.cooldown = 2.0f; s.damage = 45f; s.projectileCount = 1;
             s.aoeRadius = 2.6f; s.mineArmTime = 0.35f; s.mineTrigger = 1.6f; s.mineLife = 8f;
@@ -136,7 +136,7 @@ namespace StarPixel.Combat
                 var def = CreateById(id);
                 pool.Add(new UpgradeOffer
                 {
-                    title = "解锁 · " + def.skillName,
+                    title = Core.Localization.T("upgrade.unlock", def.DisplayName),
                     desc = WeaponDesc(def),
                     apply = () => p.AddSkill(def),
                     kind = 100 + id
@@ -154,7 +154,7 @@ namespace StarPixel.Combat
                     int id = w.def.id;
                     pool.Add(new UpgradeOffer
                     {
-                        title = "强化 · " + w.def.skillName + " Lv" + next,
+                        title = Core.Localization.T("upgrade.level", w.def.DisplayName, next),
                         desc = w.def.NextLevelDesc(next),
                         apply = () => p.LevelUpWeapon(id),
                         kind = 200 + id
@@ -188,13 +188,13 @@ namespace StarPixel.Combat
         {
             switch (index)
             {
-                case 0: return new UpgradeOffer { title = "最大生命 +20", desc = "并回满", kind = 0, apply = () => ApplyStat(0, p) };
-                case 1: return new UpgradeOffer { title = "移动速度 +8%", desc = "", kind = 1, apply = () => ApplyStat(1, p) };
-                case 2: return new UpgradeOffer { title = "伤害 +15%", desc = "", kind = 2, apply = () => ApplyStat(2, p) };
-                case 3: return new UpgradeOffer { title = "冷却 -12%", desc = "", kind = 3, apply = () => ApplyStat(3, p) };
-                case 4: return new UpgradeOffer { title = "弹体 +1", desc = "直射/散射武器", kind = 4, apply = () => ApplyStat(4, p) };
-                case 5: return new UpgradeOffer { title = "拾取范围 +30%", desc = "", kind = 5, apply = () => ApplyStat(5, p) };
-                case 6: return new UpgradeOffer { title = "范围 +15%", desc = "", kind = 6, apply = () => ApplyStat(6, p) };
+                case 0: return new UpgradeOffer { title = Core.Localization.T("upgrade.stat.0"), desc = Core.Localization.T("upgrade.stat.desc.0"), kind = 0, apply = () => ApplyStat(0, p) };
+                case 1: return new UpgradeOffer { title = Core.Localization.T("upgrade.stat.1"), desc = "", kind = 1, apply = () => ApplyStat(1, p) };
+                case 2: return new UpgradeOffer { title = Core.Localization.T("upgrade.stat.2"), desc = "", kind = 2, apply = () => ApplyStat(2, p) };
+                case 3: return new UpgradeOffer { title = Core.Localization.T("upgrade.stat.3"), desc = "", kind = 3, apply = () => ApplyStat(3, p) };
+                case 4: return new UpgradeOffer { title = Core.Localization.T("upgrade.stat.4"), desc = Core.Localization.T("upgrade.stat.desc.4"), kind = 4, apply = () => ApplyStat(4, p) };
+                case 5: return new UpgradeOffer { title = Core.Localization.T("upgrade.stat.5"), desc = "", kind = 5, apply = () => ApplyStat(5, p) };
+                case 6: return new UpgradeOffer { title = Core.Localization.T("upgrade.stat.6"), desc = "", kind = 6, apply = () => ApplyStat(6, p) };
                 default: return default;
             }
         }
@@ -252,15 +252,15 @@ namespace StarPixel.Combat
         {
             switch (d.weaponType)
             {
-                case WeaponType.Scatter: return "一次发射多枚弹体";
-                case WeaponType.Nova: return "周期性以自身为中心爆发";
-                case WeaponType.Orbit: return "环绕自身的近战刃";
-                case WeaponType.Chain: return "在敌人之间跳跃的闪电";
-                case WeaponType.Boomerang: return "飞出后返回的回旋刃";
-                case WeaponType.Homing: return "自动追踪敌人的导弹";
-                case WeaponType.Aura: return "持续伤害身边敌人的领域";
-                case WeaponType.Mine: return "埋设后自动引爆的区域封锁";
-                default: return "自动锁定最近敌人";
+                case WeaponType.Scatter: return Core.Localization.T("weapon.desc.scatter");
+                case WeaponType.Nova: return Core.Localization.T("weapon.desc.nova");
+                case WeaponType.Orbit: return Core.Localization.T("weapon.desc.orbit");
+                case WeaponType.Chain: return Core.Localization.T("weapon.desc.chain");
+                case WeaponType.Boomerang: return Core.Localization.T("weapon.desc.boomerang");
+                case WeaponType.Homing: return Core.Localization.T("weapon.desc.homing");
+                case WeaponType.Aura: return Core.Localization.T("weapon.desc.aura");
+                case WeaponType.Mine: return Core.Localization.T("weapon.desc.mine");
+                default: return Core.Localization.T("weapon.desc.projectile");
             }
         }
     }

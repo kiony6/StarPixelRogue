@@ -101,23 +101,30 @@ namespace StarPixel.Core.CloudSave
         public static Config OverrideConfig { get; set; }
 
         /// <summary>
-        /// 未启用的具体原因（已启用时返回空串）。
+        /// 未启用的具体原因——返回的是**本地化键**（已启用时返回空串）。
         /// 刻意让 <see cref="Enabled"/> 直接由本属性推导：两处各写一份判定迟早会漂移，
         /// 而实测需要能断言"是因为哪道开关被关掉的"，而不只是一个笼统的 false。
+        /// M18 续四：原先直接返回成品中文，英文界面下诊断/设置页会冒出中文；
+        /// 改存键后由 <see cref="DisabledReasonText"/> 渲染（与 LastStatus 同一套做法）。
+        /// 断言用键、展示用文案，两者解耦——改文案不会弄坏实测判据。
         /// </summary>
         public string DisabledReason
         {
             get
             {
-                if (Provider == null) return "Provider 缺失";
-                if (!Provider.Configured) return "后端未配置（或地址非 HTTPS）";
+                if (Provider == null) return "cloud.reason.no_provider";
+                if (!Provider.Configured) return "cloud.reason.not_configured";
                 var s = SettingsManager.Instance;
-                if (s == null) return "设置管理器缺失";
-                if (!s.Current.cloudSave) return "用户未开启";                          // ① 用户未开启（默认关）
-                if (!s.TermsAgreed(VersionInfo.ComplianceVersion)) return "未同意最新版隐私政策";   // ②
+                if (s == null) return "cloud.reason.no_settings";
+                if (!s.Current.cloudSave) return "cloud.reason.user_off";                   // ① 用户未开启（默认关）
+                if (!s.TermsAgreed(VersionInfo.ComplianceVersion)) return "cloud.reason.not_agreed";  // ②
                 return "";
             }
         }
+
+        /// <summary>已本地化的未启用原因（给人看时用这个；给脚本断言用 <see cref="DisabledReason"/>）。</summary>
+        public string DisabledReasonText =>
+            string.IsNullOrEmpty(DisabledReason) ? "" : Localization.T(DisabledReason);
 
         public static void Ensure()
         {
