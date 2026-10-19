@@ -46,6 +46,9 @@ namespace StarPixel
             // M19：防沉迷无头实测（正常启动不受影响）
             if (HasArg("-playtimeProbe")) { StartPlaytimeProbe(); return; }
 
+            // M20：持久化层无头实测（正常启动不受影响）
+            if (HasArg("-persistenceProbe")) { StartPersistenceProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -345,6 +348,21 @@ namespace StarPixel
             StarPixel.Dev.PlaytimeProbe.Start(
                 ArgValue("-playtimeScene", "MINOR"),
                 ArgValue("-playtimeLang", Core.Localization.LangZh));
+        }
+
+        /// <summary>
+        /// M20 持久化层无头实测入口：交给 <see cref="Dev.PersistenceProbe"/> 验证
+        /// SaveManager（战绩/图鉴/往返/损坏回退）与 Telemetry（JSONL 合法性/失败重试/关开关清队列）。
+        /// 探针会写真实的 save.json / telemetry 文件——驱动脚本负责跑前备份、跑后恢复。
+        /// 参数：-persistenceScene SAVE|TELEMETRY（默认 SAVE）
+        /// </summary>
+        private static void StartPersistenceProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;          // 同其它实测：不锁帧会把每帧告警刷成 GB 级日志
+            PrepareStage();
+            StarPixel.Dev.PersistenceProbe.Start(ArgValue("-persistenceScene", "SAVE"));
         }
 
         private static void OpenLobby()

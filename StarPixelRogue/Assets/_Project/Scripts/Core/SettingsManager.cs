@@ -129,7 +129,14 @@ namespace StarPixel.Core
         public void SetQuality(int q) { Current.quality = Mathf.Clamp(q, 0, 2); Save(); }
         public void SetFullscreen(bool on) { Current.fullscreen = on; Save(); }
         public void SetScreenShake(bool on) { Current.screenShake = on; Save(); }
-        public void SetTelemetry(bool on) { Current.telemetry = on; Save(); }
+        public void SetTelemetry(bool on)
+        {
+            Current.telemetry = on;
+            Save();
+            // M20：关掉开关的同时丢弃尚未落盘的事件——否则开关前缓存的数据
+            // 仍会在下一次 Flush 被写进文件，违背"关闭即停止采集"的承诺。
+            if (!on) Telemetry.DiscardQueue();
+        }
 
         /// <summary>
         /// M13：云存档开关（默认关闭）。仅置位开关——是否真正联网由
