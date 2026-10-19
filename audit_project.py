@@ -836,6 +836,99 @@ def check_eventbus_subscriptions():
                         % (rp, line, ev, body, body, body))
 
 
+# ============================================================================
+# 第 9 项：运行时 GPU 资源必须缓存（M30）
+# ============================================================================
+# 运行时 new 出来的 Texture2D / Sprite / Material 不挂在场景里、不进登记表，
+# Object.Destroy 也永远不会有人对它们调用（根本没人持有引用）。
+# GC 管不到 Unity 原生侧内存：托管包装被回收，显存里那张纹理还在。
+# 工厂型方法若不缓存，每调一次就泄漏一份——M30 实测里
+# SpriteFactory.MakeSolidSprite() 正是如此（连调 21 次只 0 次返回同一实例）。
+RES_CREATE_RE = re.compile(
+    r'\bnew\s+Texture2D\s*\(|\bSprite\.Create\s*\(|\bnew\s+Material\s*\(|\bnew\s+RenderTexture\s*\(')
+# 缓存读取的三种形态：字典 TryGetValue / 静态字段判空复用 / 空值合并
+RES_CACHE_RE = re.compile(r'\.TryGetValue\s*\(|\b\w+\s*==\s*null\b|\b\w+\s*!=\s*null\b|\?\?')
+RES_FACTORY_TYPE = re.compile(r'\b(?:class|struct)\s+(\w*(?:Factory|Cache|Pool|Provider))\b')
+# 只看**入口**方法：private 辅助（如 CreateSolid）的缓存责任在调用方身上，
+# 要求它也自带判空会把"缓存写在调用方"的正确写法误判成未缓存（M30 实测假阳性）。
+RES_FACTORY_METHOD = re.compile(
+    r'(?:public|internal|protected)\s+static\s+[\w<>\[\],\s\.]+?\s+((?:Make|Create|Get|Build|Load)\w*)\s*\(')
+
+
+def _res_class_of(lines, i):
+    """向上找最近的类声明，返回类名。"""
+    for j in range(i, -1, -1):
+        m = re.match(r'\s{4}(?:public|internal|private|protected|static|sealed|abstract|partial|\s)*'
+                     r'(?:class|struct)\s+(\w+)', lines[j])
+        if m:
+            return m.group(1)
+    return ""
+
+
+def check_runtime_asset_cache():
+    """
+    运行时创建的 Unity 资源必须缓存。
+
+    只管**工厂型**方法：类名以 Factory/Cache/Pool/Provider 结尾，
+    或方法名以 Make/Create/Get/Build/Load 开头的 static 方法。
+    一次性构造（Awake 里建一张自己的贴图）不在其列——它不是被反复调用的路径。
+
+    判据：方法体内必须出现缓存读取（TryGetValue / 字段判空复用 / ??）。
+    可用 `// @nocache: 理由` 显式豁免（豁免必须写理由，机器只验格式、不验语义）。
+
+    M30 真实缺陷：SpriteFactory.MakeSolidSprite() 每次调用都 new 一张 8x8 纹理，
+    而爆发环 / 警示圈 / 链闪电全在高频路径上调用它——纹理只涨不降。
+    类里明明已经有一张共享的 _whiteTex，MakeSolidSprite 却完全没用它。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)
+        lines = strip_noise(raw).split('\n')
+        raw_lines = raw.split('\n')
+        spans = method_spans(lines)
+
+        for i, ln in enumerate(lines):
+            if not RES_CREATE_RE.search(ln):
+                continue
+            body, method = _body_for(lines, spans, i)
+            cls = _res_class_of(lines, i)
+
+            is_factory_cls = bool(RES_FACTORY_TYPE.search(cls or ""))
+            is_factory_m = False
+            decl = ""
+            for s, e, d in spans:
+                if s <= i <= e:
+                    decl = d
+                    break
+            if RES_FACTORY_METHOD.search(decl):
+                is_factory_m = True
+            if not (is_factory_cls or is_factory_m):
+                continue
+
+            if RES_CACHE_RE.search(body):
+                continue
+
+            # 豁免必须写在创建点附近且带理由
+            ok = False
+            for j in range(max(0, i - 3), min(len(raw_lines), i + 2)):
+                if '@nocache:' in raw_lines[j] and raw_lines[j].split('@nocache:', 1)[1].strip():
+                    ok = True
+                    break
+            if ok:
+                info("资源缓存豁免: %s 第 %d 行（人工确认）" % (rp, i + 1))
+                continue
+
+            err("运行时资源未缓存: %s 第 %d 行 %s —— 类 %s / 方法 %s\n"
+                "      这是工厂型方法，每次调用都会在原生侧新建一份资源，而没人持有引用、\n"
+                "      也就永远不会被 Destroy：GC 回收托管包装，显存里的纹理还在（M30 实测缺陷）。\n"
+                "      修法：按 key 缓存（Dictionary + TryGetValue）或返回共享实例；\n"
+                "      确属一次性构造则写 // @nocache: 理由。"
+                % (rp, i + 1, ln.strip()[:70], cls or "?", method or "?"))
+
+
 # ── 自检：证明"判据真的会红" ──────────────────────────────
 # 静态检查最容易出现的失败是"永远不报错"——第 7 项若写成摆设，工程照样一片绿，
 # 而 M24/M26/M27 那三处缺陷会继续静静地堆在场景里。
@@ -1096,6 +1189,128 @@ namespace A
 """),
 ]
 
+# 第 9 项：运行时资源缓存。夹具同样要证明"该红的必须红"。
+SELFTEST_RES = [
+    ("res01_工厂有判空缓存", False, """
+namespace A
+{
+    public static class SpriteFactory
+    {
+        private static Sprite _solid;
+        public static Sprite MakeSolid()
+        {
+            if (_solid != null) return _solid;
+            var tex = new Texture2D(8, 8);
+            return Sprite.Create(tex, new Rect(0, 0, 8, 8), Vector2.zero);
+        }
+    }
+}
+"""),
+    ("res02_工厂无缓存", True, """
+namespace A
+{
+    public static class SpriteFactory
+    {
+        public static Sprite MakeSolid()
+        {
+            var tex = new Texture2D(8, 8);
+            return Sprite.Create(tex, new Rect(0, 0, 8, 8), Vector2.zero);
+        }
+    }
+}
+"""),
+    ("res03_字典缓存", False, """
+namespace A
+{
+    public static class TexCache
+    {
+        private static readonly Dictionary<string, Sprite> _c = new Dictionary<string, Sprite>();
+        public static Sprite Get(string k)
+        {
+            if (_c.TryGetValue(k, out var s)) return s;
+            var tex = new Texture2D(8, 8);
+            return Sprite.Create(tex, new Rect(0, 0, 8, 8), Vector2.zero);
+        }
+    }
+}
+"""),
+    ("res04_一次性构造不查", False, """
+namespace A
+{
+    public class HudBar : MonoBehaviour
+    {
+        private void Start()
+        {
+            var tex = new Texture2D(4, 4);
+        }
+    }
+}
+"""),
+    ("res05_Make开头静态方法无缓存", True, """
+namespace A
+{
+    public static class IconHelper
+    {
+        public static Sprite MakeIcon()
+        {
+            var m = new Material(Shader.Find("Sprites/Default"));
+            var tex = new Texture2D(16, 16);
+            return Sprite.Create(tex, new Rect(0, 0, 16, 16), Vector2.zero);
+        }
+    }
+}
+"""),
+    ("res06_带理由豁免", False, """
+namespace A
+{
+    public static class BootFactory
+    {
+        public static Sprite CreateSplash()
+        {
+            // @nocache: 启动画面只建一次，进程内不再调用
+            var tex = new Texture2D(64, 64);
+            return Sprite.Create(tex, new Rect(0, 0, 64, 64), Vector2.zero);
+        }
+    }
+}
+"""),
+    ("res07_空理由豁免无效", True, """
+namespace A
+{
+    public static class BootFactory
+    {
+        public static Sprite CreateSplash()
+        {
+            // @nocache:
+            var tex = new Texture2D(64, 64);
+            return Sprite.Create(tex, new Rect(0, 0, 64, 64), Vector2.zero);
+        }
+    }
+}
+"""),
+    # M30 实测假阳性：缓存写在 public 入口、private 辅助只管造——不该判辅助方法未缓存
+    ("res08_私有辅助由调用方缓存", False, """
+namespace A
+{
+    public static class SpriteFactory
+    {
+        private static Sprite _solid;
+        public static Sprite MakeSolid()
+        {
+            if (_solid != null) return _solid;
+            _solid = CreateSolid();
+            return _solid;
+        }
+        private static Sprite CreateSolid()
+        {
+            var tex = new Texture2D(8, 8);
+            return Sprite.Create(tex, new Rect(0, 0, 8, 8), Vector2.zero);
+        }
+    }
+}
+"""),
+]
+
 
 def _run_fixtures(fixtures, checks):
     """把夹具写进临时目录跑一遍指定检查，返回被报错的夹具名集合。"""
@@ -1126,6 +1341,7 @@ def selftest():
     groups = [
         ("归属检查（第 7 项）", SELFTEST, [check_orphan_gameobjects]),
         ("事件总线订阅检查（第 8 项）", SELFTEST_EB, [check_eventbus_subscriptions]),
+        ("运行时资源缓存检查（第 9 项）", SELFTEST_RES, [check_runtime_asset_cache]),
     ]
 
     all_bad = 0
@@ -1165,6 +1381,7 @@ def main():
     check_missing_usings()
     check_orphan_gameobjects()
     check_eventbus_subscriptions()
+    check_runtime_asset_cache()
 
     n = len(cs_files())
     print("=" * 68)

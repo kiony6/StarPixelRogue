@@ -14,6 +14,7 @@ namespace StarPixel.Core
     {
         private const float PPU = 32f;
         private static Texture2D _whiteTex;
+        private static Sprite _solid;   // M30：共享纯白方块（见 MakeSolidSprite 注释）
         private static readonly Dictionary<string, Sprite> _cache = new Dictionary<string, Sprite>();
 
         public static Texture2D WhiteTexture
@@ -32,10 +33,44 @@ namespace StarPixel.Core
             }
         }
 
-        public static Sprite MakeSolidSprite() => MakeSolidSprite(Color.white);
+        public static Sprite MakeSolidSprite() => Solid();
 
-        /// <summary>用指定颜色生成 8x8 方块（PPU=8 → 1 世界单位）。</summary>
+        /// <summary>
+        /// 用指定颜色生成 8x8 方块（PPU=8 → 1 世界单位）。
+        ///
+        /// M30：本方法此前**每次调用都 new 一张纹理**，而它挂在最热的路径上——
+        /// 爆发环、Boss 警示圈、链闪电的每段电弧每次生成都要调一次。
+        /// 运行时 new 出来的 Texture2D 不挂场景、不进登记表、也没人持有引用去 Destroy：
+        /// GC 回收得了托管包装，回收不了 Unity 原生侧那张纹理。
+        /// 实测连放 24 轮特效纹理从 29 涨到 173，重开三局涨 18，只涨不降。
+        /// 而本类里本来就有一张共享白纹理——MakeSolidSprite 却完全没用它。
+        ///
+        /// 所有调用点都是 `sr.sprite = ...; sr.color = ...`（颜色由 SpriteRenderer 决定），
+        /// 因此纯白这一路直接返回共享实例即可；带染色的按 8bit 量化进缓存，
+        /// 调用点的颜色集合有限，不会无界增长。
+        /// </summary>
         public static Sprite MakeSolidSprite(Color tint)
+        {
+            if (tint == Color.white) return Solid();
+
+            var c32 = (Color32)tint;
+            string key = "solid:" + c32.r + "_" + c32.g + "_" + c32.b + "_" + c32.a;
+            if (_cache.TryGetValue(key, out var cached) && cached != null) return cached;
+
+            var sp = CreateSolid(tint);
+            _cache[key] = sp;
+            return sp;
+        }
+
+        /// <summary>共享的纯白方块：唯一一张，全工程复用。</summary>
+        private static Sprite Solid()
+        {
+            if (_solid != null) return _solid;
+            _solid = CreateSolid(Color.white);
+            return _solid;
+        }
+
+        private static Sprite CreateSolid(Color tint)
         {
             var tex = new Texture2D(8, 8, TextureFormat.RGBA32, false);
             tex.filterMode = FilterMode.Point;

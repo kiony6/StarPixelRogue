@@ -86,6 +86,9 @@ namespace StarPixel
             // M29：静态事件总线订阅对称性（反射自检 / 重开累积 / 升级面板重复）无头实测
             if (HasArg("-subProbe")) { StartSubProbe(); return; }
 
+            // M30：运行时 GPU 资源（计数器自检 / 高频特效连放 / 重开累积 / 静态缓存存活）无头实测
+            if (HasArg("-gpuProbe")) { StartGpuProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -533,6 +536,15 @@ namespace StarPixel
         /// 与前面几轮探针不同，这一轮要盯的不是场景里的对象，而是**委托引用**——
         /// 漏订阅时场景里什么都多不出来，只能靠反射读 EventBus 的委托链才看得见。
         /// </summary>
+        private static void StartGpuProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;
+            PrepareStage();
+            StarPixel.Dev.GpuProbe.Start(ArgValue("-gpuScene", "BASE"));
+        }
+
         private static void StartSubProbe()
         {
             Core.SettingsManager.Ensure();
