@@ -55,6 +55,9 @@ namespace StarPixel
             // M22：设置面板真实交互与落盘往返无头实测（正常启动不受影响）
             if (HasArg("-settingsProbe")) { StartSettingsProbe(); return; }
 
+            // M23：选角 ↔ 开局 与 升级 ↔ 组合技 链路无头实测（正常启动不受影响）
+            if (HasArg("-buildProbe")) { StartBuildProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -408,6 +411,23 @@ namespace StarPixel
             Application.targetFrameRate = 60;          // 同其它实测：不锁帧会把每帧告警刷成 GB 级日志
             PrepareStage();
             StarPixel.Dev.SettingsProbe.Start(ArgValue("-settingsScene", "TOGGLES"));
+        }
+
+        /// <summary>
+        /// M23 选角/成长链路无头实测入口：交给 <see cref="Dev.BuildProbe"/> 验证
+        /// 「点选角按钮真的改存档 / 重启后开局用的是选中的角色与数值 / 十把武器都能真的打出伤害 /
+        /// 四条组合技各自生效 / 七项属性强化各自生效 / 武器等级封顶」。
+        /// 注意本入口**不**在这里开局：APPLY 与 PROGRESSION 场景需要先读存档再走 GameBuilder.Build，
+        /// 由探针自己调用，保证"选角 → 存档 → 开局"整条链是同一个真实路径。
+        /// 参数：-buildScene SELECT|APPLY|PROGRESSION（默认 SELECT）
+        /// </summary>
+        private static void StartBuildProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;          // 同其它实测：不锁帧会把每帧告警刷成 GB 级日志
+            PrepareStage();
+            StarPixel.Dev.BuildProbe.Start(ArgValue("-buildScene", "SELECT"));
         }
 
         private static void OpenLobby()

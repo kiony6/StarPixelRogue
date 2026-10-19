@@ -55,8 +55,18 @@ namespace StarPixel.Enemy
 
         public void StartWaves() => NextWave();
 
+        /// <summary>
+        /// M23 无头实测：暂停波次推进（默认 false，正常游戏永不置位）。
+        /// 为什么需要：实测要自己摆靶子并精确数伤害，而正常波次会持续往 ActiveEnemies 里塞敌人——
+        /// 它们既会抢走"最近目标"让武器打偏，也会顺带把玩家撞掉血、把数值断言搅乱。
+        /// 只冻结刷怪与波次推进，不动已存在的敌人与 Boss 流程。
+        /// </summary>
+        public bool FreezeWaves { get; set; }
+
         void Update()
         {
+            if (FreezeWaves) return;
+
             // 联机模式下波次由房主驱动，玩家死亡不阻断（权威侧统一结算）
             if (!NetSession.IsNetworked && (_playerDamageable == null || _playerDamageable.isDead)) return;
 

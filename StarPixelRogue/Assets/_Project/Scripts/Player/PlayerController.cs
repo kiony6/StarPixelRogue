@@ -110,22 +110,41 @@ namespace StarPixel.Player
         private int _appliedCharacterId = -1;
 
         /// <summary>
+        /// M23：角色乘区的基准值。乘区是**乘算**的，若直接在当前 stats 上再乘一次，
+        /// 换角色就会叠乘而不是替换（守卫 1.35 倍切游侠再切回守卫 → 1.35×1.35 = 1.82 倍血量）。
+        /// 故先记下"第一次应用角色前"的七项基准值，之后每次应用都从基准重算。
+        /// </summary>
+        private PlayerStats _characterBaseStats;
+        private bool _hasCharacterBase;
+
+        /// <summary>
         /// M6.2：应用角色定义——属性乘区 + 替换起始武器 + 生命上限同步。
         /// 幂等：同一角色重复调用不会重复乘算（联机下客户端预测与房主应用各调一次）。
+        /// M23：换角色时从**基准值**重算乘区，避免叠乘（见 <see cref="_characterBaseStats"/>）。
         /// </summary>
         public void ApplyCharacter(CharacterDef def)
         {
             if (def == null) return;
             if (_appliedCharacterId == def.id) return;
+            // 注意：这里**不能**因为 id 不同就跳过——同 id 但数值被改过（例如作弊/热更）仍应重新应用，
+            // 只是幂等判定以 id 为准；基准快照保证无论应用多少次都不会越乘越大。
+            bool switching = _appliedCharacterId >= 0;
             _appliedCharacterId = def.id;
 
-            stats.maxHp *= def.hpMult;
-            stats.moveSpeed *= def.speedMult;
-            stats.attackDamageMult *= def.damageMult;
-            stats.cooldownMult *= def.cooldownMult;
-            stats.pickupRadius *= def.pickupMult;
-            stats.areaMult *= def.areaMult;
-            stats.xpGainMult *= def.xpMult;
+            if (!_hasCharacterBase)
+            {
+                _characterBaseStats = stats.Clone();
+                _hasCharacterBase = true;
+            }
+
+            // 从基准值重算（而不是在当前值上再乘）
+            stats.maxHp = _characterBaseStats.maxHp * def.hpMult;
+            stats.moveSpeed = _characterBaseStats.moveSpeed * def.speedMult;
+            stats.attackDamageMult = _characterBaseStats.attackDamageMult * def.damageMult;
+            stats.cooldownMult = _characterBaseStats.cooldownMult * def.cooldownMult;
+            stats.pickupRadius = _characterBaseStats.pickupRadius * def.pickupMult;
+            stats.areaMult = _characterBaseStats.areaMult * def.areaMult;
+            stats.xpGainMult = _characterBaseStats.xpGainMult * def.xpMult;
 
             // 生命上限同步（GameBuilder 的 Damageable.Init 与 stats.maxHp 可能不一致，这里统一）
             if (damageable != null)

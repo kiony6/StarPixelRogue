@@ -28,5 +28,15 @@ namespace StarPixel.Player
         public float xpGainMult = 1f;        // 经验获取倍率
         public float cooldownMult = 1f;      // 冷却倍率（越低越快）
         public float areaMult = 1f;          // 范围/体积倍率
+
+        /// <summary>
+        /// M23：浅拷贝。角色乘区是乘算的，换角色必须从**基准值**重算而不是在当前值上再乘，
+        /// 否则重装守卫会把 1.35 倍再乘一次（实测 148.5 → 200.5 血）。
+        /// 字段全部是值类型，浅拷贝即足够。
+        /// </summary>
+        public PlayerStats Clone()
+        {
+            return (PlayerStats)MemberwiseClone();
+        }
     }
 }

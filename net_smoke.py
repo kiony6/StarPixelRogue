@@ -40,7 +40,13 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_EXE = os.path.join(ROOT, "StarPixelRogue", "Build", "Smoke", "StarPixelRogue.exe")
+# 联机冒烟必须跑 BuildScript.HeadlessNetBuild 的产物（Build/SmokeNet）。
+# 这里原先默认指向单机的 Build/Smoke，结果整套联机断言都建在单机二进制上：
+# 双端照常启动、照常跑满 60s、异常 0，只是"网络玩家数 0 / 同步波次 -1"——
+# 一个看起来像联机同步坏了的假故障，实际是压根没测联机版本。
+NET_EXE = os.path.join(ROOT, "StarPixelRogue", "Build", "SmokeNet", "StarPixelRogue.exe")
+SOLO_EXE = os.path.join(ROOT, "StarPixelRogue", "Build", "Smoke", "StarPixelRogue.exe")
+DEFAULT_EXE = NET_EXE if os.path.exists(NET_EXE) else SOLO_EXE
 
 SMOKE_RE = re.compile(r"\[SMOKE\]\s*(.+?)\s{2,}(.+?)\s*$")
 
@@ -236,7 +242,17 @@ def main():
         print("[错误] 找不到构建产物: %s" % rel(exe))
         print("       请先构建，例如：")
         print("       Unity.exe -batchmode -nographics -quit -projectPath StarPixelRogue \\")
-        print("         -executeMethod StarPixel.EditorTools.BuildScript.HeadlessBuild")
+        print("         -executeMethod StarPixel.EditorTools.BuildScript.HeadlessNetBuild")
+        return 2
+
+    # 用单机产物跑联机冒烟会得到一个极具误导性的结果：双端都正常启动、跑满时长、异常 0，
+    # 只是网络玩家数恒为 0、同步波次恒为 -1——看起来像同步链路坏了，其实是没测联机版本。
+    # 宁可在这里直接拒绝，也不要让这种假故障浪费一轮排查。
+    if os.path.normcase(os.path.abspath(os.path.dirname(exe))) == \
+            os.path.normcase(os.path.abspath(os.path.dirname(SOLO_EXE))):
+        print("[错误] 这是单机产物（Build/Smoke），不含联机装配，跑联机冒烟只会得到假故障。")
+        print("       联机产物在 %s。" % rel(NET_EXE))
+        print("       请先构建：-executeMethod StarPixel.EditorTools.BuildScript.HeadlessNetBuild")
         return 2
 
     host_log = os.path.join(ROOT, "net_host.log")
