@@ -83,6 +83,9 @@ namespace StarPixel
             // M28：新建对象归属（链闪电 / Boss / 场景根兜底）无头实测（正常启动不受影响）
             if (HasArg("-orphanProbe")) { StartOrphanProbe(); return; }
 
+            // M29：静态事件总线订阅对称性（反射自检 / 重开累积 / 升级面板重复）无头实测
+            if (HasArg("-subProbe")) { StartSubProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -523,6 +526,20 @@ namespace StarPixel
             Application.targetFrameRate = 60;
             PrepareStage();
             StarPixel.Dev.OrphanProbe.Start(ArgValue("-orphanScene", "CHAIN"));
+        }
+
+        /// <summary>
+        /// M29：静态事件总线订阅对称性实测。
+        /// 与前面几轮探针不同，这一轮要盯的不是场景里的对象，而是**委托引用**——
+        /// 漏订阅时场景里什么都多不出来，只能靠反射读 EventBus 的委托链才看得见。
+        /// </summary>
+        private static void StartSubProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;
+            PrepareStage();
+            StarPixel.Dev.SubProbe.Start(ArgValue("-subScene", "BASE"));
         }
 
         private static void OpenLobby()

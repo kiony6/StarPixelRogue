@@ -38,6 +38,20 @@ namespace StarPixel.Core
             if (_cam != null) _baseOrtho = _cam.orthographicSize;
         }
 
+        /// <summary>
+        /// M29：静态事件必须退订。
+        ///
+        /// 本组件当前挂在主相机上，而相机是 `@owner: stage`、不随拆世界销毁，
+        /// 所以眼下不会像 LevelUpManager 那样一局攒一份——但这是**运气**不是设计：
+        /// 只要哪天把相机纳入 Track（或改成挂到玩家身上），这里立刻变成同一个坑。
+        /// 顺带清掉 Instance：否则销毁后 `CameraShake.Instance` 会一直指向已销毁对象。
+        /// </summary>
+        void OnDestroy()
+        {
+            EventBus.OnShakeRequest -= Shake;
+            if (Instance == this) Instance = null;
+        }
+
         /// <summary>跟随目标（通常是玩家），使相机基础位置始终跟随玩家。</summary>
         public void Configure(Transform target)
         {

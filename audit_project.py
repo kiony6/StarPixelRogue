@@ -754,7 +754,89 @@ def check_orphan_gameobjects():
                 % (rp, i + 1, ln.strip()[:90]))
 
 
-# ── 自检：证明"归属判据真的会红" ──────────────────────────────
+# ============================================================================
+# 第 8 项：EventBus 订阅对称性（M29）
+# ============================================================================
+EB_SUB_RE = re.compile(r'EventBus\.(\w+)\s*([+-])=\s*')
+
+
+def _eb_rhs(code, i):
+    """从订阅点右侧取处理器片段：平衡括号直到语句末尾的 `;`。"""
+    depth = 0
+    j = i
+    while j < len(code):
+        c = code[j]
+        if c in '({[':
+            depth += 1
+        elif c in ')}]':
+            depth -= 1
+        elif c == ';' and depth == 0:
+            break
+        j += 1
+    return code[i:j]
+
+
+def scan_eventbus(code):
+    """返回 [(事件名, '+'/'-', 处理器片段, 行号)]。"""
+    out = []
+    for m in EB_SUB_RE.finditer(code):
+        rhs = _eb_rhs(code, m.end())
+        line = code.count('\n', 0, m.start()) + 1
+        out.append((m.group(1), m.group(2), rhs.strip(), line))
+    return out
+
+
+def check_eventbus_subscriptions():
+    """
+    静态事件总线的订阅必须退订得掉。
+
+    EventBus 是静态的，订阅者却是有生命周期的 MonoBehaviour：忘了退订，
+    委托链会一直攥着已经销毁的对象。这与第 7 项是同一类「跨局残留」，
+    但漏的是**引用**而不是 GameObject——场景里什么都多不出来，
+    扫场景根扫不到它，只能从代码层面判。
+
+    判据刻意分两种形态：
+      · 方法组 `+= Handler` —— 必须有同事件的 `-= Handler`；
+      · 直接 `+= lambda`   —— 匿名委托没法按名匹配，只能要求该文件对该事件
+                              有**任意**退订（正确写法是先存成字段再 -= 那个字段）。
+    只按名匹配的话 lambda 形态会整个漏过去——M29 抓到的
+    UI/LevelUpManager 正是 lambda：每重开一局链上就多一份，
+    OnLevelUp 订阅数 3→6，升一级弹三次面板。
+
+    同样排除 Dev/：探针自己订阅后由进程退出回收，不参与运行时生命周期。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        code = strip_noise(read(path))
+        items = scan_eventbus(code)
+        if not items:
+            continue
+
+        subs = {}
+        for ev, op, rhs, line in items:
+            subs.setdefault(ev, {'+': [], '-': []})[op].append((rhs, line))
+
+        for ev, d in subs.items():
+            rems = [r.rstrip(';').strip() for r, _ in d['-']]
+            for rhs, line in d['+']:
+                body = rhs.rstrip(';').strip()
+                if '=>' in body or body.startswith('delegate'):
+                    if not rems:
+                        err("事件总线: %s 第 %d 行 EventBus.%s += 匿名委托，该文件没有任何 -= ——"
+                            " 每次重建都多一份订阅，升一级会弹 N 次面板。\n"
+                            "      修法：把委托存成字段（_h = ...; += _h;），再在 OnDestroy 里 -= _h。"
+                            % (rp, line, ev))
+                elif body not in rems:
+                    err("事件总线: %s 第 %d 行 EventBus.%s += %s，但同文件没有对应的 -= %s ——"
+                        " 对象销毁后委托链仍攥着它。\n"
+                        "      修法：在 OnDestroy 里 -= %s。"
+                        % (rp, line, ev, body, body, body))
+
+
+# ── 自检：证明"判据真的会红" ──────────────────────────────
 # 静态检查最容易出现的失败是"永远不报错"——第 7 项若写成摆设，工程照样一片绿，
 # 而 M24/M26/M27 那三处缺陷会继续静静地堆在场景里。
 # 所以这里用一组最小夹具反向验证：该红的必须红、不该红的必须不红。
@@ -913,8 +995,110 @@ namespace A
 ]
 
 
-def selftest():
-    """把夹具写进临时目录跑一遍归属检查，逐个核对"该红/不该红"。"""
+SELFTEST_EB = [
+    ("eb01_方法组漏退订", True, """
+namespace A
+{
+    public class Shake : MonoBehaviour
+    {
+        void Awake()
+        {
+            EventBus.OnShakeRequest += Shake2;
+        }
+        private void Shake2(float a, float b) { }
+    }
+}
+"""),
+    ("eb02_方法组对称", False, """
+namespace A
+{
+    public class Hud : MonoBehaviour
+    {
+        void Awake()
+        {
+            EventBus.OnEnemyKilled += OnKill;
+        }
+        void OnDestroy()
+        {
+            EventBus.OnEnemyKilled -= OnKill;
+        }
+        private void OnKill(int n) { }
+    }
+}
+"""),
+    ("eb03_lambda直接订阅", True, """
+namespace A
+{
+    public class Panel : MonoBehaviour
+    {
+        void Awake()
+        {
+            EventBus.OnLevelUp += lv => { Show(lv); };
+        }
+        private void Show(int lv) { }
+    }
+}
+"""),
+    ("eb04_lambda存字段后退订", False, """
+namespace A
+{
+    public class Panel : MonoBehaviour
+    {
+        private System.Action<int> _onLevelUp;
+        void Awake()
+        {
+            _onLevelUp = lv => { Show(lv); };
+            EventBus.OnLevelUp += _onLevelUp;
+        }
+        void OnDestroy()
+        {
+            EventBus.OnLevelUp -= _onLevelUp;
+        }
+        private void Show(int lv) { }
+    }
+}
+"""),
+    ("eb05_跨事件同名不算", True, """
+namespace A
+{
+    public class Sfx : MonoBehaviour
+    {
+        void Awake()
+        {
+            EventBus.OnGameOver += OnEnd;
+        }
+        void OnDestroy()
+        {
+            EventBus.OnLevelUp -= OnEnd;
+        }
+        private void OnEnd() { }
+    }
+}
+"""),
+    ("eb06_别的事件有退订不算", True, """
+namespace A
+{
+    public class Sfx : MonoBehaviour
+    {
+        void Awake()
+        {
+            EventBus.OnLevelUp += lv => { Show(lv); };
+            EventBus.OnGameOver += OnEnd;
+        }
+        void OnDestroy()
+        {
+            EventBus.OnGameOver -= OnEnd;
+        }
+        private void Show(int lv) { }
+        private void OnEnd() { }
+    }
+}
+"""),
+]
+
+
+def _run_fixtures(fixtures, checks):
+    """把夹具写进临时目录跑一遍指定检查，返回被报错的夹具名集合。"""
     import shutil
     import tempfile
 
@@ -922,32 +1106,47 @@ def selftest():
     tmp = tempfile.mkdtemp(prefix="starpixel-audit-selftest-")
     saved, saved_errors, saved_infos = ASSETS_DIR, errors[:], infos[:]
     try:
-        for name, _expect, code in SELFTEST:
+        for name, _expect, code in fixtures:
             with open(os.path.join(tmp, name + ".cs"), "w", encoding="utf-8") as f:
                 f.write(code.lstrip("\n"))
         ASSETS_DIR = tmp
         errors.clear()
         infos.clear()
-        check_orphan_gameobjects()
-        flagged = {name for name, _e, _c in SELFTEST
-                   if any(name in e for e in errors)}
+        for c in checks:
+            c()
+        return {name for name, _e, _c in fixtures if any(name in e for e in errors)}
     finally:
         ASSETS_DIR = saved
         errors[:], infos[:] = saved_errors, saved_infos
         shutil.rmtree(tmp, ignore_errors=True)
 
-    bad = [(n, e) for n, e, _c in SELFTEST if (n in flagged) != e]
-    print("=" * 68)
-    print("归属检查自检（%d 个夹具）" % len(SELFTEST))
-    print("=" * 68)
-    for name, expect, _c in SELFTEST:
-        got = name in flagged
-        mark = "  OK" if got == expect else "FAIL"
-        print("  [%s] %-26s 期望%s 实际%s"
-              % (mark, name, "报错" if expect else "放行", "报错" if got else "放行"))
-    print("-" * 68)
-    print("结果：" + ("通过" if not bad else "未通过（%d 项不符）" % len(bad)))
-    return 1 if bad else 0
+
+def selftest():
+    """把夹具写进临时目录跑一遍，逐个核对"该红/不该红"。"""
+    groups = [
+        ("归属检查（第 7 项）", SELFTEST, [check_orphan_gameobjects]),
+        ("事件总线订阅检查（第 8 项）", SELFTEST_EB, [check_eventbus_subscriptions]),
+    ]
+
+    all_bad = 0
+    for title, fixtures, checks in groups:
+        flagged = _run_fixtures(fixtures, checks)
+        bad = [(n, e) for n, e, _c in fixtures if (n in flagged) != e]
+        all_bad += len(bad)
+        print("=" * 68)
+        print("%s · %d 个夹具" % (title, len(fixtures)))
+        print("=" * 68)
+        for name, expect, _c in fixtures:
+            got = name in flagged
+            mark = "  OK" if got == expect else "FAIL"
+            print("  [%s] %-26s 期望%s 实际%s"
+                  % (mark, name, "报错" if expect else "放行", "报错" if got else "放行"))
+        print("-" * 68)
+        print("结果：" + ("通过" if not bad else "未通过（%d 项不符）" % len(bad)))
+        print()
+
+    print("合计：" + ("通过" if not all_bad else "未通过（%d 项不符）" % all_bad))
+    return 1 if all_bad else 0
 
 
 def main():
@@ -965,6 +1164,7 @@ def main():
     check_duplicate_members()
     check_missing_usings()
     check_orphan_gameobjects()
+    check_eventbus_subscriptions()
 
     n = len(cs_files())
     print("=" * 68)

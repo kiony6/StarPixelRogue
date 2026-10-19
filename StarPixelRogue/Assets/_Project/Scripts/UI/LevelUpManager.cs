@@ -17,14 +17,36 @@ namespace StarPixel.UI
         private int _pending;
         private bool _externalCards;   // M4.5：联机客户端为 true——选卡一律由房主经 PresentExternal 推送
 
+        /// <summary>
+        /// M29：订阅必须**存成字段**再挂上去。
+        ///
+        /// 原来的写法是 `OnLevelUp += _ => { _pending++; TryPresent(); };`——匿名 lambda，
+        /// 而 EventBus 是**静态**的：本管理器由 GameBuilder 每局 Track 新建、
+        /// 拆世界时销毁，委托却一直攥着旧实例。重开三局后链上就攒了三份：
+        ///   · 升一级弹三次面板（玩家要连点三次才能继续）；
+        ///   · 更糟的是旧实例先执行，TryPresent → BuildPanel 里访问已销毁的 transform
+        ///     直接抛 NullReferenceException，**中断整条委托链**——排在后面的新实例
+        ///     压根收不到事件，于是面板一个都不弹，而 ShowPanel 已经把游戏暂停了：
+        ///     升级时画面停住、面板不出来，只能杀进程。
+        /// 存成字段后 OnDestroy 里 `-=` 同一实例即可精确退订。
+        /// </summary>
+        private System.Action<int> _onLevelUp;
+
         protected override void Awake()
         {
             base.Awake();
-            Core.EventBus.OnLevelUp += _ => { _pending++; TryPresent(); };
+            _onLevelUp = _ => { _pending++; TryPresent(); };
+            Core.EventBus.OnLevelUp += _onLevelUp;
         }
 
         void OnDestroy()
         {
+            // M29：静态事件必须退订——否则销毁后委托链仍攥着本实例（详见 _onLevelUp 注释）
+            if (_onLevelUp != null)
+            {
+                Core.EventBus.OnLevelUp -= _onLevelUp;
+                _onLevelUp = null;
+            }
             // M4.5：断线拆世界时防止时间缩放卡在 0（选卡面板打开中被销毁）
             if (Core.HitstopManager.Instance != null) Core.HitstopManager.Instance.SetPaused(false);
             else Time.timeScale = 1f;
