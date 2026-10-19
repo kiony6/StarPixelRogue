@@ -89,6 +89,9 @@ namespace StarPixel
             // M30：运行时 GPU 资源（计数器自检 / 高频特效连放 / 重开累积 / 静态缓存存活）无头实测
             if (HasArg("-gpuProbe")) { StartGpuProbe(); return; }
 
+            // M31：升级选卡生效链路（地基 / 属性 / 武器等级 / 解锁 / 组合技广播）无头实测
+            if (HasArg("-upgradeProbe")) { StartUpgradeProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -543,6 +546,15 @@ namespace StarPixel
             Application.targetFrameRate = 60;
             PrepareStage();
             StarPixel.Dev.GpuProbe.Start(ArgValue("-gpuScene", "BASE"));
+        }
+
+        private static void StartUpgradeProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;
+            PrepareStage();
+            StarPixel.Dev.UpgradeProbe.Start(ArgValue("-upgradeScene", "BASE"));
         }
 
         private static void StartSubProbe()

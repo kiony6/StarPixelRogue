@@ -616,7 +616,15 @@ namespace StarPixel.Player
             {
                 _weapons.Add(new WeaponSlot { def = def, level = 1, timer = 0f });
             }
+            // M31：这里原本只有 Recompute、没有 CheckCombos——而 LevelUpWeapon 两个都调。
+            // 后果是"数值对了、副作用漏了"：Recompute 会把 combo 的 bonus 写进
+            // ComboManager（伤害/穿透/减速全都算出来、功能是对的），但**广播走的是
+            // CheckCombos 里的 OnComboActivated**，玩家既收不到提示也听不到音效。
+            // 于是"解锁一把新武器刚好凑成组合"这条最自然的路径上，玩家白凑了一个组合、
+            // 全程毫不知情；而走"武器升级"路径凑成同一个组合却有提示——同一效果两条路
+            // 表现不一致，且**没有任何报错**，只能靠订阅事件才测得出来。
             ComboManager.Instance?.Recompute(GetTags());
+            CheckCombos();
             EventBus.RaiseWeaponsChanged();
             Core.SaveManager.Instance?.DiscoverWeapon(def.id);   // M6.4 图鉴
         }

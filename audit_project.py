@@ -929,6 +929,74 @@ def check_runtime_asset_cache():
                 % (rp, i + 1, ln.strip()[:70], cls or "?", method or "?"))
 
 
+# 第 10 项：派生物重算必须同步广播（M31）
+# ============================================================================
+# M31 抓的是一类比"数值错了"更难发现的缺陷：**数值对了，副作用漏了**。
+# 玩家解锁一把武器、刚好凑成组合技时，ComboManager.Recompute 会把 bonus
+# （伤害/穿透/减速）全部算出来——功能层面完全正确；但"提示与音效"走的是
+# 另一条路：CheckCombos 里广播的 OnComboActivated。漏了它，玩家白凑一个
+# 组合、全程毫不知情，而且**没有任何报错**：看字段是对的，只有订阅事件才测得出来。
+#
+# 判据：同一方法体内出现"重算派生物"的调用时，必须同时出现配套的"广播"调用。
+# 刻意**按方法配对而非按文件**：分开写在两个方法里照样算漏（夹具 cb06）。
+RECOMPUTE_RE = re.compile(r'\bRecompute\s*\(')
+BROADCAST_RE = re.compile(r'\bCheckCombos\s*\(')
+
+
+def check_derive_broadcast():
+    """
+    重算了派生物就必须同步广播（M31）。
+
+    只查"重算 + 广播"这一对配套动作：方法体内调了 Recompute（把 combo 加成
+    写进 ComboManager）就必须同时调 CheckCombos（向 UI/音效广播激活事件）。
+    只写前者，功能数值是对的、玩家却得不到任何反馈——这类缺陷不报错、不崩，
+    看字段也测不出来，只能靠订阅事件（M31 的 COMBO 场景正是这么抓到的）。
+
+    可用 `// @nobroadcast: 理由` 显式豁免，且**空理由无效**。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)
+        lines = strip_noise(raw).split('\n')
+        raw_lines = raw.split('\n')
+        spans = method_spans(lines)
+
+        for i, ln in enumerate(lines):
+            if not RECOMPUTE_RE.search(ln):
+                continue
+            # 跳过**声明行自身**：叫 Recompute 的方法，它的声明行会被上面的正则
+            # 当成一次"调用"，于是"重算的实现"被误判成"重算了却没广播"。
+            # 实测里 ComboManager.Recompute 就是这样被误报的（M31 假阳性）。
+            if any(s == i for s, _e, _d in spans):
+                continue
+            body, method = _body_for(lines, spans, i)
+
+            if BROADCAST_RE.search(body):
+                continue
+
+            # 豁免必须写在重算点附近且带理由
+            ok = False
+            for j in range(max(0, i - 3), min(len(raw_lines), i + 2)):
+                if '@nobroadcast:' in raw_lines[j] and raw_lines[j].split('@nobroadcast:', 1)[1].strip():
+                    ok = True
+                    break
+            if ok:
+                info("广播豁免: %s 第 %d 行（人工确认）" % (rp, i + 1))
+                continue
+
+            err("重算了派生物却没广播: %s 第 %d 行 %s —— 方法 %s\n"
+                "      这里调了 Recompute（加成已写进 ComboManager、功能是对的），"
+                "但没有调 CheckCombos——\n"
+                "      于是组合技的**提示与音效**不会发出来：玩家凑齐了却毫不知情（M31 实测缺陷）。\n"
+                "      这类缺陷不报错、不崩、看字段也是对的，只有订阅事件才测得出来。\n"
+                "      修法：Recompute 之后补一行 CheckCombos()；"
+                "确属无需反馈则写 // @nobroadcast: 理由。"
+                % (rp, i + 1, ln.strip()[:70], method or "?"))
+
+
 # ── 自检：证明"判据真的会红" ──────────────────────────────
 # 静态检查最容易出现的失败是"永远不报错"——第 7 项若写成摆设，工程照样一片绿，
 # 而 M24/M26/M27 那三处缺陷会继续静静地堆在场景里。
@@ -1312,6 +1380,116 @@ namespace A
 ]
 
 
+# 第 10 项：重算派生物必须同步广播。
+SELFTEST_CB = [
+    ("cb01_重算且广播", False, """
+namespace A
+{
+    public class Player
+    {
+        public void AddSkill(SkillDef def)
+        {
+            combo.Recompute(GetTags());
+            CheckCombos();
+        }
+        private void CheckCombos() { }
+    }
+}
+"""),
+    # M31 真实缺陷的形态：只有 Recompute，玩家收不到任何提示
+    ("cb02_只重算不广播", True, """
+namespace A
+{
+    public class Player
+    {
+        public void AddSkill(SkillDef def)
+        {
+            combo.Recompute(GetTags());
+            EventBus.RaiseWeaponsChanged();
+        }
+        private void CheckCombos() { }
+    }
+}
+"""),
+    # 没有重算就不查——本项只管"重算+广播"这一对
+    ("cb03_无重算不查", False, """
+namespace A
+{
+    public class Player
+    {
+        public void Tick()
+        {
+            transform.position += Vector3.one;
+        }
+    }
+}
+"""),
+    ("cb04_带理由豁免", False, """
+namespace A
+{
+    public class Player
+    {
+        public void SilentApply()
+        {
+            // @nobroadcast: 联机客户端镜像，由房主统一广播
+            combo.Recompute(GetTags());
+        }
+        private void CheckCombos() { }
+    }
+}
+"""),
+    ("cb05_空理由豁免无效", True, """
+namespace A
+{
+    public class Player
+    {
+        public void SilentApply()
+        {
+            // @nobroadcast:
+            combo.Recompute(GetTags());
+        }
+        private void CheckCombos() { }
+    }
+}
+"""),
+    # M31 实测假阳性：叫 Recompute 的方法，其**声明行**会被当成一次调用，
+    # 于是"重算的实现"被误判成"重算了却没广播"。声明行不算调用点。
+    ("cb07_重算方法自身的声明", False, """
+namespace A
+{
+    public class ComboManager
+    {
+        public void Recompute(List<string> tags)
+        {
+            var b = Compute(tags);
+            bonusDamageMult = b.damageMult;
+        }
+        private void CheckCombos() { }
+    }
+}
+"""),
+    # 刻意按方法配对：写在同一个类的另一个方法里不算——那样照样漏
+    ("cb06_广播在别的方法里", True, """
+namespace A
+{
+    public class Player
+    {
+        public void AddSkill(SkillDef def)
+        {
+            combo.Recompute(GetTags());
+        }
+        public void LevelUpWeapon(int id)
+        {
+            combo.Recompute(GetTags());
+            CheckCombos();
+        }
+        private void CheckCombos() { }
+    }
+}
+"""),
+]
+
+
 def _run_fixtures(fixtures, checks):
     """把夹具写进临时目录跑一遍指定检查，返回被报错的夹具名集合。"""
     import shutil
@@ -1342,6 +1520,7 @@ def selftest():
         ("归属检查（第 7 项）", SELFTEST, [check_orphan_gameobjects]),
         ("事件总线订阅检查（第 8 项）", SELFTEST_EB, [check_eventbus_subscriptions]),
         ("运行时资源缓存检查（第 9 项）", SELFTEST_RES, [check_runtime_asset_cache]),
+        ("派生物广播检查（第 10 项）", SELFTEST_CB, [check_derive_broadcast]),
     ]
 
     all_bad = 0
@@ -1382,6 +1561,7 @@ def main():
     check_orphan_gameobjects()
     check_eventbus_subscriptions()
     check_runtime_asset_cache()
+    check_derive_broadcast()
 
     n = len(cs_files())
     print("=" * 68)
