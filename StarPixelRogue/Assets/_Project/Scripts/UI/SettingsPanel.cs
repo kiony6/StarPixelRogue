@@ -77,7 +77,12 @@ namespace StarPixel.UI
 
         private void Rebuild()
         {
+            // M22 修复：语言切换会整体重建面板，而 Build() 之后没有 Show()。
+            // 旧实现里用户在设置页点一下「语言」，面板当场消失（连带回到主菜单），
+            // 得再点一次「设置」才回得来——切个语言被踢出去一次，等于这条路径不可用。
+            bool wasVisible = _root != null && _root.activeSelf;
             Build();
+            if (wasVisible) Show();
         }
 
         private void Build()
@@ -127,13 +132,23 @@ namespace StarPixel.UI
                         label.text = Core.Localization.T("settings.quality") + "：" + QualityLabel(next);
                 }, 18);
             // 语言循环：中文/English
-            var langBtn = Core.UIFactory.CreateButton(panel.transform, "Language",
+            // M22 实测修复：本对象在 lambda 里被引用，必须先声明再赋值（CS0841，同 Quality）。
+            Button langBtn = null;
+            langBtn = Core.UIFactory.CreateButton(panel.transform, "Language",
                 Core.Localization.T("settings.language") + "：" + Core.Localization.LanguageLabel(s.language),
                 new Vector2(-90, 10), new Vector2(280, 44), () =>
                 {
                     string next = Core.SettingsManager.Instance.Current.language == Core.Localization.LangZh
                         ? Core.Localization.LangEn : Core.Localization.LangZh;
                     Core.SettingsManager.Instance.SetLanguage(next);   // 触发 LanguageChanged → 面板重建
+                    // M22：此刻按钮已属于**被销毁的旧面板**。切到中文时 t() 恰好把「English」原样返回，
+                    // 缺的译（语言名是自指的，两个方向都有）只有在"English → 中文"这一次才暴露。
+                    // 于是用户看到按钮写着「Language：English」，点下去界面却变成中文——
+                    // 按钮说的和实际做的不一致，是比漏翻更糟的一种"看起来正常"。
+                    var label = langBtn != null ? langBtn.GetComponentInChildren<Text>() : null;
+                    if (label != null)
+                        label.text = Core.Localization.T("settings.language") + "：" +
+                                     Core.Localization.LanguageLabel(next);
                 }, 18);
 
             // 玩法开关改两列排布：为下方的云存档区块腾出约 80px。

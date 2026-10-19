@@ -52,6 +52,9 @@ namespace StarPixel
             // M21：合规门与同意链路无头实测（正常启动不受影响）
             if (HasArg("-complianceProbe")) { StartComplianceProbe(); return; }
 
+            // M22：设置面板真实交互与落盘往返无头实测（正常启动不受影响）
+            if (HasArg("-settingsProbe")) { StartSettingsProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -391,6 +394,20 @@ namespace StarPixel
             StarPixel.Dev.ComplianceProbe.Start(
                 ArgValue("-complianceScene", "FIRST"),
                 ArgValue("-complianceLang", Core.Localization.LangZh));
+        }
+
+        /// <summary>
+        /// M22 设置面板无头实测入口：交给 <see cref="Dev.SettingsProbe"/> 验证
+        /// 「控件点了真的生效并落盘 / 重启后原样读回 / 设置文件损坏不得静默清零」。
+        /// 参数：-settingsScene TOGGLES|ROUNDTRIP|NEGATIVE（默认 TOGGLES）
+        /// </summary>
+        private static void StartSettingsProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;          // 同其它实测：不锁帧会把每帧告警刷成 GB 级日志
+            PrepareStage();
+            StarPixel.Dev.SettingsProbe.Start(ArgValue("-settingsScene", "TOGGLES"));
         }
 
         private static void OpenLobby()

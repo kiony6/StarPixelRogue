@@ -66,10 +66,37 @@ namespace StarPixel.Core
             }
             catch (Exception e)
             {
+                // M22：读档失败时**先把坏文件挪走归档**，再回退默认值。
+                // 旧实现只打一行 warning 就换成默认值，下一次 Save 会把默认值写回原路径——
+                // 用户整套设置（音量/画质/语言/已同意协议版本）在没有任何提示的情况下清零，
+                // 而且再也找不回来（可能只是掉电写坏了半个字段）。
                 Debug.LogWarning("[Settings] 读取失败，使用默认值: " + e.Message);
+                Quarantine();
                 Current = new Data();
             }
             Sanitize();
+        }
+
+        /// <summary>
+        /// 把读不动的设置文件另存为 settings.json.corrupt-yyyyMMdd-HHmmss（不覆盖，
+        /// 连撞名都带序号），供用户/客服排查。归档失败不影响启动。
+        /// </summary>
+        private static void Quarantine()
+        {
+            try
+            {
+                if (!File.Exists(FilePath)) return;
+                var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                var target = FilePath + ".corrupt-" + stamp;
+                for (int i = 2; File.Exists(target); i++)
+                    target = FilePath + ".corrupt-" + stamp + "-" + i;
+                File.Move(FilePath, target);
+                Debug.LogWarning("[Settings] 损坏的设置文件已归档: " + target);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[Settings] 损坏文件归档失败（继续用默认值）: " + e.Message);
+            }
         }
 
         /// <summary> clamp 非法值（手改文件/跨版本升级）。</summary>
