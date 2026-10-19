@@ -369,12 +369,19 @@ namespace StarPixel.Dev
             // 绝不能回退到 PlayerController.level：它不参与 XP 结算、恒为初始值 1，
             // 一旦本地玩家对象缺失就会静默返回 1，把「进度重放失败」伪装成「等级本来就是 1」
             // （本次实测正是这样被假通过糊弄过去的）。
-            var lp = StarPixel.Net.NetPlayerRegistry.Local;
-            return lp != null ? lp.SyncedLevel : -1;
-#else
+            //
+            // M36 补一条：分流要看**运行时是否真的联网**，不能只看编译期有没有 FishNet。
+            // FishNet 一直都在（内置包），所以 #if 分支恒真；而单机冒烟根本不建 NetPlayer，
+            // NetPlayerRegistry.Local 为 null——按编译期宏分流会让单机的等级恒为 -1
+            // （实测单机冒烟从「等级 8」变成「等级 -1」，就是这么踩到的）。
+            if (_netMode)
+            {
+                var lp = StarPixel.Net.NetPlayerRegistry.Local;
+                return lp != null ? lp.SyncedLevel : -1;
+            }
+#endif
             var pc = PlayerController.Instance;
             return pc != null ? pc.level : -1;
-#endif
         }
 
         private void Finish()
@@ -390,8 +397,11 @@ namespace StarPixel.Dev
             // 若沿用本地 Wave 会恒为 0，把一局成功的实测判成"未通过"——改用同步值。
             if (_netMode && ws != null && wave <= 0) wave = ws.Wave;
 #endif
-            var pc = PlayerController.Instance;
-            int level = pc != null ? pc.level : 0;
+            // M36：这里原本读 PlayerController.level，联机客户端下它不参与 XP 结算、恒为初始值 1
+            // ——实测客户端真实等级 3 却被输出成 1，与几行之上 AuthoritativeLevel() 的注释
+            // 「绝不能回退到 PlayerController.level」自相矛盾（那处是 M11 踩坑后加的，这处漏改了）。
+            // 统一改走权威来源：联机读 NetPlayer 的等级 SyncVar，单机读 PlayerController。
+            int level = AuthoritativeLevel();
             // M18：联机下的敌人是 NetEnemy，不会进 EnemyManager.ActiveEnemies（那是单机 Enemy 的列表），
             // 直接读它会恒为 0——实测里出现过「击杀 45、波次 3，却报场上敌人 0」的自相矛盾输出。
             // 改用与 EnemyManager 波次推进同一个统一入口，两种模式口径一致。
@@ -414,6 +424,12 @@ namespace StarPixel.Dev
             Debug.Log("[SMOKE] 击杀      " + _kills);
             Debug.Log("[SMOKE] 波次      " + wave);
             Debug.Log("[SMOKE] 等级      " + level);
+#if FISHNET_ENABLED
+            // M36 诊断：联机下「等级」一度恒为初始值 1，需要区分是"真的没升级"还是
+            // "读错了来源"。两个来源并列输出，谁对谁错一眼可见。
+            if (_netMode)
+                Debug.Log("[SMOKE] 权威等级    " + AuthoritativeLevel());
+#endif
             Debug.Log("[SMOKE] 场上敌人  " + aliveEnemies);
             Debug.Log("[SMOKE] 升级选卡  " + _cardsPicked + " 次");
 #if FISHNET_ENABLED

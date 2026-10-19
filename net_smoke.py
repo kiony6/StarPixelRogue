@@ -93,6 +93,20 @@ def as_int(d, key, default=-1):
         return default
 
 
+def _lvl_pair(d):
+    """「等级 / 权威等级」并排显示。
+
+    M36：客户端的「等级」一度恒为 1 而权威值是 3——收尾输出读了不参与 XP 结算的
+    PlayerController.level，把真实进度掩盖成初始值。两个数并排放，一眼看出谁在撒谎。
+    单机产物没有权威等级（那条输出在 #if FISHNET_ENABLED 里），显示为 -。
+    """
+    lv = d.get("等级")
+    auth = d.get("权威等级")
+    if auth is None:
+        return str(lv) if lv is not None else "?"
+    return "%s / %s" % (lv, auth)
+
+
 # 联机跑挂时最常出现的几条根因线索。日志动辄几十 MB，
 # 靠人肉翻既慢又容易漏，这里直接把"判决性"的行筛出来。
 DIAG_PATTERNS = (
@@ -214,6 +228,9 @@ def main():
     ap.add_argument("--exe", default=DEFAULT_EXE, help="构建产物路径")
     ap.add_argument("--log-limit-mb", type=int, default=200,
                     help="单端日志体积上限（MB），超过即熔断，防止无头刷屏写爆磁盘")
+    ap.add_argument("--no-align", action="store_true",
+                    help="M36：退回旧的「客户端早 3s 收尾」采样（仅用于区分力对照，"
+                         "默认已改为双端同时刻收尾）")
     ap.add_argument("--spectator", action="store_true",
                     help="M14：客户端以观战身份加入（不生成可操作角色）")
     ap.add_argument("--drop-at", type=float, default=0,
@@ -261,12 +278,19 @@ def main():
         if os.path.exists(p):
             os.remove(p)
 
-    # 客户端必须比房主"早收尾、且收尾时房主还活着"。
-    # 此前算成 seconds - start_delay，客户端反而比房主晚约 1s 结束——
-    # 采样那一刻房主进程已退出，客户端正在拆网络对象，于是出现
-    # 「房主场上 20 个敌人 / 客户端 0 个」这种比同步延迟更假的差异。
-    # 余量取 3s：再小就有"客户端反而晚于房主收尾"的风险（两端启动耗时有 ±1s 抖动），
-    # 再大则采样时刻差被后期击杀速率（约 10/s）放大成很大的绝对差。
+    # M36：客户端时长改成「让双端在同一时刻收尾」。
+    #
+    # 旧算法是 seconds - start_delay - 3（刻意让客户端早 3s 收尾），理由是"客户端收尾时
+    # 房主必须还活着"。但代价是**两端采样落在了不同瞬间**：后期一次 AoE 清几十只，
+    # 击杀速率可达 18/s，3 秒差就是 54 的绝对差。实测 60s 局：房主波次 7/击杀 140，
+    # 客户端波次 6/击杀 86——看着像"同步落后"，实际只是采样早了 3 秒。
+    #
+    # 更糟的是它逼着判据放水：波次容差放到 25%、击杀容差放到 40%、玩家数改看峰值，
+    # 于是"同步真的在中途断了但客户端仍收到 65% 的击杀"这种缺陷会被判成通过。
+    #
+    # 对齐后实测（两次）：波次 7==7、击杀 114==114 与 109==109、场上敌人 15==15、
+    # 玩家数 2==2——全部严格相等，证明同步链路本身是干净的，差异纯粹是采样时刻差。
+    # 因此默认对齐；--no-align 保留旧行为，只用于 M36 区分力对照（证明放水的判据有多松）。
     client_seconds = max(10, args.seconds - args.start_delay - 3)
 
     print("=" * 68)
@@ -291,6 +315,14 @@ def main():
     print("[1/3] 房主已启动，等待服务端就绪（最多 %ds）…" % args.start_delay)
     waited = wait_host_ready(host_log, args.start_delay)
     print("       服务端就绪探测耗时 %.0fs" % waited)
+
+    # 客户端在房主时间轴上的收尾时刻 = waited（延后启动）+ client_seconds，
+    # 房主的收尾时刻 = args.seconds。令两者相等即可让采样落在同一瞬间。
+    if not args.no_align:
+        old = client_seconds
+        client_seconds = max(10, args.seconds - int(round(waited)))
+        print("       双端收尾对齐：客户端时长 %ds → %ds（房主已跑 %.0fs）"
+              % (old, client_seconds, waited))
 
     # 2) 客户端
     client_args = ["-batchmode", "-nographics", "-netClient",
@@ -323,6 +355,7 @@ def main():
 
     rows = [
         ("会话角色", host_data.get("会话角色", "?"), client_data.get("会话角色", "?")),
+        ("等级/权威等级", _lvl_pair(host_data), _lvl_pair(client_data)),
         ("网络玩家数", host_data.get("网络玩家数", "?"), client_data.get("网络玩家数", "?")),
         ("网络玩家峰值", host_data.get("网络玩家峰值", "?"), client_data.get("网络玩家峰值", "?")),
         ("同步波次", host_data.get("同步波次", "?"), client_data.get("同步波次", "?")),
@@ -382,17 +415,46 @@ def main():
     elif client_data.get("会话角色") != "客户端":
         problems.append("客户端实例的会话角色不是「客户端」（%s）——可能根本没连上" % client_data.get("会话角色"))
 
-    # 用「峰值」而非收尾瞬时值：两端时长不同步（客户端更短），先退出的那一端会让
-    # 对端收尾时注册表掉回 1，用瞬时值会把成功的联机误判成失败。
-    h_players = as_int(host_data, "网络玩家峰值", as_int(host_data, "网络玩家数"))
-    c_players = as_int(client_data, "网络玩家峰值", as_int(client_data, "网络玩家数"))
-    # 观战模式下房主可能只在其对象被回收前短暂看到 2 名玩家，故放宽房主侧期望
-    if h_players < (1 if args.spectator else 2):
-        problems.append("房主全程最多只看到 %d 名玩家（期望 ≥%d，说明客户端未成功加入）" %
-                        (h_players, 1 if args.spectator else 2))
-    if c_players < (1 if args.spectator else 2):
-        problems.append("客户端全程最多只看到 %d 名玩家（期望 ≥%d，说明未收到房主的玩家对象）" %
-                        (c_players, 1 if args.spectator else 2))
+    # M36：对齐收尾后双端采样落在同一瞬间，判据可以（也必须）收紧到接近严格相等。
+    # 旧判据因为采样天然差 3s，被迫放水成「波次容差 25% / 击杀容差 40% / 玩家数只看峰值」，
+    # 于是"同步中途断了但客户端仍收到 65% 击杀"这种真缺陷会被判成通过。
+    aligned = not args.no_align
+
+    # —— 等级输出源 ——
+    # 联机下「等级」必须等于权威等级。M36 实测：客户端真实等级 3 却被输出成 1，
+    # 因为收尾读了不参与 XP 结算的 PlayerController.level。两个数不等 == 读错了来源。
+    for who, d in (("房主", host_data), ("客户端", client_data)):
+        lv, auth = d.get("等级"), d.get("权威等级")
+        if auth is None:          # 单机产物没有这一行（在 #if FISHNET_ENABLED 里）
+            continue
+        if as_int(d, "等级") != as_int(d, "权威等级"):
+            problems.append(
+                "M36：%s的等级 %s 与权威等级 %s 不一致——收尾读了错误来源"
+                "（联机应读 NetPlayer 的等级 SyncVar，PlayerController.level 不参与 XP 结算）"
+                % (who, lv, auth))
+
+    # —— 玩家数 ——
+    # 对齐后两端都在对端还活着时收尾，瞬时值可以直接判；否则仍看峰值。
+    if aligned:
+        h_players = as_int(host_data, "网络玩家数")
+        c_players = as_int(client_data, "网络玩家数")
+        want = 1 if args.spectator else 2
+        if h_players != want:
+            problems.append("房主收尾时看到 %d 名玩家（期望 %d）" % (h_players, want))
+        if c_players != want:
+            problems.append("客户端收尾时看到 %d 名玩家（期望 %d）" % (c_players, want))
+    else:
+        # 用「峰值」而非收尾瞬时值：两端时长不同步（客户端更短），先退出的那一端会让
+        # 对端收尾时注册表掉回 1，用瞬时值会把成功的联机误判成失败。
+        h_players = as_int(host_data, "网络玩家峰值", as_int(host_data, "网络玩家数"))
+        c_players = as_int(client_data, "网络玩家峰值", as_int(client_data, "网络玩家数"))
+        # 观战模式下房主可能只在其对象被回收前短暂看到 2 名玩家，故放宽房主侧期望
+        if h_players < (1 if args.spectator else 2):
+            problems.append("房主全程最多只看到 %d 名玩家（期望 ≥%d，说明客户端未成功加入）" %
+                            (h_players, 1 if args.spectator else 2))
+        if c_players < (1 if args.spectator else 2):
+            problems.append("客户端全程最多只看到 %d 名玩家（期望 ≥%d，说明未收到房主的玩家对象）" %
+                            (c_players, 1 if args.spectator else 2))
 
     h_kills = as_int(host_data, "同步击杀")
     c_kills = as_int(client_data, "同步击杀")
@@ -405,22 +467,36 @@ def main():
     c_wave = as_int(client_data, "同步波次")
     if h_wave < 1:
         problems.append("房主同步波次为 %d，波次系统可能没推进" % h_wave)
-    # 波次：客户端比房主早收尾（见 client_seconds 注释），采样时刻天然靠前，
-    # 而后期一次清场就能推进一波，落后 1~2 波属正常网络采样差。
-    # 判据要抓的是"客户端波次停在初始值不动"（同步根本没通），那种情况差值会很大。
-    wave_tol = max(2, int(h_wave * 0.25))
+
+    if aligned:
+        # 波次是离散事件、几秒才推进一次，两端同时刻采样就该读到同一个值。
+        wave_tol = 0
+    else:
+        # 波次：客户端比房主早收尾（见 client_seconds 注释），采样时刻天然靠前，
+        # 而后期一次清场就能推进一波，落后 1~2 波属正常网络采样差。
+        # 判据要抓的是"客户端波次停在初始值不动"（同步根本没通），那种情况差值会很大。
+        wave_tol = max(2, int(h_wave * 0.25))
     if abs(h_wave - c_wave) > wave_tol:
         problems.append("双端波次不一致：房主 %d vs 客户端 %d（容差 %d）" % (h_wave, c_wave, wave_tol))
 
-    # 击杀：不要求瞬时值相等，改判"客户端是否单调跟随房主权威值"。
-    # 客户端读的是广播过来的 SyncVar，采样必然早于房主终值；后期一次 AoE 清几十只，
-    # 击杀速率可达每秒数十，几秒采样差就是几十上百的绝对差（实测第 15 波 458 / 419）。
-    # 因此只拦三类真问题：收到 0（没同步）、超过权威值（逻辑错）、落后过半（同步中途断了）。
     if h_kills > 0:
         if c_kills > h_kills:
             problems.append("客户端击杀 %d 超过房主权威值 %d——同步逻辑可疑" % (c_kills, h_kills))
-        elif c_kills < h_kills * 0.6:
-            problems.append("客户端击杀 %d 明显落后于房主 %d——同步可能中途停止" % (c_kills, h_kills))
+        if aligned:
+            # 同时刻采样，击杀就该是同一个数。留 2% + 至少 2 的余量：
+            # 两端收尾不可能精确到同一帧，房主在最后 100ms 里还能再杀几只。
+            kill_tol = max(2, int(h_kills * 0.02))
+            if h_kills - c_kills > kill_tol:
+                problems.append(
+                    "M36：双端同时刻采样击杀却相差 %d（房主 %d / 客户端 %d，容差 %d）"
+                    "——同步链路在中途落后或停止" % (h_kills - c_kills, h_kills, c_kills, kill_tol))
+        else:
+            # 击杀：不要求瞬时值相等，改判"客户端是否单调跟随房主权威值"。
+            # 客户端读的是广播过来的 SyncVar，采样必然早于房主终值；后期一次 AoE 清几十只，
+            # 击杀速率可达每秒数十，几秒采样差就是几十上百的绝对差（实测第 15 波 458 / 419）。
+            # 因此只拦三类真问题：收到 0（没同步）、超过权威值（逻辑错）、落后过半（同步中途断了）。
+            if c_kills < h_kills * 0.6:
+                problems.append("客户端击杀 %d 明显落后于房主 %d——同步可能中途停止" % (c_kills, h_kills))
 
     # —— M11 断线重连专项判定 ——
     # 三层证据缺一不可：客户端自述重连成功 + 进度没回退 + 房主侧真的观测到「2→1→2」。
