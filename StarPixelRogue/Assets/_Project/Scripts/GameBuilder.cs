@@ -64,6 +64,9 @@ namespace StarPixel
             // M25：手感层（镜头/顿帧/暂停/震屏/反馈开关）无头实测（正常启动不受影响）
             if (HasArg("-feelProbe")) { StartFeelProbe(); return; }
 
+            // M26：可见层第二批（字体/伤害飘字/受击冲击/前摇警示圈）无头实测（正常启动不受影响）
+            if (HasArg("-visualProbe")) { StartVisualProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -462,6 +465,23 @@ namespace StarPixel
             StarPixel.Dev.FeelProbe.Start(ArgValue("-feelScene", "STAGE"));
         }
 
+        /// <summary>
+        /// M26 无头实测入口：交给 <see cref="Dev.VisualProbe"/> 验证
+        /// 「运行时字体真的取得到 / 伤害飘字生成·文案·上浮·淡出·回收 / 受击冲击放大·回落·不叠乘 /
+        /// Boss 前摇警示圈生成·有精灵·脉动·时长·自毁」。
+        /// 参数：-visualScene FONT|DMG|PUNCH|TELEGRAPH（默认 FONT）
+        /// 承接 M25 的教训：无头实测能证明"跑通"，证明不了"看得见"；
+        /// 手感层还剩一整批"产出只在画面上"的东西从未被断言过，本入口继续把它们翻译成数值。
+        /// </summary>
+        private static void StartVisualProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;
+            PrepareStage();
+            StarPixel.Dev.VisualProbe.Start(ArgValue("-visualScene", "FONT"));
+        }
+
         private static void OpenLobby()
         {
             new GameObject("NetLobby").AddComponent<Net.NetLobby>();
@@ -516,6 +536,9 @@ namespace StarPixel
             Core.PoolManager.Instance?.DestroyAll();
             PickupManager.Instance?.ResetAll();
             EnemyManager.Instance?.ResetAll();
+            // M26：临时特效（前摇警示圈 / Nova 爆发环）同样是 new GameObject 建在场景根上的，
+            // 不属于任何管理器 —— 漏掉这一行，上一局的圈会整批出现在新世界的开局画面里。
+            Effects.TempEffect.DestroyAll();
 
             // 再同步清理单例引用：Object.Destroy 的销毁延迟到帧末，
             // 若不清 Instance，紧随其后的 Build() 会被「EnemyManager.Instance != null」守卫错误拦下
