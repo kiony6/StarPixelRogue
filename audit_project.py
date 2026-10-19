@@ -1554,6 +1554,181 @@ def check_legal_texts_localized():
                 % (rp, nz, rpe, ne))
 
 
+# ============================================================================
+# 第 15 项：升级推卡批次一致性（M37）
+# ============================================================================
+# M37 抓的是「一次只维护一份状态，却会被多次推入」这类反模式。同一份根因在两处结果：
+#   ① 客户端面板占用时推来的卡被直接扔掉（玩家永久少一个强化，且不报错）；
+#   ② 房主候选表被下一次推卡整体覆盖，客户端回传的裸 index 于是错配到别的那一组
+#      （玩家选 A、生效 B，同样不报错、不崩）。
+# 两处的成因都能在构建期判出来，不必等 60 秒的双开跑完。
+
+# 候选表字段：`List<UpgradeOffer> _cachedOffers`（只认类级字段，方法内的局部变量不算）
+OFFER_FIELD_RE = re.compile(r'List\s*<\s*UpgradeOffer\s*>\s+(\w+)\s*[;=]')
+OFFER_CLEAR_RE = re.compile(r'\b(\w+)\s*\.\s*Clear\s*\(\s*\)')
+# 批次标识：`batchId` / `_nextBatchId++` / `_batches.Add(...)` 等，大小写不敏感
+BATCH_TOKEN_RE = re.compile(r'batch', re.IGNORECASE)
+
+SERVERRPC_RE = re.compile(r'\[\s*ServerRpc\s*\]')
+# 回传的「第几张」——没有归属的裸索引就是错配的温床
+INDEX_PARAM_RE = re.compile(r'^\s*(?:int\s+)?(index|idx|choice|pick|cardIndex)\s*$', re.IGNORECASE)
+# 归属参数：批次 id / 令牌 / 其它稳定标识
+OWNER_PARAM_RE = re.compile(r'^\s*(?:[\w.]+\s+)?(\w+)\s*$')
+
+
+def _sig_params(lines, i):
+    """从第 i 行起拼出方法签名里的参数列表（签名可能跨行）。返回参数字符串列表。"""
+    buf = ""
+    depth = 0
+    started = False
+    for k in range(i, min(len(lines), i + 8)):
+        buf += " " + lines[k]
+        for ch in lines[k]:
+            if ch == '(':
+                depth += 1
+                started = True
+            elif ch == ')':
+                depth -= 1
+        if started and depth <= 0:
+            break
+    a = buf.find('(')
+    b = buf.rfind(')')
+    if a < 0 or b <= a:
+        return []
+    inner = buf[a + 1:b]
+    out, cur, d = [], "", 0
+    for ch in inner:
+        if ch in '<([':
+            d += 1
+        elif ch in '>)]':
+            d -= 1
+        if ch == ',' and d <= 0:
+            out.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        out.append(cur.strip())
+    return out
+
+
+def check_offer_batch_consistency():
+    """
+    升级推卡必须批次一致（M37）。
+
+    两条判据，都是「多次推入 vs 一份状态」的反模式：
+
+    ① **候选表被整体清空必须配批次标识**：类级 <c>List&lt;UpgradeOffer&gt;</c> 字段
+       在方法里被 <c>Clear()</c>，同一方法内却没有任何批次标识（batch / batchId …）——
+       这就是"下一次推卡把上一次的三张卡盖掉"的写法。客户端回传的 index 于是落在
+       被换掉的那一组上：玩家点的是旧组第 1 张、生效的是新组第 1 张。
+
+    ② **回传索引必须带归属**：<c>[ServerRpc]</c> 若收一个叫 index/idx/choice 的 int，
+       就必须同时收批次 id（或令牌、id 等稳定标识）。只回传一个裸 index，
+       房主无从判断它属于哪一批——连"拒绝"都做不到。
+
+    两处都不报错、不崩，看字段也对，只有把两次推卡的标题并排看才看得出来。
+
+    可用 `// @nobatch: 理由` 显式豁免，且**空理由无效**。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)
+        lines = strip_noise(raw).split('\n')
+        raw_lines = raw.split('\n')
+        spans = method_spans(lines)
+
+        # —— 收集类级候选表字段名 ——
+        # 判定用「缩进 8（本工程类成员层）+ 以 ; 结尾」而不是 method_spans：
+        # 字段写成 `= new List<UpgradeOffer>();` 时带括号，method_spans 会把它当成
+        # 一条**方法声明**（那个函数只看『缩进 8 且含 ( 』），字段因此永远收集不到，
+        # 规则 ① 变成摆设——自检夹具 of01 就是这么被放行的。
+        # 而方法声明以 ) 或 { 结尾、不以 ; 结尾，正好可以按这一条区分开。
+        fields = set()
+        for i, ln in enumerate(lines):
+            m = OFFER_FIELD_RE.search(ln)
+            if not m:
+                continue
+            ind = len(ln) - len(ln.lstrip())
+            if ind != 8 or not ln.strip().endswith(';'):
+                continue      # 方法内的局部变量缩进 >=12，本项不管（夹具 of08）
+            fields.add(m.group(1))
+
+        # —— ① 候选表被清空必须配批次标识 ——
+        if fields:
+            for i, ln in enumerate(lines):
+                m = OFFER_CLEAR_RE.search(ln)
+                if not m or m.group(1) not in fields:
+                    continue
+                body, method = _body_for(lines, spans, i)
+                if BATCH_TOKEN_RE.search(body):
+                    continue
+
+                ok = False
+                for j in range(max(0, i - 3), min(len(raw_lines), i + 2)):
+                    if '@nobatch:' in raw_lines[j] and raw_lines[j].split('@nobatch:', 1)[1].strip():
+                        ok = True
+                        break
+                if ok:
+                    info("批次豁免: %s 第 %d 行（人工确认）" % (rp, i + 1))
+                    continue
+
+                err("候选表被整体清空却没有批次标识: %s 第 %d 行 %s —— 方法 %s\n"
+                    "      %s 是类级的候选表字段，这里 Clear() 之后重新填一组，"
+                    "而客户端回传的只是「第几张」——\n"
+                    "      还没选完就又升一级时，这份表已被换成新一组：玩家点的是旧组第 1 张、"
+                    "房主应用的是新组第 1 张（M37 实测缺陷）。\n"
+                    "      不报错、不崩、看字段也对，只有把两次推卡的标题并排看才看得出来。\n"
+                    "      修法：一次推卡登记成一个批次并分配 id，回传时连 id 一起送回来；"
+                    "确属只能是单份则写 // @nobatch: 理由。"
+                    % (rp, i + 1, ln.strip()[:70], method or "?", m.group(1)))
+
+        # —— ② 回传索引必须带归属 ——
+        for i, ln in enumerate(lines):
+            if not SERVERRPC_RE.search(ln):
+                continue
+            # 属性行的下一行起才是签名
+            k = i + 1
+            while k < len(lines) and '(' not in lines[k]:
+                k += 1
+            if k >= len(lines):
+                continue
+            params = _sig_params(lines, k)
+            names = []
+            for p in params:
+                pm = OWNER_PARAM_RE.match(p)
+                if pm:
+                    names.append(pm.group(1))
+            if not any(INDEX_PARAM_RE.match(p) for p in params):
+                continue
+            # 归属：另一个参数名里带 batch / token / id / seq（宽一点，避免逼着改命名）
+            if any(re.search(r'(batch|token|id|seq)', n, re.IGNORECASE)
+                   for n in names if not INDEX_PARAM_RE.match(n)):
+                continue
+
+            ok = False
+            for j in range(max(0, i - 3), min(len(raw_lines), k + 2)):
+                if '@nobatch:' in raw_lines[j] and raw_lines[j].split('@nobatch:', 1)[1].strip():
+                    ok = True
+                    break
+            if ok:
+                info("批次豁免: %s 第 %d 行（人工确认）" % (rp, i + 1))
+                continue
+
+            err("回传索引没有归属: %s 第 %d 行（ServerRpc 参数：%s）\n"
+                "      这个方法收一个裸的 index，却没有批次 id（或令牌/id 之类的稳定标识）——"
+                "房主无从判断它属于哪一批推卡。\n"
+                "      推卡是多次的：客户端还没选完就又升一级时，裸 index 会落到被覆盖后的"
+                "那一组上，玩家选 A、生效 B（M37 实测缺陷）。\n"
+                "      更糟的是这种情况下房主连「拒绝」都做不到——它根本不知道自己收错了。\n"
+                "      修法：把批次 id 一起回传，房主按批次取回；"
+                "确属全局唯一无需归属则写 // @nobatch: 理由。"
+                % (rp, i + 1, ", ".join(params) if params else "?"))
+
+
 # ── 自检：证明"判据真的会红" ──────────────────────────────
 # 静态检查最容易出现的失败是"永远不报错"——第 7 项若写成摆设，工程照样一片绿，
 # 而 M24/M26/M27 那三处缺陷会继续静静地堆在场景里。
@@ -2474,6 +2649,147 @@ SELFTEST_LEGAL = [
 ]
 
 
+# 第 15 项夹具：推卡批次一致性（M37）
+# 正例/反例都只造源码文本——本项查的正是"多次推入 vs 一份状态"这种
+# 编译得过、跑起来也对、只有并排比对才看得出的写法。
+SELFTEST_OF = [
+    # ① 候选表被整体清空却没有批次标识：M37 修掉的那处原样
+    ("of01_单份候选表被覆盖", True, """
+namespace A
+{
+    public class Pusher
+    {
+        private readonly List<UpgradeOffer> _cachedOffers = new List<UpgradeOffer>();
+
+        private void OfferCards()
+        {
+            _cachedOffers.Clear();
+            _cachedOffers.AddRange(BuildOffers(3));
+            ShowCardsTargetRpc(Owner, titles, descs, kinds);
+        }
+    }
+}
+"""),
+    # ① 批次化写法：根本没有单份候选表字段
+    ("of02_批次化放行", False, """
+namespace A
+{
+    public class Pusher
+    {
+        private readonly UpgradeOfferBatches _batches = new UpgradeOfferBatches();
+
+        private void OfferCards()
+        {
+            var offers = BuildOffers(3);
+            int batchId = _batches.Add(offers);
+            ShowCardsTargetRpc(Owner, batchId, titles, descs, kinds);
+        }
+    }
+}
+"""),
+    # ① Clear 了但同一方法里配了批次标识
+    ("of03_Clear但配了批次", False, """
+namespace A
+{
+    public class Pusher
+    {
+        private readonly List<UpgradeOffer> _cachedOffers = new List<UpgradeOffer>();
+        private int _nextBatchId = 1;
+
+        private void OfferCards()
+        {
+            _cachedOffers.Clear();
+            int batchId = _nextBatchId++;
+            _cachedOffers.AddRange(BuildOffers(3));
+            ShowCards(batchId);
+        }
+    }
+}
+"""),
+    # ① 按**方法**配对而不是按文件：batch 写在别的方法里照样算漏
+    ("of04_批次标识在别的方法里", True, """
+namespace A
+{
+    public class Pusher
+    {
+        private readonly List<UpgradeOffer> _cachedOffers = new List<UpgradeOffer>();
+        private int _nextBatchId = 1;
+
+        private void Resolve()
+        {
+            int batchId = _nextBatchId++;
+            Apply(batchId);
+        }
+
+        private void OfferCards()
+        {
+            _cachedOffers.Clear();
+            _cachedOffers.AddRange(BuildOffers(3));
+        }
+    }
+}
+"""),
+    # ② 回传裸 index：房主无从判断它属于哪一批
+    ("of05_裸索引ServerRpc", True, """
+namespace A
+{
+    public class Pusher : NetworkBehaviour
+    {
+        [ServerRpc]
+        private void RequestChooseUpgradeServerRpc(int index)
+        {
+            if (index < 0) return;
+            Apply(index);
+        }
+    }
+}
+"""),
+    # ② 带批次 id 一起回传
+    ("of06_带批次索引ServerRpc", False, """
+namespace A
+{
+    public class Pusher : NetworkBehaviour
+    {
+        [ServerRpc]
+        private void RequestChooseUpgradeServerRpc(int batchId, int index)
+        {
+            Resolve(batchId, index);
+        }
+    }
+}
+"""),
+    # ② 收的不是"第几张"，本项不管
+    ("of07_非索引ServerRpc放行", False, """
+namespace A
+{
+    public class Pusher : NetworkBehaviour
+    {
+        [ServerRpc]
+        private void RequestSetCharacterServerRpc(int id)
+        {
+            ApplyCharacter(id);
+        }
+    }
+}
+"""),
+    # ① 方法内的局部变量不算候选表字段（只有类级字段才可能跨多次推卡留存）
+    ("of08_局部变量Clear放行", False, """
+namespace A
+{
+    public class Pusher
+    {
+        private void Build()
+        {
+            List<UpgradeOffer> offers = new List<UpgradeOffer>();
+            offers.Clear();
+            Show(offers);
+        }
+    }
+}
+"""),
+]
+
+
 def _run_legal_fixtures(fixtures, checks=None):
     """把夹具写成 Resources/Legal 下的 txt 跑第 14 项，返回被报错的夹具名集合。"""
     import shutil
@@ -2539,6 +2855,7 @@ def selftest():
         ("切语言刷新检查（第 13 项）", SELFTEST_LR, [check_language_refresh]),
         # 第 14 项造的是 .txt 而不是 .cs，用专属驱动（前 7 项统一走 _run_fixtures）
         ("法务文本双语检查（第 14 项）", SELFTEST_LEGAL, None),
+        ("推卡批次一致性检查（第 15 项）", SELFTEST_OF, [check_offer_batch_consistency]),
     ]
 
     all_bad = 0
@@ -2586,6 +2903,7 @@ def main():
     check_ui_text_localized()
     check_language_refresh()
     check_legal_texts_localized()
+    check_offer_batch_consistency()
 
     n = len(cs_files())
     print("=" * 68)

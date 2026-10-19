@@ -32,6 +32,33 @@ namespace StarPixel.Dev
         private int _cardsPicked;
 
         /// <summary>
+        /// M37：外部供选（联机推卡）的收支。
+        /// 之前只统计「点了几次卡」，而统计方式本身是坏的——见 Update 里那条注释。
+        /// 光有总数看不出丢没丢，必须把「收到 / 上屏 / 入队 / 丢弃」拆开记：
+        /// 收到 ≠ 上屏 的差额就是被吞掉的强化。
+        /// </summary>
+        private int _extReceived;
+        private int _extPresented;
+        private int _extQueued;
+        private int _extDropped;
+        private int _extPending;
+        private int _hostOffered;    // 房主侧：为远程玩家推过几批（对端自述的对照）
+        private int _hostEvicted;    // 房主侧：被上限淘汰的批次
+
+        /// <summary>
+        /// M37：收尾**前** 1 秒的采样。
+        ///
+        /// 为什么不能只看收尾瞬时值：两个进程的结束时刻是对齐到同一秒的死热，
+        /// 谁先退出谁就把对方的注册表打到 1——实测同一份源码跑两次，
+        /// 一次是「房主 2 / 客户端 2」，一次是「房主 1 / 客户端 2」。
+        /// 那是**测试台的退出竞态**，不是产品属性：用它当判据会把成功的联机判成失败，
+        /// 反过来又逼着判据放水。收尾前 1 秒两端必然都还活着，取那一刻才是稳的。
+        /// 瞬时值仍然输出（供诊断），只是不再当判据。
+        /// </summary>
+        private bool _endSampled;
+        private int _endPlayers = -1;
+
+        /// <summary>
         /// M18：联机双开模式。单机冒烟里「玩家阵亡即结束」是对的（要采集存活时长），
         /// 但联机下若房主 6 秒就被围死退出，另一端根本来不及连上（本次实测正是如此：
         /// 房主 6.3s 退出，客户端 10s 才启动，全程无服务端可连）。故联机模式改为：
@@ -230,8 +257,15 @@ namespace StarPixel.Dev
                           " / 击杀 " + _postKills);
             }
 
-            // M17：升级选卡会把 timeScale 归零等待玩家点击，无头环境无人点击将永远卡住——代玩家选第一张
-            if (Time.timeScale <= 0f && !_died)
+            // M17：升级选卡会把 timeScale 归零等待玩家点击，无头环境无人点击将永远卡住——代玩家选第一张。
+            //
+            // M37：这里原本写的是 `if (Time.timeScale <= 0f)`——用"游戏被暂停"来推断"正在选卡"。
+            // 而外部供选（联机推卡）是**刻意不暂停**的（PresentExternal 传 pause=false，
+            // 免得冻结网络心跳），于是客户端的选卡一次都统计不到：实测 60s 双开
+            // 「房主选卡 5 次 / 客户端 0 次」，看起来像是客户端没升级，其实是探针瞎了。
+            // 真正的缺陷（面板占用期间推来的卡被静默丢弃）就藏在这个盲区里，藏了很久。
+            // 改法：别猜，直接问面板自己——AutoChooseFirst 未处于选卡态时返回 false。
+            if (!_died)
             {
                 var lum = LevelUpManager.Instance;
                 if (lum != null && lum.AutoChooseFirst()) _cardsPicked++;
@@ -272,6 +306,21 @@ namespace StarPixel.Dev
             // M11：房主视角的「2 → 1 → 2」观测（对端掉线又重连的直接证据）
             if (_maxPlayers >= 2 && players < 2) _peerDropSeen = true;
             else if (_peerDropSeen && players >= 2) _peerRejoinSeen = true;
+
+            // M37：收尾前 1 秒采一次（详见 _endPlayers 注释）。
+            // 房主的「推了几批」也必须在这里采——它同样依赖对端玩家对象还在注册表里，
+            // 收尾瞬时采会拿到 0（对端已退出），与客户端自述的「收到 4」对不上。
+            if (!_endSampled && _t >= _limit - 1.0f)
+            {
+                _endSampled = true;
+                _endPlayers = StarPixel.Net.NetPlayerRegistry.Count;
+                StarPixel.Net.NetPlayerRegistry.ForEachAlive(p =>
+                {
+                    if (p == null) return;
+                    _hostOffered += p.CardsOffered;
+                    _hostEvicted += p.CardsEvicted;
+                });
+            }
 
             // M14：观战者是否仍持有一个属于自己的（IsOwner）玩家对象。
             // 观战链路正确时，房主应在收到 RequestSpectatorServerRpc 后把该对象反生成，这里应为 false。
@@ -407,6 +456,28 @@ namespace StarPixel.Dev
             // 改用与 EnemyManager 波次推进同一个统一入口，两种模式口径一致。
             int aliveEnemies = StarPixel.Combat.CombatTargets.AliveEnemyCount;
 
+#if FISHNET_ENABLED
+            // M37：联机下把「推卡收支」采出来。来源刻意分开——客户端读自己的 LevelUpManager
+            // （自述），房主读 NetPlayer 的批次表（对端视角），两边对不上就说明中间丢包或错配。
+            var lum = LevelUpManager.Instance;
+            if (lum != null)
+            {
+                _extReceived = lum.ExternalReceived;
+                _extPresented = lum.ExternalPresented;
+                _extQueued = lum.ExternalQueued;
+                _extDropped = lum.ExternalDropped;
+                _extPending = lum.ExternalPendingCount;
+            }
+            // 上面已在收尾前 1 秒采过；这里只补一次（那次没采到时至少不是空的）
+            if (!_endSampled)
+                StarPixel.Net.NetPlayerRegistry.ForEachAlive(p =>
+                {
+                    if (p == null) return;
+                    _hostOffered += p.CardsOffered;
+                    _hostEvicted += p.CardsEvicted;
+                });
+#endif
+
             // 判定门槛刻意保守：只要"能刷怪、能打死怪、波次在推进"即视为核心循环成立。
             // 等级/Boss 属于期望项（信息输出），不作为通过条件，避免把数值平衡问题误判为功能故障。
             bool pass = _kills > 0 && wave >= 1;
@@ -433,10 +504,24 @@ namespace StarPixel.Dev
             Debug.Log("[SMOKE] 场上敌人  " + aliveEnemies);
             Debug.Log("[SMOKE] 升级选卡  " + _cardsPicked + " 次");
 #if FISHNET_ENABLED
+            if (_netMode)
+            {
+                // 注意：键与值之间必须留 2 个以上空格——net_smoke.py 的 [SMOKE] 解析正则靠它切分
+                Debug.Log("[SMOKE] 推卡收到    " + _extReceived);
+                Debug.Log("[SMOKE] 推卡上屏    " + _extPresented);
+                Debug.Log("[SMOKE] 推卡入队    " + _extQueued);
+                Debug.Log("[SMOKE] 推卡丢弃    " + _extDropped);
+                Debug.Log("[SMOKE] 队列残余    " + _extPending);
+                Debug.Log("[SMOKE] 房主推卡批次  " + _hostOffered);
+                Debug.Log("[SMOKE] 批次淘汰    " + _hostEvicted);
+            }
             Debug.Log("[SMOKE] 会话角色    " + (_spectator ? "观战"
                 : StarPixel.Net.NetSession.IsHost ? "房主"
                 : StarPixel.Net.NetSession.IsClient ? "客户端" : "单机"));
             Debug.Log("[SMOKE] 网络玩家数  " + StarPixel.Net.NetPlayerRegistry.Count);
+            // M37：判据用这一条（收尾前 1 秒，两端必然都还活着），
+            // 上面那条瞬时值只作诊断——它由两个进程的退出竞态决定，不是产品属性。
+            Debug.Log("[SMOKE] 收尾前玩家数  " + _endPlayers);
             // 注意：键与值之间必须留 2 个以上空格——net_smoke.py 的 [SMOKE] 解析正则靠它切分
             Debug.Log("[SMOKE] 网络玩家峰值  " + _maxPlayers);
             Debug.Log("[SMOKE] 同步波次    " + (ws != null ? ws.Wave : -1));

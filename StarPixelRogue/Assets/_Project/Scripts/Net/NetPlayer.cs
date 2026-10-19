@@ -46,8 +46,21 @@ namespace StarPixel.Net
         private readonly SyncList<int> _netWeaponLevels = new SyncList<int>();
 
         // 房主侧：为远程玩家缓存的升级供选（客户端选择后按 index 应用）
-        private readonly List<UpgradeOffer> _cachedOffers = new List<UpgradeOffer>();
+        //
+        // M37：原先这里是**一整份**候选表，每次推卡 Clear() 再填新的一组，而客户端回传的
+        // 只有一个 index。客户端还没选完就又升一级时，这份表已被换成新一组，
+        // 玩家点的是旧一组的第 1 张、房主应用的却是新一组的第 1 张——选的和得的不是同一张，
+        // 且不报错、不崩，只有把两次推卡的标题并排看才看得出来。
+        // 改成批次表：一次推卡 = 一个 id，回传必须带 id，取不到就拒绝（宁可少发一次，不能发错）。
+        private readonly UpgradeOfferBatches _offerBatches = new UpgradeOfferBatches();
         private int _lastKnownLevel = 1;
+
+        /// <summary>M37：房主为**本玩家**推过几次卡（探针/冒烟核对用）。</summary>
+        public int CardsOffered { get { return _offerBatches.IssuedCount; } }
+        /// <summary>M37：推了还没收到选择的批次数。</summary>
+        public int CardsPending { get { return _offerBatches.PendingCount; } }
+        /// <summary>M37：因玩家长时间不选导致被上限淘汰的批次数。</summary>
+        public int CardsEvicted { get { return _offerBatches.EvictedCount; } }
 
         /// <summary>M11 断线重连：本玩家对应的重连令牌（由客户端首连时上报，房主据此暂存/匹配进度）。</summary>
         private string _reconnectToken = "";
@@ -159,6 +172,9 @@ namespace StarPixel.Net
         public override void OnStopServer()
         {
             base.OnStopServer();
+            // M37：玩家对象在房主侧反生成，未回应的供选批次一并作废——
+            // 留着会让重连后的一次选择命中上一局的批次（等价于发错一张卡）
+            _offerBatches.Clear();
             if (!string.IsNullOrEmpty(_reconnectToken) && _ctrl != null)
             {
                 var snap = _ctrl.CaptureProgression();
@@ -298,23 +314,26 @@ namespace StarPixel.Net
         // —— 房主：为远程玩家生成候选并推卡 ——
         private void OfferCards()
         {
-            _cachedOffers.Clear();
-            _cachedOffers.AddRange(UpgradeCatalog.BuildOffers(3, _ctrl));
+            var offers = UpgradeCatalog.BuildOffers(3, _ctrl);
+            // M37：登记成一批并拿到批次 id（空候选返回 0，此时不发面板也无需回传）
+            int batchId = _offerBatches.Add(offers);
+            if (batchId == 0) return;
 
-            var titles = new string[_cachedOffers.Count];
-            var descs = new string[_cachedOffers.Count];
-            var kinds = new int[_cachedOffers.Count];
-            for (int i = 0; i < _cachedOffers.Count; i++)
+            var titles = new string[offers.Count];
+            var descs = new string[offers.Count];
+            var kinds = new int[offers.Count];
+            for (int i = 0; i < offers.Count; i++)
             {
-                titles[i] = _cachedOffers[i].title;
-                descs[i] = _cachedOffers[i].desc;
-                kinds[i] = _cachedOffers[i].kind;
+                titles[i] = offers[i].title;
+                descs[i] = offers[i].desc;
+                kinds[i] = offers[i].kind;
             }
-            ShowCardsTargetRpc(Owner, titles, descs, kinds);
+            ShowCardsTargetRpc(Owner, batchId, titles, descs, kinds);
         }
 
         [TargetRpc]
-        private void ShowCardsTargetRpc(NetworkConnection conn, string[] titles, string[] descs, int[] kinds)
+        private void ShowCardsTargetRpc(NetworkConnection conn, int batchId,
+                                        string[] titles, string[] descs, int[] kinds)
         {
             var offers = new List<UpgradeOffer>();
             for (int i = 0; i < titles.Length; i++)
@@ -326,9 +345,12 @@ namespace StarPixel.Net
                     kind = i < kinds.Length ? kinds[i] : 0
                 });
 
+            // M37：onChosen 闭包捕获 batchId——回传时必须带它，房主才知道该应用哪一批。
+            // 这是「客户端排队」的另一半：客户端这边排队保证不丢单，房主这边批次化保证不错配，
+            // 少一半都修不干净（只排队：不丢了但会发错；只批次化：不错了但会丢）。
             LevelUpManager.Instance?.PresentExternal(offers, index =>
             {
-                RequestChooseUpgradeServerRpc(index);                    // 权威：房主应用
+                RequestChooseUpgradeServerRpc(batchId, index);           // 权威：房主按批次应用
                 if (index >= 0 && index < kinds.Length)
                     UpgradeCatalog.ApplyKind(kinds[index], _ctrl);       // 本地镜像：客户端权威数据（移速/磁吸范围/生命上限）
             });
@@ -337,11 +359,12 @@ namespace StarPixel.Net
         // RequireOwnership 保持默认 true：只有持有该玩家对象的客户端能回应自己的选卡，
         // 避免恶意客户端代替他人应用强化。
         [ServerRpc]
-        private void RequestChooseUpgradeServerRpc(int index)
+        private void RequestChooseUpgradeServerRpc(int batchId, int index)
         {
             if (!IsServerInitialized || _ctrl == null) return;
-            if (index < 0 || index >= _cachedOffers.Count) return;
-            _cachedOffers[index].apply?.Invoke();
+            // M37：按批次取回——批次不存在/已取走/越界一律拒绝。
+            // 宁可少发一次强化，也绝不能拿别的批次的卡来凑（那才是真的事故）。
+            _offerBatches.TryApply(batchId, index);
         }
 
         /// <summary>M6.2：客户端上报角色选择，房主权威应用（属性/起始武器）。</summary>

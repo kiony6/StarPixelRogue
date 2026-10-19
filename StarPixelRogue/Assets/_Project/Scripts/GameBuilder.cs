@@ -101,6 +101,9 @@ namespace StarPixel
             // M35：法务文本双语（扫描器自检 / 中文态基线 / 英文态零中文零回退 / 法务窗上屏 / 就地刷新）
             if (HasArg("-legalProbe")) { StartLegalProbe(); return; }
 
+            // M37：联机升级选卡不丢单（外部供选排队 / 批次表取回 / 顺序不乱 / 本地路径未被堵死）
+            if (HasArg("-cardProbe")) { StartCardProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -596,6 +599,21 @@ namespace StarPixel
             Core.SaveManager.Ensure();
             Application.targetFrameRate = 60;
             StarPixel.Dev.LegalProbe.Start(ArgValue("-legalScene", "BASE"));
+        }
+
+        /// <summary>
+        /// M37：联机升级选卡不丢单。
+        /// 房主推卡是「多次」的，而被推的两处状态都只维护「一份」：客户端面板占用时后来的
+        /// 卡被静默丢弃、房主候选表被下一次推卡整体覆盖导致选择错配。两处都在网络层，
+        /// 但成因是纯逻辑——抽成 UpgradeOfferBatches + 面板排队后，单机就能把整条链路钉死。
+        /// </summary>
+        private static void StartCardProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;
+            PrepareStage();
+            StarPixel.Dev.CardProbe.Start(ArgValue("-cardScene", "BASE"));
         }
 
         private static void StartSubProbe()

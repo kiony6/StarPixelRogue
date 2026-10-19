@@ -357,10 +357,19 @@ def main():
         ("会话角色", host_data.get("会话角色", "?"), client_data.get("会话角色", "?")),
         ("等级/权威等级", _lvl_pair(host_data), _lvl_pair(client_data)),
         ("网络玩家数", host_data.get("网络玩家数", "?"), client_data.get("网络玩家数", "?")),
+        # M37：判据取这一条（收尾前 1 秒）；上面那条是收尾瞬时值，受退出竞态影响
+        ("收尾前玩家数", host_data.get("收尾前玩家数", "?"), client_data.get("收尾前玩家数", "?")),
         ("网络玩家峰值", host_data.get("网络玩家峰值", "?"), client_data.get("网络玩家峰值", "?")),
         ("同步波次", host_data.get("同步波次", "?"), client_data.get("同步波次", "?")),
         ("同步击杀", host_data.get("同步击杀", "?"), client_data.get("同步击杀", "?")),
         ("场上敌人", host_data.get("场上敌人", "?"), client_data.get("场上敌人", "?")),
+        # M37：升级推卡收支。房主推几批 ↔ 客户端收到几批，中间的差额就是被吞掉的强化
+        ("推卡批次", host_data.get("房主推卡批次", "?"), client_data.get("推卡收到", "?")),
+        ("推卡上屏", host_data.get("推卡上屏", "?"), client_data.get("推卡上屏", "?")),
+        ("推卡入队", host_data.get("推卡入队", "?"), client_data.get("推卡入队", "?")),
+        ("推卡丢弃", host_data.get("推卡丢弃", "?"), client_data.get("推卡丢弃", "?")),
+        ("批次淘汰", host_data.get("批次淘汰", "?"), client_data.get("批次淘汰", "?")),
+        ("升级选卡", host_data.get("升级选卡", "?"), client_data.get("升级选卡", "?")),
         ("遇到Boss", host_data.get("遇到Boss", "?"), client_data.get("遇到Boss", "?")),
         ("运行时长", host_data.get("时长", "?"), client_data.get("时长", "?")),
     ]
@@ -436,13 +445,19 @@ def main():
     # —— 玩家数 ——
     # 对齐后两端都在对端还活着时收尾，瞬时值可以直接判；否则仍看峰值。
     if aligned:
-        h_players = as_int(host_data, "网络玩家数")
-        c_players = as_int(client_data, "网络玩家数")
+        # M37：改用「收尾前 1 秒」的采样，而不是收尾瞬时值。
+        # 两个进程的结束时刻对齐到同一秒，谁先退出谁就把对方的注册表打到 1——
+        # 同一份源码跑两次，一次「房主 2 / 客户端 2」、一次「房主 1 / 客户端 2」。
+        # 那是测试台的退出竞态，不是产品属性；拿它当判据会把成功的联机判成失败，
+        # 反过来又逼着判据放水（这正是 M36 之前被迫放水的同一类原因）。
+        # 收尾前 1 秒两端必然都还活着，取那一刻才是稳的；瞬时值仍输出供诊断。
+        h_players = as_int(host_data, "收尾前玩家数", as_int(host_data, "网络玩家数"))
+        c_players = as_int(client_data, "收尾前玩家数", as_int(client_data, "网络玩家数"))
         want = 1 if args.spectator else 2
         if h_players != want:
-            problems.append("房主收尾时看到 %d 名玩家（期望 %d）" % (h_players, want))
+            problems.append("房主收尾前看到 %d 名玩家（期望 %d）" % (h_players, want))
         if c_players != want:
-            problems.append("客户端收尾时看到 %d 名玩家（期望 %d）" % (c_players, want))
+            problems.append("客户端收尾前看到 %d 名玩家（期望 %d）" % (c_players, want))
     else:
         # 用「峰值」而非收尾瞬时值：两端时长不同步（客户端更短），先退出的那一端会让
         # 对端收尾时注册表掉回 1，用瞬时值会把成功的联机误判成失败。
@@ -497,6 +512,49 @@ def main():
             # 因此只拦三类真问题：收到 0（没同步）、超过权威值（逻辑错）、落后过半（同步中途断了）。
             if c_kills < h_kills * 0.6:
                 problems.append("客户端击杀 %d 明显落后于房主 %d——同步可能中途停止" % (c_kills, h_kills))
+
+    # —— M37 升级推卡收支 ——
+    # 客户端是唯一接收方：房主推几批，客户端就该收到几批。
+    # 光看"客户端选了几次卡"看不出问题——M37 之前那个统计方式本身就是坏的
+    # （只在 timeScale<=0 时统计，而外部推卡刻意不暂停，于是客户端恒为 0 次）。
+    # 必须把「收到 / 上屏 / 入队 / 丢弃 / 完成」拆开对账：收到 ≠ 上屏 + 入队 就是被吞了。
+    h_offered = as_int(host_data, "房主推卡批次", -1)
+    c_recv = as_int(client_data, "推卡收到", -1)
+    c_pres = as_int(client_data, "推卡上屏", -1)
+    c_queue = as_int(client_data, "推卡入队", -1)
+    c_drop = as_int(client_data, "推卡丢弃", -1)
+    c_picked = as_int(client_data, "升级选卡", -1)
+    h_evict = as_int(host_data, "批次淘汰", -1)
+
+    if c_drop > 0:
+        problems.append(
+            "M37：客户端丢弃了 %d 组推卡——面板占用期间推来的卡被扔掉，"
+            "玩家这次升级永久拿不到强化，房主也永远收不到选择回传" % c_drop)
+
+    if c_recv >= 0 and c_pres >= 0 and c_queue >= 0 and c_recv != c_pres + c_queue:
+        problems.append(
+            "M37：客户端推卡收支不平：收到 %d ≠ 上屏 %d + 入队 %d——差额就是被吞掉的强化"
+            % (c_recv, c_pres, c_queue))
+
+    if h_evict > 0:
+        problems.append(
+            "M37：房主侧有 %d 个供选批次被上限淘汰——客户端长时间不选卡，或选择回传链路断了"
+            % h_evict)
+
+    # 房主推了就该收到。留 1 的余量：客户端可能比房主早半拍收尾，最后一批来不及送达。
+    if h_offered >= 1 and c_recv < 1:
+        problems.append(
+            "M37：房主为远程玩家推了 %d 批卡，客户端一组都没收到——TargetRpc 推卡链路未通"
+            % h_offered)
+    elif aligned and h_offered >= 1 and c_recv >= 0 and c_recv < h_offered - 1:
+        problems.append(
+            "M37：房主推了 %d 批、客户端只收到 %d 批——推卡在中途丢失" % (h_offered, c_recv))
+
+    # 上屏的卡必须被选掉（收尾那一组可能来不及点，留 1 的余量）
+    if aligned and c_pres >= 0 and c_picked >= 0 and c_picked < c_pres - 1:
+        problems.append(
+            "M37：客户端上屏了 %d 组卡却只完成 %d 次选卡——面板弹出后没人/没法选，"
+            "游戏会卡在选卡界面里" % (c_pres, c_picked))
 
     # —— M11 断线重连专项判定 ——
     # 三层证据缺一不可：客户端自述重连成功 + 进度没回退 + 房主侧真的观测到「2→1→2」。

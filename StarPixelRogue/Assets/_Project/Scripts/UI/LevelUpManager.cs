@@ -13,9 +13,45 @@ namespace StarPixel.UI
     /// </summary>
     public class LevelUpManager : Core.MonoSingleton<LevelUpManager>
     {
+        /// <summary>M37：待弹外部供选的排队上限。超过后丢弃最旧的一批并计入 ExternalDropped。</summary>
+        public const int MaxPendingExternal = 16;
+
         private bool _active;
         private int _pending;
         private bool _externalCards;   // M4.5：联机客户端为 true——选卡一律由房主经 PresentExternal 推送
+
+        /// <summary>
+        /// M37：外部供选的排队区。
+        ///
+        /// 原先 <see cref="PresentExternal"/> 开头就是 `if (_active) return;`——面板正开着时
+        /// 推来的卡**直接丢掉**。而本地路径是有排队的：OnLevelUp 累加 _pending，选完一张
+        /// 再 TryPresent 补弹下一张。两条路不一致的后果：联机客户端连升两级时，第二张
+        /// 及以后的升级卡永久消失（房主侧也永远收不到选择回传，等于这次升级没发生）。
+        /// 实测 60s 双开：房主选卡 5 次、客户端 0 次——客户端全程只上屏过第一组，之后全丢。
+        /// </summary>
+        private readonly List<PendingExternal> _pendingExternal = new List<PendingExternal>();
+
+        private struct PendingExternal
+        {
+            public List<UpgradeOffer> offers;
+            public System.Action<int> onChosen;
+        }
+
+        // —— M37 计数：全部只增不减，供 CardProbe / SmokeTest 断言「一次都不许丢」——
+        /// <summary>收到的外部推卡次数（空候选不计）。</summary>
+        public int ExternalReceived { get; private set; }
+        /// <summary>真正上屏展示过的推卡次数。</summary>
+        public int ExternalPresented { get; private set; }
+        /// <summary>因面板正开着而入队等待的次数（排队不算丢）。</summary>
+        public int ExternalQueued { get; private set; }
+        /// <summary>被丢弃的次数（修复后应恒为 0；>0 说明排队溢出或调用方发了空候选）。</summary>
+        public int ExternalDropped { get; private set; }
+        /// <summary>当前队列里还压着几批。</summary>
+        public int ExternalPendingCount { get { return _pendingExternal.Count; } }
+        /// <summary>面板是否正在展示（供探针判定"是否在选卡态"，不许再靠 timeScale 推断）。</summary>
+        public bool IsShowing { get { return _active; } }
+        /// <summary>当前面板（供探针读取**真实上屏文本**，而不是内部列表——M35 的教训）。</summary>
+        public Transform CurrentPanel { get { return transform.Find("LevelUpCanvas"); } }
 
         /// <summary>
         /// M29：订阅必须**存成字段**再挂上去。
@@ -47,6 +83,9 @@ namespace StarPixel.UI
                 Core.EventBus.OnLevelUp -= _onLevelUp;
                 _onLevelUp = null;
             }
+            // M37：拆世界时队列里未弹的卡必须一起清掉——留着会让下一局
+            // 收到第一张推卡时被旧批次插队（玩家拿到的是上一局的卡）
+            _pendingExternal.Clear();
             // M4.5：断线拆世界时防止时间缩放卡在 0（选卡面板打开中被销毁）
             if (Core.HitstopManager.Instance != null) Core.HitstopManager.Instance.SetPaused(false);
             else Time.timeScale = 1f;
@@ -88,9 +127,42 @@ namespace StarPixel.UI
         /// </summary>
         public void PresentExternal(List<UpgradeOffer> offers, System.Action<int> onChosen)
         {
-            if (_active) return;
             if (offers == null || offers.Count == 0) return;
+            ExternalReceived++;
+
+            // M37：面板正开着时**排队**而不是丢弃（详见 _pendingExternal 注释）。
+            // 联机客户端连升两级是常态（早期 XP 涨得快），丢一张就是永久少一个强化。
+            if (_active)
+            {
+                if (_pendingExternal.Count >= MaxPendingExternal)
+                {
+                    // 队列溢出：玩家长时间不选卡，或回传链路断了。宁可丢最旧的一批
+                    // （它已经过期）也不让队列无限涨——但要计数，探针据此报警。
+                    ExternalDropped++;
+                    _pendingExternal.RemoveAt(0);
+                }
+                _pendingExternal.Add(new PendingExternal { offers = offers, onChosen = onChosen });
+                ExternalQueued++;
+                return;
+            }
             ShowPanel(offers, onChosen, false);   // 联机下不暂停（避免冻结网络心跳）
+            ExternalPresented++;
+        }
+
+        /// <summary>
+        /// M37：选完一张后把队列里的下一批弹出来。
+        /// 必须**延后**到帧末之后：Destroy(panel) 到帧末才真正生效，立刻新建的话
+        /// transform.Find("LevelUpCanvas") 会先找到刚被标记销毁的那一块。
+        /// </summary>
+        private System.Collections.IEnumerator PresentQueuedExternal(List<UpgradeOffer> offers,
+                                                                     System.Action<int> onChosen)
+        {
+            yield return null;
+            yield return null;
+            if (this == null) yield break;        // 期间可能被拆世界
+            _chooser = onChosen;
+            BuildPanel(offers);
+            ExternalPresented++;
         }
 
         private void ShowPanel(List<UpgradeOffer> offers, System.Action<int> choose, bool pause)
@@ -194,6 +266,18 @@ namespace StarPixel.UI
             _active = false;
             _chooser = null;
             _pending = Mathf.Max(0, _pending - 1);
+
+            // M37：先消化外部队列（联机客户端的全部选卡都从这里来），再回到本地待弹计数。
+            // 立刻把 _active 置回 true 占位，避免延后的这两帧里被新推卡插队。
+            if (_pendingExternal.Count > 0)
+            {
+                var next = _pendingExternal[0];
+                _pendingExternal.RemoveAt(0);
+                _active = true;
+                StartCoroutine(PresentQueuedExternal(next.offers, next.onChosen));
+                return;
+            }
+
             if (_pending > 0) TryPresent();
             else
             {
