@@ -20,7 +20,20 @@ namespace StarPixel.Core
         /// <summary>法律文本版本（yyyy.MM）。更新协议/隐私政策时必须递增此号。</summary>
         // M13：隐私政策增补「云存档（可选、默认关闭）」条款——涉及数据是否上传的重大变更，
         // 递增此号使已同意旧版的用户下次启动时重新看到合规门并再次确认。
-        public const string ComplianceVersion = "2026.10.1";
+        private const string ConstComplianceVersion = "2026.10.1";
+
+        /// <summary>
+        /// M21 实测专用：覆盖法律文本版本，用来构造「用户已同意旧版本」这一场景
+        /// ——协议更新后必须重新征得同意，是本模块最关键的合规行为，不进实测就只能靠读代码推断。
+        /// 正常启动永远返回 <see cref="ConstComplianceVersion"/>。
+        /// </summary>
+        public static string ComplianceVersionOverrideForTest;
+
+        /// <summary>当前法律文本版本（合规门判定与同意记录都以此为准）。</summary>
+        public static string ComplianceVersion =>
+            string.IsNullOrEmpty(ComplianceVersionOverrideForTest)
+                ? ConstComplianceVersion
+                : ComplianceVersionOverrideForTest;
 
         public static string Version { get; private set; } = FallbackVersion;
         public static string BuildNumber { get; private set; } = "dev";

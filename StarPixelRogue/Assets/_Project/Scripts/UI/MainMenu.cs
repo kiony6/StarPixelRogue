@@ -65,6 +65,12 @@ namespace StarPixel.UI
             }
         }
 
+        /// <summary>
+        /// M21 实测：主菜单当前是否可见。合规门的意义正是"同意前不得进入游戏"，
+        /// 所以"同意前菜单是隐藏的、同意后才显示"必须能被断言，而不是靠看代码推断。
+        /// </summary>
+        public bool IsVisible => _root != null && _root.activeSelf;
+
         private void Rebuild()
         {
             Build();

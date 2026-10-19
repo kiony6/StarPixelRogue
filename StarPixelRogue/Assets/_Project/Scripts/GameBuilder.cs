@@ -49,6 +49,9 @@ namespace StarPixel
             // M20：持久化层无头实测（正常启动不受影响）
             if (HasArg("-persistenceProbe")) { StartPersistenceProbe(); return; }
 
+            // M21：合规门与同意链路无头实测（正常启动不受影响）
+            if (HasArg("-complianceProbe")) { StartComplianceProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -363,6 +366,31 @@ namespace StarPixel
             Application.targetFrameRate = 60;          // 同其它实测：不锁帧会把每帧告警刷成 GB 级日志
             PrepareStage();
             StarPixel.Dev.PersistenceProbe.Start(ArgValue("-persistenceScene", "SAVE"));
+        }
+
+        /// <summary>
+        /// M21 合规门无头实测入口：交给 <see cref="Dev.ComplianceProbe"/> 验证
+        /// 「首启弹门 / 已同意放行 / 协议版本升级必须重新征得同意 / 不同意即退出 /
+        /// 同意态落盘 / 同意前云存档零请求且同意后补一次拉取」。
+        /// 参数：-complianceScene FIRST|AGREED|BUMP|DECLINE|CONSENT_CLOUD|L10N（默认 FIRST）
+        ///      -complianceLang zh-CN|en-US（默认 zh-CN）
+        /// </summary>
+        private static void StartComplianceProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            // 云存档配置必须在 Ensure **之前**覆盖：服务在 Awake 里读配置、Start 里判定 Enabled，
+            // 事后再改就晚了（与 CloudSaveProbe 同样的顺序约束）
+            var url = ArgValue("-cloudSaveUrl", "");
+            if (!string.IsNullOrEmpty(url))
+                Core.CloudSave.CloudSaveService.OverrideConfig = new Core.CloudSave.CloudSaveService.Config
+                { baseUrl = url, timeoutSeconds = 3 };
+            Core.CloudSave.CloudSaveService.Ensure();
+            Application.targetFrameRate = 60;          // 同其它实测：不锁帧会把每帧告警刷成 GB 级日志
+            PrepareStage();
+            StarPixel.Dev.ComplianceProbe.Start(
+                ArgValue("-complianceScene", "FIRST"),
+                ArgValue("-complianceLang", Core.Localization.LangZh));
         }
 
         private static void OpenLobby()

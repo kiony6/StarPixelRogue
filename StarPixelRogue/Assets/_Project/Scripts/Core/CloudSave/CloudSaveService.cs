@@ -93,6 +93,40 @@ namespace StarPixel.Core.CloudSave
         public int RequestCount => Provider != null ? Provider.RequestCount : 0;
 
         /// <summary>
+        /// M21 实测：已发起的**拉取**次数。
+        /// 「未启用即零请求」只证明没联网；要证明"同意后真的会先拉再推"，
+        /// 必须能把拉取单列出来计数——否则一次都没拉的静默数据覆盖照样全绿。
+        /// </summary>
+        public int PullCount { get; private set; }
+
+        /// <summary>
+        /// M21：用户在合规门点了「同意并继续」后调用。
+        ///
+        /// 缺陷背景：本服务的首次拉取只在 <see cref="Start"/> 里做一次，而首启（或协议版本
+        /// 升级后重新征得同意）时用户还没同意协议，<see cref="Enabled"/> 为 false 直接 return，
+        /// 那次拉取就**永久错过**了。此后 <see cref="Update"/> 只管上行，于是本会话变成
+        /// 「只推不拉」——本地旧档会把云端新档直接覆盖，且没有任何报错。
+        /// 典型受害场景：玩家在另一台设备玩过后回到本机，或协议更新后重新同意，
+        /// 玩一局即触发 <see cref="OnLocalSaved"/> → 上传覆盖，云端进度静默丢失。
+        ///
+        /// 修法：同意态变化时若服务已启用且本会话尚未拉取过，补一次拉取并重新刷新状态。
+        /// 幂等——重复同意不会重复拉取。
+        /// </summary>
+        public void OnConsentGranted()
+        {
+            if (!Enabled) { SetStatus(StatusOff); return; }
+            if (PullCount > 0 || _busy) { RefreshStatus(); return; }
+            StartCoroutine(PullAndReconcile());
+        }
+
+        /// <summary>M21：把状态文案与当前 <see cref="Enabled"/> 对齐（避免"实际在上传、界面仍显示未启用"）。</summary>
+        private void RefreshStatus()
+        {
+            if (!Enabled) { SetStatus(StatusOff); return; }
+            if (string.IsNullOrEmpty(LastStatus) || LastStatus == StatusOff) SetStatus(StatusIdle);
+        }
+
+        /// <summary>
         /// M18 实测专用：内存覆盖后端配置。
         /// 正常启动路径永远只读 <c>Resources/cloudsave.json</c>，本属性仅由无头实测在
         /// <see cref="Ensure"/> 之前置位，用来构造「已配置 / 未配置」等不同开关组合，
@@ -199,6 +233,7 @@ namespace StarPixel.Core.CloudSave
         {
             if (_busy) yield break;
             _busy = true;
+            PullCount++;
 
             bool ok = false;
             string payload = null;

@@ -13,6 +13,30 @@ namespace StarPixel.Compliance
         /// <summary>合规门通过后的回调（GameBuilder 用于显示主菜单）。</summary>
         public static System.Action OnPassed;
 
+        /// <summary>
+        /// M21 实测：退出行为的可替换钩子。默认就是真的 <c>Application.Quit()</c>；
+        /// 探针替换它以便**在不终止进程的前提下**断言"点不同意确实走到了退出"——
+        /// 否则进程一退出，剩下的断言结果就再也打印不出来了。
+        /// </summary>
+        public static System.Action QuitAction = () =>
+        {
+#if UNITY_EDITOR
+            UnityEditor.EditorApplication.isPlaying = false;
+#else
+            Application.Quit();
+#endif
+        };
+
+        /// <summary>M21 实测：模态是否真的建出来了（门有没有弹）。</summary>
+        public static bool Shown { get; private set; }
+
+        /// <summary>M21 实测：同意 / 不同意 各被点了几次（合规行为必须可计数，否则"没弹门"与"弹了没点"无法区分）。</summary>
+        public static int AgreeCount { get; private set; }
+        public static int DeclineCount { get; private set; }
+
+        /// <summary>M21 实测：当前门面板根（语言切换会重建，须走实例而非 GameObject.Find）。</summary>
+        public GameObject PanelRoot => _modalRoot;
+
         private GameObject _modalRoot;
 
         void Awake()
@@ -26,6 +50,38 @@ namespace StarPixel.Compliance
                 return;
             }
             Build();
+            Shown = true;
+        }
+
+        /// <summary>M21 实测：把静态计数复位（每个场景独立进程，但复位可避免探针自身误判）。</summary>
+        public static void ResetCountersForTest()
+        {
+            Shown = false;
+            AgreeCount = 0;
+            DeclineCount = 0;
+        }
+
+        /// <summary>
+        /// M21 实测：点击「同意并继续」按钮（走真实 Agree 路径，不复制判定逻辑）。
+        /// 返回是否点到按钮——点不到本身就是缺陷（按钮缺失/层级不对）。
+        /// </summary>
+        public bool ClickAgreeForTest()
+        {
+            var btn = _modalRoot != null ? _modalRoot.transform.Find("Mask/Panel/AgreeBtn") : null;
+            var b = btn != null ? btn.GetComponent<UnityEngine.UI.Button>() : null;
+            if (b == null) return false;
+            b.onClick.Invoke();
+            return true;
+        }
+
+        /// <summary>M21 实测：点击「不同意并退出」（走真实 Disagree 路径）。</summary>
+        public bool ClickDeclineForTest()
+        {
+            var btn = _modalRoot != null ? _modalRoot.transform.Find("Mask/Panel/DisagreeBtn") : null;
+            var b = btn != null ? btn.GetComponent<UnityEngine.UI.Button>() : null;
+            if (b == null) return false;
+            b.onClick.Invoke();
+            return true;
         }
 
         private void Build()
@@ -82,23 +138,27 @@ namespace StarPixel.Compliance
 
         private void Agree()
         {
+            AgreeCount++;
             Core.SettingsManager.Ensure();
             Core.SettingsManager.Instance.AgreeTerms(Core.VersionInfo.ComplianceVersion);
             Core.Telemetry.Log(Core.Telemetry.EvAgreeTerms,
                 "version", Core.VersionInfo.ComplianceVersion);
             Core.UIFactory.Destroy(_modalRoot);
+
+            // M21：协议版本升级后重新征得同意的当次会话里，云存档此前是「未同意」而停用的，
+            // 它的首次拉取（Start 里那次）已经错过；此时必须补一次拉取再谈上传，
+            // 否则本地旧档会直接把云端新档覆盖掉（静默的数据丢失）。
+            Core.CloudSave.CloudSaveService.Instance?.OnConsentGranted();
+
             OnPassed?.Invoke();
             Destroy(this);
         }
 
         private void Disagree()
         {
+            DeclineCount++;
             Debug.Log("[Compliance] 用户不同意协议，退出游戏");
-#if UNITY_EDITOR
-            UnityEditor.EditorApplication.isPlaying = false;
-#else
-            Application.Quit();
-#endif
+            QuitAction?.Invoke();
         }
     }
 }

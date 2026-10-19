@@ -1,4 +1,4 @@
-# 《星界像素狂潮》— Unity 工程原型（M1 – M20）
+# 《星界像素狂潮》— Unity 工程原型（M1 – M21）
 
 > 像素肉鸽割草（吸血鬼幸存者类）· 单机即开即玩，联机（Fish-Net 状态同步）为可选模块。
 > 本目录为可运行原型源码，对应《联机肉鸽技术设计文档》的 M1–M4 里程碑。
@@ -877,6 +877,57 @@ python persistence_probe.py --only SAVE    # 只跑存档
 回归（异常均 0）：单机冒烟 45s（击杀 70 / 波次 4 / 等级 6）、
 防沉迷 MINOR + ADULT 全绿、云存档 5 场景 + UI 探针（A~D 请求 0、E 请求 3、裸键无、中文残留无）、
 联机双开 60s（波次 7/6、击杀 126/84）、静态审计 ERROR 0 / WARN 0 / INFO 8。
+
+### M21 合规门无头实测：同意后云存档「只推不拉」会用本地旧档覆盖云端（本次新增）
+
+M19、M20 之后只剩**合规门 `ComplianceGate` 从未被执行过一次**——所有无头入口都直接调
+`AgreeTerms()` 绕过它，所以此前任何实测都没真正见过这块 UI。合规功能的失效是静默的：
+门没弹出来，游戏一切正常，只是"用户其实从没同意过协议"。
+
+| # | 缺陷 | 后果 |
+| --- | --- | --- |
+| ① | `CloudSaveService` 的首次拉取只在 `Start()` 做一次，而首启/协议版本升级后重新同意时 `Enabled` 为 false——那次拉取**永久错过**，此后 `Update()` 只管上行 | 本会话变成**只推不拉**：玩一局后本地档上传，**云端更新的存档被静默覆盖**（玩家在另一台设备玩过就会丢进度）。不报错、不崩溃 |
+| ② | `Start()` 未启用时写死 `SetStatus(StatusOff)`，之后 `Enabled` 变 true 也不刷新 | 界面显示"未启用"而服务其实已在上传 |
+
+修法：① `Agree()` 调用新增 `CloudSaveService.OnConsentGranted()`（已启用且本会话未拉取过则补一次，幂等）；
+② 顺带对齐状态文案。
+
+```bash
+python compliance_probe.py               # 6 个场景（约 2 分钟）
+python compliance_probe.py --only BUMP    # 只跑「协议升级必须重新征得同意」
+```
+
+| 场景 | 覆盖路径 |
+| --- | --- |
+| FIRST | 首启弹门 → 三份法律文本齐全 → 点同意 → **同意态真实 `Load()` 读回校验** → 主菜单解锁；同意前菜单必须隐藏 |
+| AGREED | 已同意当前版本：门不重复弹 |
+| BUMP | 已同意**旧**版本 + 文本已升级：**门必须重新弹出**（协议更新后重新征得同意，本模块最关键的一条） |
+| DECLINE | 点不同意 → 走到退出 + 同意态**不得**写入 + 主菜单不解锁 |
+| CONSENT_CLOUD | 同意前云存档零请求；同意后必须**发起拉取**（防本地档覆盖云端） |
+| L10N | 英文界面下合规门文案无裸键、无中文残留 |
+
+**判据区分力**：① 同意态落盘由探针调真实 `SettingsManager.Load()` 读回比对，不查内存字段
+（只查内存的话，一个根本不保存的实现也能全绿）；②「门弹了没有」(`Shown`) 与「点了没有」(`AgreeCount`)
+分开计数，才能区分"门压根没弹"和"按钮点不动"；③ CONSENT_CLOUD 用**拉取次数**而非笼统的"联网了没"
+判定——只断言请求数 >0 的话，一次都不拉、直接上传覆盖云端的实现照样能过。
+
+> **区分力验证**：只把 `OnConsentGranted()` 那一行还原为修复前重建重跑，探针精确报出
+> 「同意后拉取次数 0」，**其余 5 个场景照常通过**；还原后 6 个场景全绿。
+
+**实测**（异常均 0）：FIRST 全「是」、AGREED 不重复弹门、BUMP 重新弹门、DECLINE 走到退出且未写入、
+CONSENT_CLOUD 同意前请求 0 / 同意后拉取 1、L10N 文案 9 条 / 裸键无 / 中文残留无。
+
+> **踩坑**：① 探针最初「先 `AddComponent`、再赋值 `_scene`」——**`AddComponent` 会同步执行 `Awake`**，
+> 于是状态永远走默认分支，一轮跑出 4 处假失败；改为先 `SetActive(false)` 再激活。
+> ② 场景间共用 `settings.json`，DECLINE 的「同意态未写入」曾**因为前一个场景留下的高版本号而碰巧成立**
+> （假通过）——现每个场景前清空落盘文件，让判据建立在已知初始态上。
+
+新增/改动：`Compliance/ComplianceGate.cs`（计数器 / `QuitAction` / 注入点击）、`Core/VersionInfo.cs`
+（`ComplianceVersion` 可覆盖）、`Core/CloudSave/CloudSaveService.cs`（`PullCount` / `OnConsentGranted`）、
+`UI/MainMenu.cs`（`IsVisible`）、`Dev/ComplianceProbe.cs`、`GameBuilder.cs`、`../compliance_probe.py`。
+
+回归（异常均 0）：单机冒烟 45s（击杀 69 / 波次 4 / 等级 5）、防沉迷全绿、云存档 5 场景 + UI 探针、
+持久化 SAVE + TELEMETRY、联机双开 60s（波次 7/6、击杀 130/101、Boss 是/是）、静态审计 ERROR 0 / WARN 0 / INFO 8。
 
 ## 架构与目录
 
