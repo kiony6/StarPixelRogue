@@ -111,12 +111,22 @@ namespace StarPixel.UI
         /// 波次 / 等级 / 区域 / 武器名只在各自事件触发时才赋值，切语言后
         /// 它们会一直停在旧语言，直到下一次事件到来。
         /// 实测：开局后切成英文，HUD 上仍是「波次 1」，要等到进下一波才变英文。
+        ///
+        /// M34 补两处：
+        /// · `modeText`（联机模式标识）由 GameBuilder 一次性写入，**任何事件都不再碰它**，
+        ///   所以 M33 这一轮也没带出来——它只在联机下 SetActive(true)，单机探针看不见。
+        /// · `comboToast`：切语言时若正挂着一条旧语言的组合技提示，它会继续显示到淡出为止；
+        ///   清掉比留着正确（提示是一次性的，下次触发自然按新语言拼）。
         /// </summary>
         private void RefreshLanguage()
         {
             if (waveText) waveText.text = Core.Localization.T("hud.wave", _wave);
             if (levelText) levelText.text = Core.Localization.T("hud.level", _level);
             if (zoneText && _zone > 0) zoneText.text = Core.Localization.T("hud.zone", _zone);
+            // M34：模式标识没有对应事件，只能在这里补；ModeLabel() 内部已走本地化表。
+            if (modeText) modeText.text = Net.NetSession.ModeLabel();
+            // M34：清掉可能正挂着的旧语言组合技提示（并停掉淡出计时，免得改完立刻被清）
+            if (comboToast) { comboToast.text = ""; _comboTimer = 0f; }
             RefreshWeapons();      // 武器名走 SkillDef.DisplayName（内含 locKey），需重建
         }
 

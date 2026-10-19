@@ -30,12 +30,45 @@ namespace StarPixel.Net
         void Awake()
         {
             if (Instance == null) Instance = this;
+            // M34：遮罩是**跨拆世界常驻**的，BuildOverlay 只跑一次，
+            // 切语言时若不重建，状态文案与「返回大厅」按钮会一直停在旧语言。
+            Core.Localization.LanguageChanged += OnLanguageChanged;
         }
 
         void OnDestroy()
         {
             if (Instance == this) Instance = null;
+            // 静态事件必须退订（M29 教训：死订阅不只是泄漏，已销毁对象的回调会抛异常、
+            // 打断整条委托链，表现出来是"切语言后一半界面没刷新"）
+            Core.Localization.LanguageChanged -= OnLanguageChanged;
         }
+
+        /// <summary>
+        /// M34：按当前语言重建遮罩。旧文案是拼接出来的（"第 N/M 次重连…"），
+        /// 不能直接拿 _status.text 复用——那是旧语言的成品，只有键与参数能跨语言复用。
+        /// </summary>
+        private void OnLanguageChanged()
+        {
+            if (_overlay == null) return;          // 还没建过：下次 ShowOverlay 自然按新语言建
+            bool visible = _overlay.activeSelf;
+            Destroy(_overlay);
+            _status = null;
+            BuildOverlay();                        // 内部会重设 _status 与按钮文案，并默认隐藏
+            if (_status != null)
+            {
+                _status.text = _active
+                    ? Core.Localization.T("net.reconnect_attempt", _attempt, _maxAttempts)
+                    : Core.Localization.T("net.reconnecting");
+            }
+            if (_overlay != null) _overlay.SetActive(visible);
+        }
+
+        /// <summary>
+        /// 当前遮罩 UI 根（M34：为无头 UI 探针提供定位入口）。
+        /// 与 <see cref="NetLobby.PanelRoot"/> 同理——不能用 GameObject.Find("ReconnectOverlay")：
+        /// 切语言会整棵重建遮罩，而 Destroy 延迟到帧末，Find 会命中旧的那一棵。
+        /// </summary>
+        public GameObject OverlayRoot => _overlay;
 
         public static NetReconnect Ensure()
         {

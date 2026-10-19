@@ -25,6 +25,22 @@ namespace StarPixel.Net
         void Awake()
         {
             BuildUI();
+            // M34：大厅 UI 只在 Awake 里建一次。只要存在任意一条"进了大厅再切语言"的路径
+            // （断线回大厅就是常驻实例），不订阅就会停在旧语言。
+            Core.Localization.LanguageChanged += Rebuild;
+        }
+
+        void OnDestroy()
+        {
+            // 静态事件必须退订（M29 教训）
+            Core.Localization.LanguageChanged -= Rebuild;
+        }
+
+        /// <summary>M34：按当前语言整棵重建大厅 UI。</summary>
+        private void Rebuild()
+        {
+            if (_root != null) Destroy(_root);
+            BuildUI();
         }
 
         private void BuildUI()

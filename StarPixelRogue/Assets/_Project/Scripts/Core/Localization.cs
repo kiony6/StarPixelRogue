@@ -195,8 +195,11 @@ namespace StarPixel.Core
                 ["net.connecting_spectate"] = "正在以观战身份连接 {0} …",
                 ["net.disconnected"] = "已断开连接，请重新选择模式",
                 // M33：联机运行时浮层（断线遮罩 / 观战横幅 / 诊断 HUD / 模式名）。
-                // 此前这些文案直接硬编码在 Net 层代码里——英文界面下整片冒中文，
-                // 且这段代码在 #if FISHNET_ENABLED 里、无头单机编译不到，只能靠静态检查兜住。
+                // 此前这些文案直接硬编码在 Net 层代码里——英文界面下整片冒中文。
+                // M34 订正：当年写的"这段代码在 #if FISHNET_ENABLED 里、无头单机编译不到"
+                // 是错的——Fish-Net 一直以内置包形式在 Packages/ 下、Standalone 也一直
+                // 带着 FISHNET_ENABLED，它们是编译的。真正测不到是因为那些浮层在单机流程里
+                // 根本不上屏（模式标识被 SetActive(false)、遮罩只在掉线时出现）。
                 ["net.mode_spectator"] = "观战",
                 ["net.mode_host"] = "房主",
                 ["net.mode_client"] = "客户端",

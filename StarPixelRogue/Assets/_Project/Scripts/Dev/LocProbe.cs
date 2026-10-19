@@ -12,13 +12,19 @@ namespace StarPixel.Dev
     ///
     /// 动机：本地化表本身是自洽的（zh/en 键集合完全一致），切到英文后绝大多数界面
     /// 也确实变英文了——于是"看起来没问题"。漏网的只有绕过 Localization 直接写
-    /// 字面量的地方，而 M33 静态检查抓出的 8 处全在 Net 层（断线遮罩 / 观战横幅 /
-    /// 诊断 HUD / 模式名），那段代码整段在 #if FISHNET_ENABLED 里——**没装联机插件
-    /// 时不参与编译**，运行时探针永远扫不到。
+    /// 字面量的地方。
     ///
     /// 所以本探针的定位是：① 守住单机可见的那一整片 UI 不退化；
     /// ② 覆盖静态查不到的盲区——**动态拼接的键**（"combo." + id、"codex.tab_" + tab），
-    /// 拼错时 T() 静默返回键名本身，界面上直接显示 "combo.fire_storm" 这种裸键。
+    /// 拼错时 T() 静默返回键名本身，界面上直接显示 "combo.fire_storm" 这种裸键；
+    /// ③（M34）覆盖联机专属 UI——它们的文案是**一次性写入**的，切语言不会自己重设。
+    ///
+    /// M34 订正一条 M33 写错的结论：当时认为 Net 层整段在 #if FISHNET_ENABLED 里、
+    /// "没装联机插件时不参与编译"，所以运行时扫不到。事实是 Fish-Net 一直以内置包
+    /// 形式在 Packages/ 下、ProjectSettings 的 Standalone 也一直带着 FISHNET_ENABLED，
+    /// 那些代码**是编译的**。真正扫不到的原因是：模式标识在单机下 SetActive(false)、
+    /// 断线遮罩只在掉线时才出现——是"没让它上屏"，不是"没编译"。
+    /// 把怀疑当成结论写进注释，会让后面每一轮都跳过这块。
     ///
     /// 场景：
     ///   BASE    扫描器自检（先证明"数得出中文"，否则后面全绿是假的）
@@ -26,6 +32,7 @@ namespace StarPixel.Dev
     ///   EN      英文态不得有任何中文（核心判据）
     ///   KEY     动态拼接键不得回退成裸键
     ///   RESTORE 切回中文后中文必须回来（证明 EN 的 0 不是因为 UI 没了）
+    ///   NETUI   联机专属 UI（模式标识 / 断线遮罩）切英文后不得残留中文
     /// </summary>
     public class LocProbe : MonoBehaviour
     {
@@ -56,6 +63,15 @@ namespace StarPixel.Dev
         private string _keySample = "";
         private bool _comboFired;      // 组合技广播真的发出去了（否则"没裸键"是假绿）
         private bool _codexOpened;     // 图鉴真的打开了（同上，5 个 tab 键要被拼出来）
+
+        // NETUI（M34）：联机专属 UI 的切语言刷新
+        private bool _netUiShown;      // 模式标识与断线遮罩真的上屏了（否则"0 条中文"是假绿）
+        private int _netTexts;         // 联机 UI 文本条数（模式标识 + 遮罩上的全部文本）
+        private int _netEnTexts;       // 英文态再数一次：切语言若把遮罩弄没了，这里会掉到 1
+        private int _netZhCjk;         // 中文态其中含中文的条数
+        private int _netEnCjk;         // 英文态其中含中文的条数（核心判据：必须为 0）
+        private int _netRsCjk;         // 切回中文后含中文的条数（排除"UI 没了"的假绿）
+        private string _netSample = "";   // 英文态第一条漏网中文（排查用）
 
         private static readonly string[] Noise =
         {
@@ -124,6 +140,7 @@ namespace StarPixel.Dev
                 case "EN":      body = En();      break;
                 case "KEY":     body = Key();     break;
                 case "RESTORE": body = Restore(); break;
+                case "NETUI":   body = NetUi();   break;
                 default:        body = Base();    break;
             }
 
@@ -366,6 +383,103 @@ namespace StarPixel.Dev
             _keyBare = CountBare(texts, ref _keySample);
         }
 
+        /// <summary>
+        /// NETUI（M34）：联机专属 UI 切到英文后不得残留中文。
+        ///
+        /// M33 的判断是"Net 层的浮层编译不到、运行时扫不到，只能靠静态检查"——
+        /// 这个结论**错了**：Fish-Net 从一开始就以内置包的形式在 Packages/ 里，
+        /// ProjectSettings 的 Standalone 也一直带着 FISHNET_ENABLED，那些代码是编译的。
+        /// 真正扫不到的原因是另外两条：
+        ///   ① 模式标识 `modeText` 在单机下被 SetActive(false)，扫描器按 activeInHierarchy
+        ///      过滤，等于从来没看过它一眼；
+        ///   ② 断线遮罩只在掉线时才显示，单机流程里根本不会走到。
+        /// 两条都是"没让它上屏"，不是"没编译"——手动把它们显示出来就能扫。
+        ///
+        /// 这也是静态层的盲区：modeText 的文案经 CreateText(… ModeLabel()) 写入，
+        /// 扫源码看不见"这个返回值是本地化文案"，只有运行时看成品才知道。
+        /// </summary>
+        private IEnumerator NetUi()
+        {
+#if FISHNET_ENABLED
+            yield return BuildWorld();
+            yield return OpenUi(Core.Localization.LangZh);
+
+            // ① 模式标识：单机下是隐藏的，先强制上屏
+            var hud = FindObjectOfType<UI.HUDController>();
+            if (hud == null || hud.modeText == null)
+            {
+                Fail("拿不到 HUD 的模式标识——联机 UI 没上屏，「0 条中文」是假绿");
+                yield break;
+            }
+            hud.modeText.gameObject.SetActive(true);
+
+            // ② 断线遮罩：单机流程走不到，直接驱动重连流程把它显示出来
+            var rc = Net.NetReconnect.Ensure();
+            rc.BeginReconnect(false, "", 99, 9999f);   // 9999s：本场景内不会真的重试
+            yield return null;
+            yield return null;                          // Object.Destroy 延迟到帧末，多等一帧
+
+            var texts = NetUiTexts();
+            _netTexts = texts.Count;
+            _netUiShown = _netTexts >= 2;
+            if (!_netUiShown)
+            {
+                Fail("联机 UI 只扫到 " + _netTexts + " 条文本（期望 ≥2：模式标识 + 遮罩状态/按钮）——" +
+                     "说明遮罩没显示出来，后面的 0 是假绿");
+                yield break;
+            }
+            _netZhCjk = CountCjk(texts, ref _netSample);
+            if (_netZhCjk < 1)
+                Fail("中文态联机 UI 一条中文都没有（" + _netTexts + " 条）——扫描器失灵，EN 的 0 是假绿");
+
+            // ③ 切英文：这是核心判据。旧的 modeText 与遮罩都不会自己重设
+            yield return OpenUi(Core.Localization.LangEn);
+            texts = NetUiTexts();
+            _netEnTexts = texts.Count;
+            _netSample = "";      // 中文态那条样本要清掉，否则"首条中文"会挂着中文态的残留
+            _netEnCjk = CountCjk(texts, ref _netSample);
+            // 切语言若把遮罩弄没了（重建顺序写反就是这种表现），条数会掉下来，
+            // 此时的"0 条中文"是假绿——必须连带看条数。
+            if (_netEnTexts < _netTexts)
+                Fail("切英文后联机 UI 只剩 " + _netEnTexts + " 条文本（切之前 " + _netTexts +
+                     " 条）——遮罩在切语言时没了，此时的「0 条中文」是假绿");
+
+            // ④ 切回中文：证明上面的 0 是因为刷新生效，不是因为 UI 没了。
+            //    样本另用一个变量——中文态必然有中文，若复用 _netSample 会把"首条中文"
+            //    顶成中文态的残留，判据因此永远红（实测踩到）。
+            yield return OpenUi(Core.Localization.LangZh);
+            texts = NetUiTexts();
+            string rsSample = "";
+            _netRsCjk = CountCjk(texts, ref rsSample);
+#else
+            Fail("FISHNET_ENABLED 未定义——联机 UI 根本没编译，本场景的任何" +
+                 "「0 条中文」都是假绿，必须先确认条件编译符号");
+            yield break;
+#endif
+        }
+
+        /// <summary>
+        /// 联机专属 UI 上的文本：HUD 的模式标识 + 断线遮罩里的全部文本。
+        /// 只取这两处，是为了让判据**可归因**——扫全屏的话，别处的漏网会混进来，
+        /// 修完也说不清到底是哪个组件没刷新。
+        /// </summary>
+        private List<Text> NetUiTexts()
+        {
+#if FISHNET_ENABLED
+            var list = new List<Text>();
+            var hud = FindObjectOfType<UI.HUDController>();
+            if (hud != null && hud.modeText != null && hud.modeText.gameObject.activeInHierarchy)
+                list.Add(hud.modeText);
+
+            var rc = Net.NetReconnect.Instance;
+            if (rc != null && rc.OverlayRoot != null && rc.OverlayRoot.activeSelf)
+                list.AddRange(rc.OverlayRoot.GetComponentsInChildren<Text>(true));
+            return list;
+#else
+            return new List<Text>();
+#endif
+        }
+
         // ── 公共步骤 ──────────────────────────────────────────────
 
         private IEnumerator BuildWorld()
@@ -452,6 +566,21 @@ namespace StarPixel.Dev
                               "键拼错时 T() 静默返回键名本身，玩家会看到 combo.fire_storm 这种原始键");
                     break;
 
+                case "NETUI":
+                    if (!_netUiShown)
+                        Fail("联机 UI 没上屏——模式标识/断线遮罩不可见，下面的 0 是假绿");
+                    else if (_netZhCjk < 1)
+                        Fail("中文态联机 UI 一条中文都没有（" + _netTexts + " 条）——扫描器失灵");
+                    else if (_netEnCjk == 0)
+                        Ok("联机 UI 切英文后 " + _netTexts + " 条文本无一含中文");
+                    else
+                        Fail("联机 UI 切英文后仍有 " + _netEnCjk + " 条含中文（首条: " + _netSample + "）——" +
+                             "模式标识/断线遮罩是一次性写入的，切语言不会自己重设");
+                    if (_netUiShown && _netRsCjk < 1)
+                        Fail("切回中文后联机 UI 的中文没回来（" + _netRsCjk + " 条）——" +
+                             "说明英文态的 0 是因为 UI 没了，不是因为刷新生效");
+                    break;
+
                 case "RESTORE":
                     if (_enCjk == 0) Ok("英文态 0 条中文");
                     else Fail("英文态仍有 " + _enCjk + " 条中文（首条: " + _cjkSample + "）");
@@ -501,6 +630,15 @@ namespace StarPixel.Dev
                 case "RESTORE":
                     Line("英文态文本/中文", _enTexts + " / " + _enCjk);
                     Line("切回后文本/中文", _rsTexts + " / " + _rsCjk);
+                    break;
+                case "NETUI":
+                    Line("联机UI已上屏", _netUiShown ? "是" : "否");
+                    Line("联机UI文本总数", _netTexts.ToString());
+                    Line("中文态含中文", _netZhCjk.ToString());
+                    Line("英文态文本总数", _netEnTexts.ToString());
+                    Line("英文态含中文", _netEnCjk.ToString());
+                    Line("首条中文", _netSample == "" ? "无" : _netSample);
+                    Line("切回后含中文", _netRsCjk.ToString());
                     break;
             }
 

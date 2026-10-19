@@ -1204,9 +1204,15 @@ def check_ui_text_localized():
     为什么值得单列一项：这类缺陷**没有任何一层现有断言能抓住**。
     本地化表本身是自洽的（两张表键数相等、键集合一致），切到英文后
     绝大多数界面也确实变英文了，于是"看起来没问题"；漏网的只有那几处
-    绕过 Localization 直接写字面量的地方。而 Net 层的浮层（断线遮罩 /
-    观战横幅 / 诊断 HUD）整段在 #if FISHNET_ENABLED 里——**没装联机插件时
-    根本不参与编译**，运行时探针永远扫不到，只剩静态检查能兜住。
+    绕过 Localization 直接写字面量的地方。
+
+    M34 订正：本项初版写着 Net 层的浮层"整段在 #if FISHNET_ENABLED 里、
+    没装联机插件时不参与编译"——**这句是错的**。Fish-Net 从初始提交起就以
+    内置包形式在 Packages/ 下，ProjectSettings 的 Standalone 也一直带着
+    FISHNET_ENABLED，那些代码是编译的。运行时扫不到的真正原因是那些浮层
+    在单机流程里不上屏（模式标识被 SetActive(false)、遮罩只在掉线时出现），
+    已由 M34 的 NETUI 场景手动请上屏后覆盖。静态这一层的价值没有变——
+    它管的是"源码里有没有绕过 Localization"，与运行时互补，不依赖对方。
 
     自动排除（不属"玩家可见文案"）：
       · Dev/ 与 Editor/ —— 诊断脚本自己的中文报错；
@@ -1256,11 +1262,169 @@ def check_ui_text_localized():
             err("UI 文案硬编码中文（英文界面会冒中文）: %s 第 %d 行 \"%s\"\n"
                 "      这段文案绕过了 Localization，切到 en-US 后玩家看到的仍是中文。\n"
                 "      M33 实测：Net 层断线遮罩「返回大厅」按钮、观战横幅、诊断 HUD 的\n"
-                "      「敌人/玩家」标签、以及 ModeLabel() 的四个模式名全都是这么漏的——\n"
-                "      那段代码在 #if FISHNET_ENABLED 里，未装联机插件时不编译，运行时测不到。\n"
+                "      「敌人/玩家」标签、以及 ModeLabel() 的四个模式名全都是这么漏的。\n"
                 "      修法：在 Localization 的 zh/en 两张表各加一个键，改走 T()；\n"
                 "      确属中文专属（如开发期可读标识）则写 // @zhonly: 理由。"
                 % (rp, ln_no, val[:60]))
+
+
+# ── 13. 切语言后文本刷新 ─────────────────────────────────
+LANG_SUB_RE = re.compile(r'LanguageChanged\s*[+\-]=\s*(\w+)')
+PER_FRAME_METHODS = ('Update', 'LateUpdate', 'FixedUpdate')
+# Localization.T( 或裸 T(
+T_CALL_RE = re.compile(r'(?:Localization\s*\.\s*)?\bT\s*\(')
+# xxx.text = / hud.xxx.text =
+TEXT_ASSIGN_RE = re.compile(
+    r'\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\s*\.\s*text\s*=')
+# xxx = CreateText(...) / hud.xxx = CreateText(...)
+FACTORY_ASSIGN_RE = re.compile(
+    r'\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\s*=\s*(?:[A-Za-z_]\w*\s*\.\s*)*'
+    r'Create(?:Text|Button|Toggle|Slider|Input)\s*\(')
+# 局部变量声明（工厂内部的 `Text t = ...CreateText(...)` 不是"字段"）
+LOCAL_DECL_KW = re.compile(
+    r'(?:var|Text|Button|Slider|GameObject|Image|InputField|Toggle|RectTransform)\s+$')
+METHOD_NAME_RE = re.compile(r'(\w+)\s*\(')
+
+
+def _lang_refresh_survey(path):
+    """
+    扫描单个文件，返回 (assignments, safe_fields, method_names)。
+
+    assignments: [(字段名, 行号1-based, 所在方法名, 整行文本)]
+    safe_fields: 在"每帧方法 / LanguageChanged 回调（含其调用链）"里被赋过值的字段名
+    method_names: 本文件声明的方法名 → 行区间，用于算调用链
+    """
+    raw = read(path)
+    code = strip_noise(raw)
+    lines = code.split('\n')
+    spans = method_spans(lines)
+    decls = {}
+    for s, e, d in spans:
+        m = METHOD_NAME_RE.search(d)
+        if m:
+            decls[m.group(1)] = (s, e)
+
+    def method_of(i):
+        for name, (s, e) in decls.items():
+            if s <= i <= e:
+                return name
+        return ""
+
+    # 安全方法种子：每帧方法 + LanguageChanged 订阅/退订的方法
+    safe = {n for n in decls if n in PER_FRAME_METHODS}
+    for ln in lines:
+        m = LANG_SUB_RE.search(ln)
+        if m and m.group(1) in decls:
+            safe.add(m.group(1))
+
+    # 传递闭包：安全方法里调用到的本文件方法也算安全
+    # （HUDController.RefreshLanguage → RefreshWeapons 就是这一跳）
+    changed = True
+    while changed:
+        changed = False
+        for name in list(safe):
+            if name not in decls:
+                continue
+            s, e = decls[name]
+            body = "\n".join(lines[s:e + 1])
+            for other, _se in decls.items():
+                if other in safe:
+                    continue
+                if re.search(r'\b' + re.escape(other) + r'\s*\(', body):
+                    safe.add(other)
+                    changed = True
+
+    assigns, safe_fields = [], set()
+    for i, ln in enumerate(lines):
+        if '=' not in ln:
+            continue
+        factory = FACTORY_ASSIGN_RE.search(ln)
+        m = factory or TEXT_ASSIGN_RE.search(ln)
+        if not m:
+            continue
+        # 只认"本地化文案流向 UI"的赋值：`.text =` 必须带 T()，
+        # 否则工厂里的 `t.text = content`（content 是参数）会被当成字段赋值。
+        # 例外：赋值发生在安全方法里时放宽——它正是"这条字段会被重设"的证据。
+        method = method_of(i)
+        if not factory and method not in safe and not T_CALL_RE.search(ln):
+            continue
+        # 局部变量不算"字段"：工厂方法里的 `Button btn = null;` / `var t = ...`
+        # 每次调用都重建，天然跟着当前语言走。同一行声明的看行首，
+        # 分行声明的（M17 的 CS0841 写法）回看整个方法体。
+        head = ln[:m.start(1)]
+        if LOCAL_DECL_KW.search(head):
+            continue
+        field = m.group(1).replace(' ', '').split('.')[-1]
+        if method in decls and re.search(
+                r'\b(?:var|Text|Button|Slider|GameObject|Image|InputField|Toggle)\s+'
+                + re.escape(field) + r'\s*[=;]', "\n".join(lines[decls[method][0]:decls[method][1] + 1])):
+            continue
+        assigns.append((field, i + 1, method, ln.strip()[:70]))
+        if method in safe:
+            safe_fields.add(field)
+    return assigns, safe_fields
+
+
+def check_language_refresh():
+    """
+    切语言后文本必须刷新（M34）。
+
+    本地化不只是"文案进了表"——还得"切语言时会被重设"。屏幕上的每条本地化文本，
+    要么每帧重画（如 HUD 的计时/击杀、观战横幅、诊断 HUD），要么在
+    LanguageChanged 时被重画（如主菜单/设置/图鉴的 Rebuild、HUD 的 RefreshLanguage）。
+    两条都不占的，切到英文后会一直停在中文——不报错、不崩，只有真的切一次语言才看得见。
+
+    M34 实测的两处：
+      · GameBuilder 建 HUD 时给 `hud.modeText` 一次性写入模式名，
+        HUDController.RefreshLanguage 偏偏漏了它 → 切英文后 HUD 上的模式标识仍是中文；
+      · NetReconnect 的断线遮罩 BuildOverlay 一次建成、且跨拆世界常驻，
+        切语言时不重建 → 遮罩上的状态文案与「返回大厅」按钮停在旧语言。
+
+    判据（按**字段**配对，而不是按方法）：
+      某个 UI 文本字段只要有"非每帧/非语言回调"的赋值，就必须另有至少一处赋值
+      位于安全方法里；否则报错。安全方法 = Update/LateUpdate/FixedUpdate、
+      LanguageChanged 订阅的方法、以及它们调用到的本文件方法。
+      同名字段的"安全赋值"允许跨文件生效（HUD 的字段常由 GameBuilder 建、由 HUD 自己刷）。
+
+    显式豁免 `// @nolangrefresh: 理由`，**空理由无效**。
+    """
+    survey = {}
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        survey[path] = _lang_refresh_survey(path)
+
+    safe_fields = set()
+    for _p, (_a, sf) in survey.items():
+        safe_fields |= sf
+
+    for path, (assigns, _sf) in survey.items():
+        rp = rel(path)
+        raw_lines = read(path).split('\n')
+        for field, ln_no, method, text in assigns:
+            if field in safe_fields:
+                continue
+            idx = ln_no - 1
+            ok = False
+            for j in range(max(0, idx - 3), min(len(raw_lines), idx + 2)):
+                if '@nolangrefresh:' in raw_lines[j] and \
+                        raw_lines[j].split('@nolangrefresh:', 1)[1].strip():
+                    ok = True
+                    break
+            if ok:
+                info("切语言刷新豁免: %s 第 %d 行（人工确认）" % (rp, ln_no))
+                continue
+            err("切语言后不会刷新: %s 第 %d 行 %s —— 字段 %s（方法 %s）\n"
+                "      这条 UI 文本既不在每帧路径上、也没有在 LanguageChanged 时被重设，\n"
+                "      玩家切成英文后它会一直停在中文，直到下次重建/下次事件。\n"
+                "      M34 实测：HUD 的 modeText 与断线遮罩的状态文案/按钮正是这么漏的——\n"
+                "      本地化表是自洽的、切语言时的大多数界面也确实变了，唯独这几处不动。\n"
+                "      修法：① 让它每帧重画；② 在订阅 LanguageChanged 的回调里重设它"
+                "（注意是静态事件，OnDestroy 要退订）；③ 让所在类订阅 LanguageChanged 重建。\n"
+                "      确属无需刷新（瞬时提示 / 每次 Show 都重建）则写 // @nolangrefresh: 理由。"
+                % (rp, ln_no, text, field, method or "?"))
 
 
 # ── 自检：证明"判据真的会红" ──────────────────────────────
@@ -1986,6 +2150,151 @@ namespace A
 ]
 
 
+SELFTEST_LR = [
+    # M34 真实缺陷的形态：一次性建出来的 UI 文本，没有任何一条路径会在切语言时重设它
+    ("lr01_一次性建UI不刷新", True, """
+namespace A
+{
+    public class Overlay
+    {
+        private Text _statusText;
+
+        private void BuildUI()
+        {
+            _statusText = CreateText(_root.transform, Core.Localization.T("net.pick_mode"), 20);
+        }
+    }
+}
+"""),
+    # 每帧重画：天然跟着当前语言走
+    ("lr02_每帧重画", False, """
+namespace A
+{
+    public class Banner
+    {
+        private Text _bannerText;
+
+        void Update()
+        {
+            _bannerText.text = Core.Localization.T("net.spectating_wait");
+        }
+    }
+}
+"""),
+    # 订阅了 LanguageChanged，并在回调里重设
+    ("lr03_语言回调重设", False, """
+namespace A
+{
+    public class Hud
+    {
+        private Text _waveLabel;
+
+        void Awake()
+        {
+            Core.Localization.LanguageChanged += RefreshLanguage;
+        }
+
+        void OnDestroy()
+        {
+            Core.Localization.LanguageChanged -= RefreshLanguage;
+        }
+
+        private void RefreshLanguage()
+        {
+            _waveLabel.text = Core.Localization.T("hud.wave", 1);
+        }
+    }
+}
+"""),
+    # 间接调用：赋值在 RefreshX 里、RefreshX 由语言回调调用（本工程 RefreshWeapons 正是这样）
+    ("lr04_回调间接调用", False, """
+namespace A
+{
+    public class Hud
+    {
+        private Text _weaponLabel;
+
+        void Awake()
+        {
+            Core.Localization.LanguageChanged += RefreshLanguage;
+        }
+
+        private void RefreshLanguage()
+        {
+            RefreshWeapons();
+        }
+
+        private void RefreshWeapons()
+        {
+            _weaponLabel.text = Core.Localization.T("hud.weapons");
+        }
+    }
+}
+"""),
+    # 局部变量不是"字段"：工厂里 `Button btn = null;` 每次调用都重建
+    ("lr05_局部变量不算字段", False, """
+namespace A
+{
+    public class Factory
+    {
+        public static Button CreateToggle(Transform parent, bool value)
+        {
+            Button btn = null;
+            btn = CreateButton(parent, value ? Localization.T("common.on") : Localization.T("common.off"));
+            return btn;
+        }
+    }
+}
+"""),
+    # 工厂方法内部给局部 Text 赋值：参数传进来的内容，不是"某条会停住的界面文案"
+    ("lr06_工厂内部赋值", False, """
+namespace A
+{
+    public class Factory
+    {
+        public static Text CreateText(Transform parent, string content)
+        {
+            Text t = parent.gameObject.AddComponent<Text>();
+            t.text = content;
+            return t;
+        }
+    }
+}
+"""),
+    ("lr07_带理由豁免", False, """
+namespace A
+{
+    public class Toast
+    {
+        private Text _toastLabel;
+
+        private void Show(string key)
+        {
+            // @nolangrefresh: 2.5 秒后淡出的瞬时提示，下次触发自然按新语言拼
+            _toastLabel.text = Core.Localization.T("hud.combo", key);
+        }
+    }
+}
+"""),
+    # 注解是"封闭词汇"：空理由等于没写理由
+    ("lr08_空理由豁免", True, """
+namespace A
+{
+    public class Toast
+    {
+        private Text _toastLabel2;
+
+        private void Show(string key)
+        {
+            // @nolangrefresh:
+            _toastLabel2.text = Core.Localization.T("hud.combo", key);
+        }
+    }
+}
+"""),
+]
+
+
 def _run_fixtures(fixtures, checks):
     """把夹具写进临时目录跑一遍指定检查，返回被报错的夹具名集合。"""
     import shutil
@@ -2019,6 +2328,7 @@ def selftest():
         ("派生物广播检查（第 10 项）", SELFTEST_CB, [check_derive_broadcast]),
         ("本地守卫对称性检查（第 11 项）", SELFTEST_GUARD, [check_local_guard_symmetry]),
         ("UI 文案本地化检查（第 12 项）", SELFTEST_LG, [check_ui_text_localized]),
+        ("切语言刷新检查（第 13 项）", SELFTEST_LR, [check_language_refresh]),
     ]
 
     all_bad = 0
@@ -2062,6 +2372,7 @@ def main():
     check_derive_broadcast()
     check_local_guard_symmetry()
     check_ui_text_localized()
+    check_language_refresh()
 
     n = len(cs_files())
     print("=" * 68)
