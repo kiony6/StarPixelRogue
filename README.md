@@ -1,4 +1,4 @@
-# 《星界像素狂潮》— Unity 工程原型（M1 – M22）
+# 《星界像素狂潮》— Unity 工程原型（M1 – M24）
 
 > **仓库导航**（本文件与 `StarPixelRogue/README.md` 内容一致；置于仓库根便于 GitHub 首页直接展示）
 >
@@ -19,13 +19,15 @@
 > | `settings_m22.md` | M22 设置面板无头实测报告（损坏设置被静默清零 / 切语言被踢出面板 / 语言文字不跟随 / `var` 快照假通过踩坑） |
 > | `build_probe.py` | M23 选角/成长链路无头实测脚本：3 场景（`SELECT` 一次点击的四处一致性 / `APPLY` 跨进程读档后 7 乘区+起始武器+幂等+换角色不叠乘 / `PROGRESSION` 10 武器开火 + 4 组合技 + 7 属性 + 等级封顶） |
 > | `build_m23.md` | M23 选角/成长链路无头实测报告（换角色数值叠乘 / 联机冒烟跑错产物 / `GetInstanceID` 定位陷阱 / 探针站位陷阱） |
+> | `pickup_probe.py` | M24 掉落/磁吸/结算与重开局清理无头实测脚本：5 场景（`MAGNET` 半径两态对比 / `CREDIT` 经验倍率与回血封顶 / `LEFTOVER` 重开局实体残留 / `RESTART` 重开后能否拿到新玩家 / `REPEAT` 反复重开是否累积） |
+> | `pickup_m24.md` | M24 掉落/重开局链路无头实测报告（重开一局拿不到新玩家 / 上一局实体整批残留 / 「写了却零 caller」的清理方法 / `Destroy` 延迟导致的计数陷阱） |
 > | `audit_project.py` | 工程静态审计（退出码 0 = 无问题） |
 > | `balance_sim.py` + `balance_*.md` / `balance_*.txt` | 数值平衡模拟器与实验报告 |
 > | `gen_assets.py` | 像素精灵 / 音效资源生成脚本 |
 >
 > 正文中的相对路径（如 `Assets/...`、`Docs/...`、`../balance_sim.py`）均相对于 `StarPixelRogue/` 工程目录。
 
-# 《星界像素狂潮》— Unity 工程原型（M1 – M23）
+# 《星界像素狂潮》— Unity 工程原型（M1 – M24）
 
 > 像素肉鸽割草（吸血鬼幸存者类）· 单机即开即玩，联机（Fish-Net 状态同步）为可选模块。
 > 本目录为可运行原型源码，对应《联机肉鸽技术设计文档》的 M1–M4 里程碑。
@@ -1066,6 +1068,55 @@ python build_probe.py --only APPLY         # 自动补跑 SELECT（APPLY 依赖�
 回归（异常均 0）：单机冒烟 45s、合规门 6 场景（同意前 0 / 同意后 1）、防沉迷 MINOR + ADULT、
 持久化 SAVE + TELEMETRY、设置 M22 六场景、云存档 5 场景 + UI、**联机双开 60s（玩家 1/2、峰值 2/2、
 波次 7/6、击杀 140/104、双端 Boss 是）**、静态审计 ERROR 0 / WARN 0 / INFO 8。
+
+### M24 掉落/磁吸/结算 与重开局清理无头实测：修掉重开一局后拿不到新玩家、上一局实体整批残留（本次新增）
+
+到 M23 为止实测的是「启动→主菜单→设置」「选角→开局」「升级→组合技」。
+**掉落闭环**与**重开局**这两条路从没被真正驱动过——前者悄悄不对，后者是**点了按钮就没了**。
+
+| # | 缺陷 | 后果 |
+| --- | --- | --- |
+| ① | `PlayerController.Instance` 是静态字段且从不清理；「重开一局」是 `TeardownWorld(); Build();` 紧挨两行，而 `Object.Destroy` 延迟到帧末 | 新玩家的 `Awake` 看到 Instance 还指着"活得好好儿的"旧玩家 → 选择不注册；帧末旧玩家一销毁，Instance 成悬空引用。**点了「重开一局」后移动/开火/HUD 全线静默空转**，不崩不报错 |
+| ② | `TeardownWorld` 只销毁 `Track` 进去的管理器；宝石/回血球/敌人都是 `PoolManager.Get(模板)` 的克隆体，挂场景根节点，**既不在 `_created` 里也不是任何管理器的子物体** | 上一局实体整批漏到新世界：**看得见却捡不起来的宝石**、攥着旧 `_playerTransform` 围着旧坐标转的幽灵敌人（打不到也清不掉）。而 `PickupManager.ResetAll`/`EnemyManager.ResetAll` **写好了却全仓库零 caller** |
+| ③ | `net_smoke.py` 默认指向单机产物 `Build/Smoke` | 「联机双开冒烟」实际跑两个单机客户端：双端正常启动、跑满 60s、**异常 0**，只是网络玩家数恒 0、同步波次恒 -1——看起来像同步坏了，实际联机版压根没被运行过 |
+
+修法：① `PlayerController` 实现 `Core.ISingletonInstance`，走 `TeardownWorld` 已有的清理通道在新世界建立**之前**摘引用（刻意不改 `Awake` 的"首个创建者胜出"——联机下那会让 Instance 指到远程玩家）；
+② `PoolManager` 新增 `_owned` + `DestroyAll()`，两个 `ResetAll` 从"只停用"改成真销毁，`TeardownWorld` 里三行接上（`ResetAll` 管在场上的、`DestroyAll` 管已归还队列的，缺一不可）；③ 见 M23。
+
+```bash
+python pickup_probe.py                    # 5 个场景（约 17 秒）
+python pickup_probe.py --only LEFTOVER     # 只跑「重开局实体残留」
+```
+
+| 场景 | 覆盖路径 |
+| --- | --- |
+| MAGNET | 半径外（默认 1.6）放在 6 米处必须**一动不动且经验不入账**；改成 12 后必须回到对象池且 3 点经验精确入账（`XpRatio` 恰为 0.600）——**两态对比**，只测单边的话"永远吸附/永远不吸附"各能骗过一半 |
+| CREDIT | `xpGainMult=2` 投入两颗 1 点宝石 → `XpRatio` 必须依次 **0.40/0.80**；回血精确 **+30**；999 点回血必须**恰好封顶在 maxHp**（不得溢出） |
+| LEFTOVER | 先在远处造出上一局残留（3 宝石+1 回血球+2 敌人），**先断言确实造出了 6 个**再走真实重开路径 `TeardownWorld(); Build();`，断言残留为 0 并单报「宝石/回血/敌人」构成 |
+| RESTART | 重开后 ①拿得到玩家 ②`InstanceID` 必须**不等于**上一局那个 ③三个管理器都接上 ④**新世界掉落闭环真的通**（放颗宝石看会不会被吸走并精确入账）——引用存在 ≠ 世界接上了 |
+| REPEAT | 连续 3 次重开，逐轮打印「放 N → 残留 M」；泄漏表现为单调增长，比单个布尔诚实 |
+
+**判据区分力**：①计数一律 `Resources.FindObjectsOfTypeAll` 扫场景并**排除模板本体**，不读管理器内部账本；②"重开前存量=6"是 LEFTOVER 的前置断言——否则"残留=0"可能只是压根没造出来（假通过）；③ Binding 到那颗具体宝石（判"变停用"=归还对象池），不能判"场上还有没有宝石"。
+
+> **区分力验证（两次，变红项互不相交）**：回退 `ClearInstance` → **只有 RESTART 变红**（1/3：拿到玩家=否/是新世界玩家=否/掉落闭环=否），其余四个场景全绿；
+> 回退 `TeardownWorld` 的三行实体清理 → **只有 LEFTOVER（残留 6：宝石3 回血1 敌人2）与 REPEAT（0/3，三轮各残留 4）变红**，MAGNET/CREDIT/RESTART 全绿。
+
+**实测**（异常均 0）：MAGNET 断点 2/2（外 6.00→6.00、经验比 0.600）；CREDIT 入账 4/4（经验 0.40/0.80、回血 110.0/110.0）；
+LEFTOVER 重开前 6 → 重开后 **0**；RESTART **4/4**（旧 id=-134 / 新 id=-498 / 掉落闭环=是）；REPEAT **3/3**（三轮各 放4→残留0）。
+
+> **踩坑（都不是产品缺陷，但会让结果假红）**：
+> ① **`Object.Destroy` 延迟到帧末**——`TeardownWorld()` 后立刻数对象，数到的还是待销毁那批，会把正常清理报成残留（REPEAT 第一版三轮全"放4→残留4"，而中间有 yield 的 LEFTOVER 却正常）。**数之前必须让帧走完。**
+> ② 计数要绑**那颗具体宝石**，判"场上还有没有宝石"会被建筑期杂散掉落骗过去。
+> ③ **期望值要钉死前置条件**：默认角色游侠自带 `xpMult=1.15`，3 点宝石实到 **3.45** → `XpRatio=0.69` 而非 0.6，那是**产品正确**，我却当成 bug 查了一轮；现已在 MAGNET/RESTART 显式先把 `xpGainMult` 置 1，倍率交给 CREDIT 单测。
+> ④ SMOKE 键名必须与驱动逐字一致（改了「吸走并入账」→「回收并入账」忘了同步驱动，那一栏显示 `?` 被判失败）。
+
+新增/改动：`Core/PoolManager.cs`（`_owned` + `DestroyAll`）、`Pickups/PickupManager.cs` 与 `Enemy/EnemyManager.cs`（`ResetAll` 改为真销毁）、
+`Player/PlayerController.cs`（实现 `ISingletonInstance`）、`GameBuilder.cs`（`TeardownWorld` 接 `-pickupProbe`）、
+`Dev/PickupProbe.cs`、`../pickup_probe.py`、`../net_smoke.py`（产物路径校验，M23）。
+
+回归（异常均 0）：**M24 五场景**、单机冒烟 45s（击杀 70/波次 4/等级 5/选卡 4）、M23 三场景、合规门 6 场景、
+防沉迷 MINOR+ADULT、持久化 SAVE+TELEMETRY、设置 M22 六场景、云存档 5 场景+UI、
+**联机双开 60s（玩家 1/2、峰值 2/2、波次 7/6、击杀 141/105、双端 Boss 是）**、静态审计 ERROR 0 / WARN 0 / INFO 8。
 
 ## 架构与目录
 

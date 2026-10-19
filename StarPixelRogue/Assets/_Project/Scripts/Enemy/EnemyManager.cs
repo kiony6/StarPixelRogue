@@ -277,9 +277,17 @@ namespace StarPixel.Enemy
             return center + new Vector2(Mathf.Cos(ang), Mathf.Sin(ang)) * radius;
         }
 
+        /// <summary>
+        /// 拆世界 / 重开一局时调用：销毁场上还活着的全部敌人并重置波次状态。
+        ///
+        /// M24：旧实现只 SetActive(false)。敌人是 PoolManager 的克隆体，定义在上一局的
+        /// _playerTransform（已被新建的世界换掉了），这些"幽灵敌人"会带着旧坐标继续刷新出来
+        /// ——新世界的 EnemyManager 账本里没有它们，既打不到也不会被清。
+        /// 配合 PoolManager.DestroyAll() 才算真的干净。
+        /// </summary>
         public void ResetAll()
         {
-            foreach (var e in ActiveEnemies) if (e != null) e.gameObject.SetActive(false);
+            foreach (var e in ActiveEnemies) if (e != null) Object.Destroy(e.gameObject);
             ActiveEnemies.Clear();
             _wave = 0;
             _zone = 0;

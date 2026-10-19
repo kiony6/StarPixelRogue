@@ -94,10 +94,18 @@ namespace StarPixel.Pickups
             }
         }
 
+        /// <summary>
+        /// 拆世界 / 重开一局时调用：销毁场上还活着的全部掉落物并清空账本。
+        ///
+        /// M24：旧实现只 SetActive(false)，对象会变成场景里看不见、却也永远不会回收的孤儿——
+        /// 拆完世界它们仍在，新世界的 PickupManager 又不认它们（账本已空），
+        /// 于是玩家看到一堆"看得见却捡不起来"的宝石。
+        /// 配合 PoolManager.DestroyAll() 把已经归还到池里的那批也一并清掉。
+        /// </summary>
         public void ResetAll()
         {
-            foreach (var g in _gems) if (g != null) g.gameObject.SetActive(false);
-            foreach (var h in _healths) if (h != null) h.gameObject.SetActive(false);
+            foreach (var g in _gems) if (g != null) Object.Destroy(g.gameObject);
+            foreach (var h in _healths) if (h != null) Object.Destroy(h.gameObject);
             _gems.Clear();
             _healths.Clear();
         }

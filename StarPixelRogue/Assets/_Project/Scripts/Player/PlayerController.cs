@@ -14,7 +14,12 @@ namespace StarPixel.Player
     /// 武器为数据驱动：每个 WeaponSlot 持有一个 SkillDef，按自身冷却自动开火；
     /// 升级解锁新武器或强化属性，组合技由 ComboManager 实时计算并作用于开火。
     /// </summary>
-    public class PlayerController : MonoBehaviour
+    ///
+    /// M24：Instance 走的是**静态字段**（联机下同时存在多个 PlayerController，
+    /// 语义必须是"首个创建者胜出"，不能用 MonoSingleton 那套"后来者销毁自己"）。
+    /// 代价是这个引用从来不会被自动清理，详见 <see cref="ClearInstance"/>。
+    /// </summary>
+    public class PlayerController : MonoBehaviour, Core.ISingletonInstance
     {
         public static PlayerController Instance;
 
@@ -81,6 +86,20 @@ namespace StarPixel.Player
 
             // 默认武器
             _weapons.Add(new WeaponSlot { def = Combat.UpgradeCatalog.CreateBolt(), level = 1, timer = 0f });
+        }
+
+        /// <summary>
+        /// M24：注销本实例的静态引用（GameBuilder.TeardownWorld 拆世界时同步调用）。
+        ///
+        /// 为什么必须有这一步：Object.Destroy 的销毁**延迟到帧末**，而「重开一局」的路径是
+        /// TeardownWorld(); Build(); 紧挨着两行（GameOverPanel.OnRestart），中间不给任何帧。
+        /// 旧玩家在那一刻还"活着"，新玩家的 Awake 看到 Instance 非空就选择不注册；
+        /// 等帧末旧玩家真被销毁（此时 OnDestroy 再兜一次底），Instance 就成了悬空引用 ——
+        /// 重开后整局处于 PlayerController.Instance == null 的状态，移动/开火/HUD 全线静默空转。
+        /// </summary>
+        public void ClearInstance()
+        {
+            if (Instance == this) Instance = null;
         }
 
         /// <summary>注入联机弹丸生成器（NetPlayer 调用）。</summary>

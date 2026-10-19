@@ -58,6 +58,9 @@ namespace StarPixel
             // M23：选角 ↔ 开局 与 升级 ↔ 组合技 链路无头实测（正常启动不受影响）
             if (HasArg("-buildProbe")) { StartBuildProbe(); return; }
 
+            // M24：掉落 ↔ 磁吸 ↔ 结算 与 重开局清理 链路无头实测（正常启动不受影响）
+            if (HasArg("-pickupProbe")) { StartPickupProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -430,6 +433,15 @@ namespace StarPixel
             StarPixel.Dev.BuildProbe.Start(ArgValue("-buildScene", "SELECT"));
         }
 
+        private static void StartPickupProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;
+            PrepareStage();
+            StarPixel.Dev.PickupProbe.Start(ArgValue("-pickupScene", "MAGNET"));
+        }
+
         private static void OpenLobby()
         {
             new GameObject("NetLobby").AddComponent<Net.NetLobby>();
@@ -476,8 +488,18 @@ namespace StarPixel
         /// <summary>拆除当前世界（联机断线/返回主菜单/重开一局时调用），使随后可再次 Build。</summary>
         public static void TeardownWorld()
         {
-            // 先同步清理单例引用：Object.Destroy 的销毁延迟到帧末，
-            // 若不清 Instance，紧随其后的 Build() 会被「EnemyManager.Instance != null」守卫错误拦下。
+            // M24：先把**池化出来的实体**清干净，再销毁管理器本体。
+            // 宝石 / 回血球 / 敌人都是 PoolManager 从模板克隆出来的实例，挂在场景根节点，
+            // 既不在 _created 里、也不是任何管理器的子物体 —— 只 Destroy 管理器的话，
+            // 上一局的实体会整批漏到新世界：看得见却捡不起来的宝石、围着旧玩家坐标转的幽灵敌人。
+            // ResetAll 处理"还在场上的"，DestroyAll 处理"已经归还到池里的"，两者缺一不可。
+            Core.PoolManager.Instance?.DestroyAll();
+            PickupManager.Instance?.ResetAll();
+            EnemyManager.Instance?.ResetAll();
+
+            // 再同步清理单例引用：Object.Destroy 的销毁延迟到帧末，
+            // 若不清 Instance，紧随其后的 Build() 会被「EnemyManager.Instance != null」守卫错误拦下
+            // （PlayerController 的静态 Instance 同理，详见其 ClearInstance 注释）。
             foreach (var o in _created)
             {
                 if (o == null) continue;
