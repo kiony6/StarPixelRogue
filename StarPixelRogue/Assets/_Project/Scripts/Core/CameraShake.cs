@@ -29,13 +29,25 @@ namespace StarPixel.Core
             Instance = this;
             EventBus.OnShakeRequest += Shake;
             _cam = GetComponent<Camera>();
+            // M25：基准缩放必须**当场**就记下来。
+            // 此前只在 Configure() 里记录，而 Configure 要等开局（AttachCameraShake/NetPlayer）才被调用；
+            // 这中间的菜单/大厅停留期里，LateUpdate 已经在把 orthographicSize 朝 _baseOrtho（初值 0）拉了——
+            // 每帧 Lerp(dt*9)，与帧率无关地按 exp(-9t) 衰减，主菜单停留 1 秒就只剩千分之一。
+            // 等开局时 Configure 读到的就是这个被压过的值并被记成基准，
+            // 于是整局游戏的镜头都是无限推近的（画面糊成几个像素）。
+            if (_cam != null) _baseOrtho = _cam.orthographicSize;
         }
 
         /// <summary>跟随目标（通常是玩家），使相机基础位置始终跟随玩家。</summary>
         public void Configure(Transform target)
         {
             _target = target;
-            if (_cam != null) _baseOrtho = _cam.orthographicSize;   // 记录基准缩放，ZoomPulse 围绕它回弹
+            if (_cam == null) return;
+            // M25：缩放脉冲进行中不得改写基准。
+            // 此刻的 orthographicSize 是被压过的临时值，把它记成基准会让镜头永久推近，且逐次叠乘
+            // （Boss 出场推近有 0.55s 窗口，期间只要有人加入/重连就会命中）。
+            if (_zoomTimer > 0f) return;
+            _baseOrtho = _cam.orthographicSize;
         }
 
         /// <summary>
@@ -45,6 +57,10 @@ namespace StarPixel.Core
         public void ZoomPulse(float scale, float duration)
         {
             if (_cam == null) return;
+            // M25：与 Shake 一致，尊重「屏幕震动」开关。
+            // 该开关在 HitstopManager 里已被复用为"整体打击反馈开关"，推近同属打击反馈；
+            // 此前关掉开关后 Boss 出场推近照旧，形成"关了一半"的不一致。
+            if (SettingsManager.Instance != null && !SettingsManager.Instance.Current.screenShake) return;
             _zoomPunched = _baseOrtho * scale;
             _zoomDuration = Mathf.Max(0.01f, duration);
             _zoomTimer = _zoomDuration;
@@ -72,7 +88,12 @@ namespace StarPixel.Core
 
             if (_remaining > 0f)
             {
-                _remaining -= Time.deltaTime;
+                // M25：震屏衰减必须走**未缩放**的时间（与同函数里 _zoomTimer 的口径一致）。
+                // 用 Time.deltaTime 的话，timeScale=0（选卡/结算暂停）时 deltaTime 恒为 0，
+                // _remaining 永不减少，而 LateUpdate 照跑——每帧还会重新随机一次偏移，
+                // 于是面板背后的世界一直以全幅度抽搐，直到玩家选完卡才停。
+                // 顿帧（timeScale=0.04）下同理：一次 0.3s 的震屏会被拖成好几秒。
+                _remaining -= Time.unscaledDeltaTime;
                 float t = Mathf.Clamp01(_remaining / _duration);
                 _offset = Random.insideUnitCircle * (_strength * t);
             }

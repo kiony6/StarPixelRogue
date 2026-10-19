@@ -61,6 +61,9 @@ namespace StarPixel
             // M24：掉落 ↔ 磁吸 ↔ 结算 与 重开局清理 链路无头实测（正常启动不受影响）
             if (HasArg("-pickupProbe")) { StartPickupProbe(); return; }
 
+            // M25：手感层（镜头/顿帧/暂停/震屏/反馈开关）无头实测（正常启动不受影响）
+            if (HasArg("-feelProbe")) { StartFeelProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -440,6 +443,23 @@ namespace StarPixel
             Application.targetFrameRate = 60;
             PrepareStage();
             StarPixel.Dev.PickupProbe.Start(ArgValue("-pickupScene", "MAGNET"));
+        }
+
+        /// <summary>
+        /// M25 手感层无头实测入口：交给 <see cref="Dev.FeelProbe"/> 验证
+        /// 「相机基准缩放不被自己拉塌 / Boss 出场推近生效且回弹 / 顿帧真的压时间且真实时长正确 /
+        /// 选卡暂停的四条保证 / 震屏在暂停态也必须衰减完 / 关掉反馈开关后三条通道全关」。
+        /// 参数：-feelScene STAGE|ZOOM|HITSTOP|PAUSE|SHAKE|GATE（默认 STAGE）
+        /// 这是全项目唯一"输出只在画面上"的一层：前面 24 个里程碑全用 -nographics 验收，
+        /// 手感层无论如何实现都能全绿——本入口把"看得见"翻译成可断言的数值。
+        /// </summary>
+        private static void StartFeelProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;
+            PrepareStage();
+            StarPixel.Dev.FeelProbe.Start(ArgValue("-feelScene", "STAGE"));
         }
 
         private static void OpenLobby()
