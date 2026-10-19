@@ -51,6 +51,20 @@ namespace StarPixel.UI
             if (_root != null) _root.SetActive(false);
         }
 
+        /// <summary>
+        /// M19 实测：读取**当前**面板上的提示行文案（青少年模式到点提示就写在这里）。
+        /// 必须经 Instance 的 _root 取，不能用 GameObject.Find("MainMenuCanvas")：
+        /// 语言切换会整体重建面板而 Destroy 延迟到帧末，Find 会命中尚未销毁的旧画布。
+        /// </summary>
+        public string NoticeText
+        {
+            get
+            {
+                var t = _root != null ? _root.transform.Find("Notice")?.GetComponent<UnityEngine.UI.Text>() : null;
+                return t != null ? t.text : "";
+            }
+        }
+
         private void Rebuild()
         {
             Build();

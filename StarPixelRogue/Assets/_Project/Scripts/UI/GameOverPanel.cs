@@ -102,6 +102,17 @@ namespace StarPixel.UI
             if (_root != null) { Core.UIFactory.Destroy(_root); _root = null; }
         }
 
+        /// <summary>
+        /// M19：外部（青少年模式用时耗尽的开局拦截）调用——收起结算面板。
+        /// 与 <see cref="CloseAndResume"/> 的区别：不假设当前处于暂停态，
+        /// 因此不碰 timeScale（拦截发生在建世界之前，世界此时尚未被冻结）。
+        /// </summary>
+        public void Hide()
+        {
+            _showing = false;
+            if (_root != null) { Core.UIFactory.Destroy(_root); _root = null; }
+        }
+
         private void OnRestart()
         {
             Core.Telemetry.Log("run_restart");

@@ -16,6 +16,12 @@ namespace StarPixel.Core
     /// ⚠ 正式上线合规要求：必须接入国家新闻出版署实名认证系统校验年龄，
     /// 届时在 <see cref="VerifyMinor"/> 的 TODO 处替换为官方 SDK 调用即可，
     /// 本类的限时/提示逻辑与展示层无需改动。
+    ///
+    /// M19 修掉三处**会让限时形同虚设**的缺陷（详见 <see cref="Tick"/> 与 <see cref="CanStartRun"/>）：
+    /// ① 提示弹窗挂起时停止计时——玩家只要不点「关闭」就永远到不了上限；
+    /// ② 强制退出只生效一次——回主菜单再点「开始游戏」即可继续玩；
+    /// ③ 强制退出不关残留弹窗——主菜单被遮罩盖住，且挂起标记会一直冻结计时。
+    /// 计时判定统一收敛到 <see cref="Tick"/>，实测探针与线上共用同一份逻辑。
     /// </summary>
     public class PlaytimeGuard : MonoSingleton<PlaytimeGuard>
     {
@@ -36,20 +42,39 @@ namespace StarPixel.Core
         {
             public string date = "";
             public float seconds = 0f;
+            /// <summary>当日预警是否已弹过（M19：落盘，避免重启进程后被重复弹一次）。</summary>
+            public bool warned = false;
         }
 
         private PlaytimeData _today = new PlaytimeData();
         private float _sinceAdultHint;
         private int _lastSavedSecond;
-        private bool _minorWarned;
         private bool _minorForcedExit;
-        private bool _hintShowing;
+        private bool _wasRunning;
+        private GameObject _hintRoot;
 
         private static readonly string FilePath =
             Path.Combine(Application.persistentDataPath, "playtime.json");
 
         /// <summary>今日已游戏秒数（青少年模式下受上限约束）。</summary>
         public float TodaySeconds => _today.seconds;
+
+        // —— M19 实测可观测指标：验证「该发生的事发生了几次」必须先有计数器 ——
+
+        /// <summary>青少年模式到点前预警的弹出次数。</summary>
+        public int WarnCount { get; private set; }
+
+        /// <summary>青少年模式到点强制退出的次数。</summary>
+        public int ForceExitCount { get; private set; }
+
+        /// <summary>成人模式健康提示的弹出次数。</summary>
+        public int HintCount { get; private set; }
+
+        /// <summary>时长用尽后被拦下的开局次数（<see cref="CanStartRun"/> 返回 false 的次数）。</summary>
+        public int BlockedStartCount { get; private set; }
+
+        /// <summary>当前是否有提示弹窗挂起。</summary>
+        public bool HintShowing => _hintRoot != null;
 
         protected override void Awake()
         {
@@ -102,7 +127,6 @@ namespace StarPixel.Core
             {
                 _today = new PlaytimeData { date = Today(), seconds = 0f };
                 _lastSavedSecond = -1;
-                _minorWarned = false;
                 _minorForcedExit = false;
                 Save();
             }
@@ -114,34 +138,102 @@ namespace StarPixel.Core
             if (Instance == null) return;
             Instance._today = new PlaytimeData { date = Instance.Today(), seconds = 0f };
             Instance._lastSavedSecond = -1;
-            Instance._minorWarned = false;
             Instance._minorForcedExit = false;
+            Instance._sinceAdultHint = 0f;
+            // M19：一并关掉可能挂着的提示弹窗——它在旧实现里会一直冻结计时，
+            // 若跨模式切换时残留，此后**永远不再累计时长**（等于限时整个失效）。
+            Instance.CloseHint();
             Instance.Save();
         }
+
+        /// <summary>M19 实测：把计数器清零（分场景断言时避免上一场景的计数串味）。</summary>
+        public static void ResetCounters()
+        {
+            if (Instance == null) return;
+            Instance.WarnCount = 0;
+            Instance.ForceExitCount = 0;
+            Instance.HintCount = 0;
+            Instance.BlockedStartCount = 0;
+        }
+
+        /// <summary>
+        /// M19 实测：改写记录里存的日期（不落盘），使下一次 <see cref="Tick"/> 走真实的跨天重置分支。
+        /// 用它验证"明天能重新玩"——而不是另写一份日期判断来冒充。
+        /// </summary>
+        public void SetStoredDateForTest(string date)
+        {
+            _today.date = date ?? "";
+            _lastSavedSecond = -1;
+        }
+
+        /// <summary>
+        /// M19 实测：重新从磁盘读一次（验证 Save/Load 往返不会把当日时长读没，
+        /// 也不会因为读档而误判成跨天）。走的是线上同一个 <see cref="Load"/>。
+        /// </summary>
+        public void ReloadForTest() => Load();
 
         private bool IsMinor()
         {
             return SettingsManager.Instance != null && SettingsManager.Instance.Current.minorMode;
         }
 
+        /// <summary>青少年模式当日时长是否已用尽。</summary>
+        public static bool MinorExhausted =>
+            Instance != null && Instance.IsMinor() && Instance._today.seconds >= MinorDailyLimitSeconds;
+
+        /// <summary>
+        /// 是否允许开始新一局。
+        /// M19 缺陷修复：此前仅靠「强制退出」把玩家踢回主菜单，而该动作每天只触发一次——
+        /// 回菜单再点「开始游戏」照样能建世界，限时被完整绕过。故在开局入口统一拦截，
+        /// 只要当日累计已达上限就**不允许再开局**（跨天由 <see cref="RollDateIfNeeded"/> 自动解禁）。
+        /// </summary>
+        public static bool CanStartRun()
+        {
+            if (Instance == null) return true;
+            if (!MinorExhausted) return true;
+            Instance.BlockedStartCount++;
+            return false;
+        }
+
         void Update()
         {
             Telemetry.Tick(Time.unscaledDeltaTime);        // 遥测队列定时落盘（与时长统计同源驱动）
-            if (!GameRunning) return;                 // 菜单/暂停不计时
-            if (_hintShowing) return;                 // 提示挂起时不累计，避免反复弹
+            Tick(Time.unscaledDeltaTime);
+        }
 
+        /// <summary>
+        /// 时长推进的**唯一入口**：线上由 Update 以真实 deltaTime 驱动，
+        /// 无头实测由探针以固定步长驱动——两者共用同一份判定逻辑，
+        /// 因此探针断言的是产品代码本身，而不是照抄一份的副本。
+        ///
+        /// M19 关键修复：旧实现开头有 `if (_hintShowing) return;`，
+        /// 导致「提示弹窗未关闭 → 时长停止累计 → 永远到不了上限」，
+        /// 玩家只要把预警弹窗晾在那儿就能无限续玩。计时与弹窗状态自此彻底解耦：
+        /// 弹窗只负责"不重复弹"，绝不负责"暂停计时"。
+        /// </summary>
+        public void Tick(float dt)
+        {
+            // 新一局开始：清掉上一局的"已强制退出"标记，使每局独立判定
+            // （旧实现只在跨天/重置时清，故第二局起永远不再踢人）。
+            if (GameRunning && !_wasRunning) _minorForcedExit = false;
+            _wasRunning = GameRunning;
+
+            // 跨天判定与"是否正在对局"无关：在菜单里过零点同样该重置，
+            // 否则要等到下一次开局才翻页（旧实现正是把它关在对局分支里）。
             RollDateIfNeeded();
-            float dt = Time.unscaledDeltaTime;        // 选卡面板 timeScale=0 时也应计时
-            _today.seconds += dt;
+
+            if (!GameRunning) return;                 // 菜单/暂停不计时
+            if (dt <= 0f) return;
+
+            _today.seconds += dt;                     // 无论是否有弹窗挂起，一律累计
             _sinceAdultHint += dt;
 
             if (IsMinor())
             {
-                if (!_minorWarned && _today.seconds >= MinorDailyLimitSeconds - MinorWarnBeforeSeconds)
+                if (!_today.warned && _today.seconds >= MinorDailyLimitSeconds - MinorWarnBeforeSeconds)
                 {
-                    _minorWarned = true;
-                    ShowMinorWarning(Localization.T("settings.minor_mode"),
-                        Localization.T("playtime.warn"));
+                    _today.warned = true;
+                    ShowHint(Localization.T("settings.minor_mode"), Localization.T("playtime.warn"), true);
                 }
                 if (!_minorForcedExit && _today.seconds >= MinorDailyLimitSeconds)
                 {
@@ -154,8 +246,7 @@ namespace StarPixel.Core
             else if (_sinceAdultHint >= AdultHintIntervalSeconds)
             {
                 _sinceAdultHint = 0f;
-                ShowMinorWarning(Localization.T("playtime.health_title"),
-                    Localization.T("playtime.health"));
+                ShowHint(Localization.T("playtime.health_title"), Localization.T("playtime.health"), false);
             }
 
             if (Mathf.FloorToInt(_today.seconds) != _lastSavedSecond)   // 每秒最多落盘一次
@@ -174,26 +265,44 @@ namespace StarPixel.Core
 
         private void ForceExitMinor()
         {
+            ForceExitCount++;
+            // M19：先关掉可能还挂着的预警弹窗。旧实现不关，于是
+            // ① 主菜单被这层遮罩盖住；② _hintShowing 一直为真，下一局完全不计时。
+            CloseHint();
             Debug.Log("[Playtime] 青少年模式达到每日时长上限，强制返回主菜单");
             if (UI.MainMenu.Instance != null)
                 UI.MainMenu.Instance.ShowWithNotice(Localization.T("playtime.force_exit"));
             GameBuilder.TeardownWorld();
         }
 
-        private void ShowMinorWarning(string title, string body)
+        /// <summary>
+        /// 弹出提示弹窗（青少年预警 / 成人健康提示共用）。
+        /// 同时只允许挂一个：重复调用直接忽略，因此**不会**叠出多层遮罩。
+        /// </summary>
+        private void ShowHint(string title, string body, bool isMinorWarn)
         {
-            if (_hintShowing) return;
-            _hintShowing = true;
+            if (_hintRoot != null) return;            // 已有弹窗挂起，不再叠
+            if (isMinorWarn) WarnCount++; else HintCount++;
+
             var (mask, root) = UIFactory.CreateModal("PlaytimeHint", new Color(0f, 0f, 0f, 0.75f));
+            _hintRoot = mask;
             UIFactory.CreateText(root.transform, "Title", title, new Vector2(0, 90), 28);
             UIFactory.CreateText(root.transform, "Body", body, new Vector2(0, 20), 20);
             UIFactory.CreateButton(root.transform, "OK", Localization.T("legal.close"), new Vector2(0, -80),
-                new Vector2(200, 48), () =>
-                {
-                    UIFactory.Destroy(mask);
-                    _hintShowing = false;
-                });
+                new Vector2(200, 48), () => CloseHint());
         }
+
+        /// <summary>关闭挂起的提示弹窗（点击「关闭」、强制退出、重置当日计时时调用）。</summary>
+        private void CloseHint()
+        {
+            if (_hintRoot == null) return;
+            var go = _hintRoot;
+            _hintRoot = null;                         // 先解引用：Destroy 延迟到帧末，不能靠它判空
+            UIFactory.Destroy(go);
+        }
+
+        /// <summary>M19 实测：模拟玩家点击弹窗的「关闭」按钮。</summary>
+        public void DismissHintForTest() => CloseHint();
 
         /// <summary>
         /// 实名认证结果接入点（TODO：正式版对接官方实名认证 SDK）。

@@ -43,6 +43,9 @@ namespace StarPixel
             // M18：设置面板无头实测（正常启动不受影响）
             if (HasArg("-uiProbe")) { StartUIProbe(); return; }
 
+            // M19：防沉迷无头实测（正常启动不受影响）
+            if (HasArg("-playtimeProbe")) { StartPlaytimeProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -324,6 +327,26 @@ namespace StarPixel
             StarPixel.Dev.UISettingsProbe.Start();
         }
 
+        /// <summary>
+        /// M19 防沉迷无头实测入口：搭好舞台后交给 <see cref="Dev.PlaytimeProbe"/>，
+        /// 由它以固定步长推进虚拟时长（真实等待 1 小时去验证限时是不现实的）。
+        /// 参数：
+        ///   -playtimeScene MINOR|ADULT   青少年模式 / 成人模式（默认 MINOR）
+        ///   -playtimeLang  zh|en         提示文案所用的界面语言（默认 zh）
+        /// 与云存档实测同理：正常启动不带 -playtimeProbe 时不会走进这里。
+        /// </summary>
+        private static void StartPlaytimeProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Core.PlaytimeGuard.Ensure();
+            Application.targetFrameRate = 60;          // 同其它实测：不锁帧会把每帧告警刷成 GB 级日志
+            PrepareStage();
+            StarPixel.Dev.PlaytimeProbe.Start(
+                ArgValue("-playtimeScene", "MINOR"),
+                ArgValue("-playtimeLang", Core.Localization.LangZh));
+        }
+
         private static void OpenLobby()
         {
             new GameObject("NetLobby").AddComponent<Net.NetLobby>();
@@ -388,6 +411,19 @@ namespace StarPixel
         public static void Build()
         {
             if (_built) return;
+
+            // M19：青少年模式当日时长耗尽时**不允许再开局**。
+            // 旧实现只在跨过上限的那一瞬间把玩家踢回主菜单，而该动作每天只触发一次——
+            // 回菜单再点「开始游戏」照样能建世界，限时被完整绕过。
+            // 故把判定前移到开局入口：只要当日累计已达上限，一律拦下并提示。
+            if (!Core.PlaytimeGuard.CanStartRun())
+            {
+                if (UI.GameOverPanel.Instance != null) UI.GameOverPanel.Instance.Hide();
+                UI.MainMenu.Ensure();
+                UI.MainMenu.Instance?.ShowWithNotice(Core.Localization.T("playtime.force_exit"));
+                return;
+            }
+
             _built = true;
             Core.PlaytimeGuard.GameRunning = true;       // 对局开始：累计游戏时长
             UI.GameOverPanel.Ensure();                   // 幂等：主菜单/大厅路径可能未创建
