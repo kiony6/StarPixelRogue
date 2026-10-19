@@ -37,6 +37,7 @@
 > | `sub_m29.md` | M29 报告（`LevelUpManager` 匿名 lambda 不退订致重开三局后升级面板弹不出来且游戏卡死 / `CameraShake` 漏退订只有静态检查抓得到 / 正常面板与孤儿面板必须分开数否则假绿） |
 > | `orphan_m28.md` | M28 报告（把连续三轮靠人肉复查才找到的泄漏做成静态检查第 7 项 / 链闪电与 M26 同形未修 / 上一局的 Boss 被带进新世界 / 注解是封闭词汇且逐项验证） |
 > | `audit_project.py` | 工程静态审计（退出码 0 = 无问题） |
+> | `push_safe.py` | git 推送自愈入口：推送前预检凭据链路（gh 登录 / credential helper 是否指向 gh / 端到端能否真取到令牌），缺失时自动跑 `gh auth setup-git`，撞 403·401 自动重接后重试一次，其余失败归入 6 类并给出对应动作；`--check` 只体检、`--selftest` 8 个夹具反向验证分类判据互不串扰 |
 > | `balance_sim.py` + `balance_*.md` / `balance_*.txt` | 数值平衡模拟器与实验报告 |
 > | `gen_assets.py` | 像素精灵 / 音效资源生成脚本 |
 >
