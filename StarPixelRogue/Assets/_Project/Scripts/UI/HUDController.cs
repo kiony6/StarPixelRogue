@@ -31,6 +31,7 @@ namespace StarPixel.UI
         private int _kills;
         private int _wave = 1;
         private int _level = 1;
+        private int _zone;             // M33：切语言时要能重画出区域提示，故把值记下来
         private float _time;
         private float _zoneTimer;
         private float _comboTimer;     // M7
@@ -50,6 +51,7 @@ namespace StarPixel.UI
             Core.EventBus.OnBossDefeated += OnBossDefeated;
             Core.EventBus.OnZoneChanged += OnZoneChanged;
             Core.EventBus.OnComboActivated += OnComboActivated;   // M7
+            Core.Localization.LanguageChanged += RefreshLanguage; // M33：切语言要重画非每帧文本
             RefreshWeapons();
         }
 
@@ -68,6 +70,10 @@ namespace StarPixel.UI
             Core.EventBus.OnBossDefeated -= OnBossDefeated;
             Core.EventBus.OnZoneChanged -= OnZoneChanged;
             Core.EventBus.OnComboActivated -= OnComboActivated;
+            // M33：LanguageChanged 是**静态**事件，HUD 每局由 GameBuilder 新建一个，
+            // 不退订的话旧实例会一直挂着（M29 教训：死订阅不只是泄漏，
+            // 还会让已销毁对象的回调抛异常、打断整条委托链）。
+            Core.Localization.LanguageChanged -= RefreshLanguage;
         }
 
         private void OnEnemyKilled(int _) { _kills++; }
@@ -88,12 +94,30 @@ namespace StarPixel.UI
         private void OnBossDefeated() { if (bossBarRoot) bossBarRoot.SetActive(false); }
         private void OnZoneChanged(int z)
         {
+            _zone = z;
             if (zoneText)
             {
                 zoneText.text = Core.Localization.T("hud.zone", z);
                 zoneText.color = new Color(1f, 1f, 1f, 1f);
                 _zoneTimer = 2.5f;
             }
+        }
+
+        /// <summary>
+        /// M33：切语言后重画「非每帧重绘」的那批文本。
+        ///
+        /// Localization 的注释原本假设「HUD 的波次/时间文本每帧重绘，自动生效」——
+        /// 这个假设只对 timeText / killText 成立（它们在 Update 里每帧重画）。
+        /// 波次 / 等级 / 区域 / 武器名只在各自事件触发时才赋值，切语言后
+        /// 它们会一直停在旧语言，直到下一次事件到来。
+        /// 实测：开局后切成英文，HUD 上仍是「波次 1」，要等到进下一波才变英文。
+        /// </summary>
+        private void RefreshLanguage()
+        {
+            if (waveText) waveText.text = Core.Localization.T("hud.wave", _wave);
+            if (levelText) levelText.text = Core.Localization.T("hud.level", _level);
+            if (zoneText && _zone > 0) zoneText.text = Core.Localization.T("hud.zone", _zone);
+            RefreshWeapons();      // 武器名走 SkillDef.DisplayName（内含 locKey），需重建
         }
 
         /// <summary>M7：组合技激活提示（金色高亮 2.5s 后淡出）。</summary>

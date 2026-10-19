@@ -86,7 +86,8 @@ namespace StarPixel.Net
 
             _active = true;
             _timer = delay;
-            ShowOverlay("连接已断开，正在重连… (" + _attempt + "/" + _maxAttempts + ")");
+            // M33：原本是硬编码中文拼接，英文界面下断线遮罩会冒中文。
+            ShowOverlay(Core.Localization.T("net.reconnect_attempt", _attempt, _maxAttempts));
             if (_backend != null)
             {
                 _backend.Ready -= OnReconnectReady;
@@ -156,8 +157,10 @@ namespace StarPixel.Net
             scaler.referenceResolution = new Vector2(1280, 720);
             root.AddComponent<GraphicRaycaster>();
 
-            _status = CreateText(root.transform, "连接已断开，正在重连…", new Vector2(0, 40), 34);
-            CreateButton(root.transform, "返回大厅", new Vector2(0, -60), GiveUp);
+            // M33：状态文案与按钮文案原本都是硬编码中文；按钮尤其明显——
+            // 英文玩家断线时面对的是一枚看不懂的「返回大厅」。
+            _status = CreateText(root.transform, Core.Localization.T("net.reconnecting"), new Vector2(0, 40), 34);
+            CreateButton(root.transform, Core.Localization.T("net.back_to_lobby"), new Vector2(0, -60), GiveUp);
             _overlay = root;
             _overlay.SetActive(false);
         }

@@ -116,12 +116,14 @@ namespace StarPixel.Net
         /// <summary>格式化模式名（HUD 显示用）。</summary>
         public static string ModeLabel()
         {
-            if (Spectator) return "观战";   // M14
+            // M33：这四个词原本硬编码中文，而本方法注释明写"HUD 显示用"——
+            // 英文界面下诊断 HUD 的模式一栏会直接冒中文。改走本地化表。
+            if (Spectator) return Core.Localization.T("net.mode_spectator");   // M14
             switch (Mode)
             {
-                case NetMode.Host: return "房主";
-                case NetMode.Client: return "客户端";
-                default: return "单机";
+                case NetMode.Host:   return Core.Localization.T("net.mode_host");
+                case NetMode.Client: return Core.Localization.T("net.mode_client");
+                default:             return Core.Localization.T("net.mode_single");
             }
         }
 

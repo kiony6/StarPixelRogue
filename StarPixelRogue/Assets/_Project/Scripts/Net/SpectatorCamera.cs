@@ -105,9 +105,10 @@ namespace StarPixel.Net
         private void UpdateBanner()
         {
             if (_banner == null) return;
+            // M33：观战横幅原本硬编码中文，英文玩家加入观战时看到的是中文提示。
             _banner.text = _observed != null
-                ? "观战中 · Tab 切换视角"
-                : "观战中 · 等待玩家加入…";
+                ? Core.Localization.T("net.spectating_switch")
+                : Core.Localization.T("net.spectating_wait");
         }
     }
 }

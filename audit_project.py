@@ -1108,6 +1108,161 @@ def check_local_guard_symmetry():
                 % (rp, i + 1, ln.strip()[:70]))
 
 
+# ── 第 12 项：UI 文案本地化（M33） ──────────────────────────
+CJK_RE = re.compile(r'[\u4e00-\u9fff]')
+
+# 这些调用里的中文**不是**给玩家看的文案：
+# 诊断日志进控制台，GameObject 名 / 命令行默认值玩家根本看不到。
+# 少了这张表，工程里 20 多处 Debug.LogError 会被整片误报，判据就没人信了。
+NON_UI_CALLS = {
+    'Debug.Log', 'Debug.LogWarning', 'Debug.LogError', 'Debug.LogException',
+    'Debug.LogFormat', 'Debug.LogAssertion',
+    'GameObject', 'ArgValue', 'ArgInt', 'Arg',
+}
+
+# Inspector 编辑器标签（[Header("玩家")]）不是运行时 UI
+ATTR_RE = re.compile(r'\[\s*(?:Header|Tooltip|Range|Space|Multiline|TextArea)\s*\([^)]*\)\s*\]')
+
+# 豁免标记：确属中文专属的文案（如开发期可读标识）可显式声明，空理由无效
+ZH_ONLY_LINE = '@zhonly:'
+ZH_ONLY_BEGIN = '@zhonly-begin:'
+ZH_ONLY_END = '@zhonly-end'
+
+
+def _scan_ui_strings(src):
+    """
+    逐字符扫描源码，产出 (行号, 字符串内容, 是否处在"非 UI 调用"的实参内)。
+
+    为什么不能逐行正则：Debug.LogError 的实参常跨好几行拼接
+    （GameBuilder 第 328 行、NetWatchdog 第 33-37 行就是这样），
+    逐行匹配会把后面几行的中文当成独立 UI 文案，一误报就是一大片。
+    这里改成跟踪括号深度：进入 Debug.Log*( / GameObject( 时记下深度，
+    实参内（含跨行拼接）的所有字符串都算被"遮蔽"。
+    """
+    out = []
+    i, n, line, depth, shield = 0, len(src), 1, 0, None
+    while i < n:
+        c = src[i]
+        if c == '\n':
+            line += 1; i += 1; continue
+        if src.startswith('//', i):
+            j = src.find('\n', i)
+            i = n if j < 0 else j
+            continue
+        if src.startswith('/*', i):
+            j = src.find('*/', i + 2)
+            end = n if j < 0 else j + 2
+            line += src.count('\n', i, end); i = end; continue
+        if c == '"' or (c == '@' and i + 1 < n and src[i + 1] == '"'):
+            verbatim = (c == '@')
+            j = i + (2 if verbatim else 1)
+            buf = []
+            if verbatim:
+                while j < n:
+                    if src[j] == '"' and j + 1 < n and src[j + 1] == '"':
+                        buf.append('"'); j += 2; continue
+                    if src[j] == '"': break
+                    buf.append(src[j]); j += 1
+            else:
+                while j < n:
+                    if src[j] == '\\':
+                        buf.append(src[j:j + 2]); j += 2; continue
+                    if src[j] == '"' or src[j] == '\n': break
+                    buf.append(src[j]); j += 1
+            val = ''.join(buf)
+            out.append((line, val, shield is not None))
+            i = j + 1
+            continue
+        if c == '(':
+            depth += 1
+            k = i - 1
+            while k >= 0 and src[k] == ' ': k -= 1
+            e = k + 1
+            while k >= 0 and (src[k].isalnum() or src[k] in '_.'): k -= 1
+            name = src[k + 1:e]
+            # StarPixel.Dev.* 是诊断/测试工具（如 SmokeTest.ReportUnready），
+            # 它写的是冒烟报告不是界面——玩家永远看不到，不能按 UI 文案算。
+            if shield is None and (name in NON_UI_CALLS
+                                   or name.startswith('Dev.') or '.Dev.' in name):
+                shield = depth
+            i += 1; continue
+        if c == ')':
+            if shield is not None and depth == shield:
+                shield = None
+            depth = max(0, depth - 1)
+            i += 1; continue
+        i += 1
+    return out
+
+
+def check_ui_text_localized():
+    """
+    UI 文案本地化（M33）。
+
+    面向玩家的字符串字面量里不得出现中文——一旦硬编码，英文界面就会冒中文。
+
+    为什么值得单列一项：这类缺陷**没有任何一层现有断言能抓住**。
+    本地化表本身是自洽的（两张表键数相等、键集合一致），切到英文后
+    绝大多数界面也确实变英文了，于是"看起来没问题"；漏网的只有那几处
+    绕过 Localization 直接写字面量的地方。而 Net 层的浮层（断线遮罩 /
+    观战横幅 / 诊断 HUD）整段在 #if FISHNET_ENABLED 里——**没装联机插件时
+    根本不参与编译**，运行时探针永远扫不到，只剩静态检查能兜住。
+
+    自动排除（不属"玩家可见文案"）：
+      · Dev/ 与 Editor/ —— 诊断脚本自己的中文报错；
+      · Localization.cs / LegalTexts.cs —— 表本身与法律文本载体；
+      · Debug.Log* 的实参（含跨行拼接）、[Header] 等 Attribute、
+        new GameObject("名字")、命令行参数默认值。
+
+    其余确属中文-only 的文案用 `// @zhonly: 理由` 行内豁免，
+    或 `// @zhonly-begin: 理由` … `// @zhonly-end` 块豁免；**空理由无效**。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        if norm.endswith('/Localization.cs') or norm.endswith('/LegalTexts.cs'):
+            continue
+
+        raw = ATTR_RE.sub('[]', read(path))
+        raw_lines = raw.split('\n')
+
+        # 块豁免区间（左闭右闭）
+        blocks, opens = [], None
+        for j, l in enumerate(raw_lines):
+            if ZH_ONLY_BEGIN in l and l.split(ZH_ONLY_BEGIN, 1)[1].strip():
+                opens = j
+            elif ZH_ONLY_END in l and opens is not None:
+                blocks.append((opens, j)); opens = None
+
+        for ln_no, val, shielded in _scan_ui_strings(raw):
+            if not CJK_RE.search(val) or shielded:
+                continue
+            idx = ln_no - 1
+            if any(a <= idx <= b for a, b in blocks):
+                info("中文文案块豁免: %s 第 %d 行（人工确认）" % (rp, ln_no))
+                continue
+
+            ok = False
+            for j in range(max(0, idx - 3), min(len(raw_lines), idx + 2)):
+                if ZH_ONLY_LINE in raw_lines[j] and raw_lines[j].split(ZH_ONLY_LINE, 1)[1].strip():
+                    ok = True
+                    break
+            if ok:
+                info("中文文案豁免: %s 第 %d 行（人工确认）" % (rp, ln_no))
+                continue
+
+            err("UI 文案硬编码中文（英文界面会冒中文）: %s 第 %d 行 \"%s\"\n"
+                "      这段文案绕过了 Localization，切到 en-US 后玩家看到的仍是中文。\n"
+                "      M33 实测：Net 层断线遮罩「返回大厅」按钮、观战横幅、诊断 HUD 的\n"
+                "      「敌人/玩家」标签、以及 ModeLabel() 的四个模式名全都是这么漏的——\n"
+                "      那段代码在 #if FISHNET_ENABLED 里，未装联机插件时不编译，运行时测不到。\n"
+                "      修法：在 Localization 的 zh/en 两张表各加一个键，改走 T()；\n"
+                "      确属中文专属（如开发期可读标识）则写 // @zhonly: 理由。"
+                % (rp, ln_no, val[:60]))
+
+
 # ── 自检：证明"判据真的会红" ──────────────────────────────
 # 静态检查最容易出现的失败是"永远不报错"——第 7 项若写成摆设，工程照样一片绿，
 # 而 M24/M26/M27 那三处缺陷会继续静静地堆在场景里。
@@ -1601,6 +1756,107 @@ namespace A
 ]
 
 
+SELFTEST_LG = [
+    ("lg01_按钮文案硬编码中文", True, """
+namespace A
+{
+    public class Overlay : MonoBehaviour
+    {
+        public void Build()
+        {
+            CreateButton(root.transform, "返回大厅", new Vector2(0, -60), GiveUp);
+        }
+    }
+}
+"""),
+    ("lg02_已走本地化不报", False, """
+namespace A
+{
+    public class Overlay : MonoBehaviour
+    {
+        public void Build()
+        {
+            CreateButton(root.transform, Core.Localization.T("net.back_to_lobby"), pos, GiveUp);
+        }
+    }
+}
+"""),
+    ("lg03_诊断日志中文不报", False, """
+namespace A
+{
+    public class Boot
+    {
+        public void Run()
+        {
+            Debug.LogError("[Boot] 联机模式需要 NetBootstrap 场景");
+        }
+    }
+}
+"""),
+    ("lg04_跨行拼接日志不报", False, """
+namespace A
+{
+    public class Boot
+    {
+        public void Run()
+        {
+            Debug.LogError("房主在 " + sec
+                + "s 内未能启动服务端，"
+                + "请检查端口占用");
+        }
+    }
+}
+"""),
+    ("lg05_Header特性中文不报", False, """
+namespace A
+{
+    public class Cfg : MonoBehaviour
+    {
+        [Header("玩家")]
+        public GameObject playerPrefab;
+    }
+}
+"""),
+    ("lg06_GameObject名中文不报", False, """
+namespace A
+{
+    public class World
+    {
+        public void Build()
+        {
+            var go = new GameObject("世界实体");
+        }
+    }
+}
+"""),
+    ("lg07_豁免空理由仍报", True, """
+namespace A
+{
+    public class Tip
+    {
+        public void Show()
+        {
+            // @zhonly:
+            _banner.text = "观战中 · Tab 切换视角";
+        }
+    }
+}
+"""),
+    ("lg08_豁免有理由不报", False, """
+namespace A
+{
+    public class Tip
+    {
+        public void Show()
+        {
+            // @zhonly: 开发期可读标识，界面显示走 locKey
+            _banner.text = "观战中 · Tab 切换视角";
+        }
+    }
+}
+"""),
+]
+
 SELFTEST_GUARD = [
     # M32 真实缺陷的形态：同类两条路，一条有守卫一条没有
     ("guard01_广播无守卫", True, """
@@ -1762,6 +2018,7 @@ def selftest():
         ("运行时资源缓存检查（第 9 项）", SELFTEST_RES, [check_runtime_asset_cache]),
         ("派生物广播检查（第 10 项）", SELFTEST_CB, [check_derive_broadcast]),
         ("本地守卫对称性检查（第 11 项）", SELFTEST_GUARD, [check_local_guard_symmetry]),
+        ("UI 文案本地化检查（第 12 项）", SELFTEST_LG, [check_ui_text_localized]),
     ]
 
     all_bad = 0
@@ -1804,6 +2061,7 @@ def main():
     check_runtime_asset_cache()
     check_derive_broadcast()
     check_local_guard_symmetry()
+    check_ui_text_localized()
 
     n = len(cs_files())
     print("=" * 68)

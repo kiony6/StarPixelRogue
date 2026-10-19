@@ -24,6 +24,10 @@ namespace StarPixel.Combat
 
     public static class UpgradeCatalog
     {
+        // M33：本文件是纯数据定义。skillName 里保留中文是有意为之——它同时承担
+        // 「开发期可读标识」和「locKey 缺失时的兜底」（见 SkillDef.DisplayName），
+        // 玩家看到的武器名一律走 locKey。这里整段豁免静态检查的中文文案项。
+        // @zhonly-begin: 开发期可读标识，界面显示走 locKey（SkillDef.DisplayName 已保证）
         // —— 武器定义（id=1 为默认持有）。数值经 balance_sim.py 蒙特卡洛验证（M3.6）——
         public static SkillDef CreateBolt()
         {
@@ -121,6 +125,8 @@ namespace StarPixel.Combat
             s.aoeRadius = 2.6f; s.mineArmTime = 0.35f; s.mineTrigger = 1.6f; s.mineLife = 8f;
             return s;
         }
+
+        // @zhonly-end
 
         private static readonly int[] UnlockableWeaponIds = { 2, 3, 4, 5, 6, 7, 8, 9, 10 };
 

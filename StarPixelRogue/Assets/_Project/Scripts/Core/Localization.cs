@@ -8,7 +8,10 @@ namespace StarPixel.Core
     /// 轻量本地化（M5）：中/英双语文案，运行时切换，无外部资源依赖。
     /// - <see cref="T"/> 按键取文案，缺失键回退为键名（便于开发期发现漏翻）；
     /// - 切换语言经 <see cref="SetLanguage"/> 广播 <see cref="LanguageChanged"/>，
-    ///   HUD/菜单订阅后刷新（HUD 的波次/时间文本每帧重绘，自动生效）；
+    ///   HUD/菜单订阅后刷新。**不要假设"每帧重绘就自动生效"**：HUD 只有时间与击杀
+    ///   两行是每帧重画的，波次/等级/区域/武器名只在各自事件触发时赋值——
+    ///   它们必须显式订阅 LanguageChanged 重画，否则切语言后会停在旧语言
+    ///   （M33 实测：切成英文后 HUD 上仍是「波次 1」，要等进下一波才变）；
     /// - 默认语言跟随 <see cref="SettingsManager"/>（无设置时 zh-CN，中国区首发）。
     /// </summary>
     public static class Localization
@@ -191,6 +194,20 @@ namespace StarPixel.Core
                 ["net.connecting"] = "正在连接 {0} …",
                 ["net.connecting_spectate"] = "正在以观战身份连接 {0} …",
                 ["net.disconnected"] = "已断开连接，请重新选择模式",
+                // M33：联机运行时浮层（断线遮罩 / 观战横幅 / 诊断 HUD / 模式名）。
+                // 此前这些文案直接硬编码在 Net 层代码里——英文界面下整片冒中文，
+                // 且这段代码在 #if FISHNET_ENABLED 里、无头单机编译不到，只能靠静态检查兜住。
+                ["net.mode_spectator"] = "观战",
+                ["net.mode_host"] = "房主",
+                ["net.mode_client"] = "客户端",
+                ["net.mode_single"] = "单机",
+                ["net.reconnecting"] = "连接已断开，正在重连…",
+                ["net.reconnect_attempt"] = "连接已断开，正在重连… ({0}/{1})",
+                ["net.back_to_lobby"] = "返回大厅",
+                ["net.spectating_switch"] = "观战中 · Tab 切换视角",
+                ["net.spectating_wait"] = "观战中 · 等待玩家加入…",
+                ["net.status_enemies"] = "  敌人 {0}",
+                ["net.status_players"] = "  玩家 {0}",
                 // M18 续四：升级选卡（核心玩法 UI；武器名与升级文案此前全是硬编码中文）
                 ["levelup.title"] = "LEVEL UP!  选择强化",
                 ["upgrade.unlock"] = "解锁 · {0}",
@@ -394,6 +411,18 @@ namespace StarPixel.Core
                 ["net.connecting"] = "Connecting to {0} ...",
                 ["net.connecting_spectate"] = "Connecting to {0} as spectator ...",
                 ["net.disconnected"] = "Disconnected; please pick a mode again",
+                // M33: in-game multiplayer overlays (reconnect / spectator banner / diagnostic HUD / mode label).
+                ["net.mode_spectator"] = "Spectator",
+                ["net.mode_host"] = "Host",
+                ["net.mode_client"] = "Client",
+                ["net.mode_single"] = "Single Player",
+                ["net.reconnecting"] = "Connection lost, reconnecting...",
+                ["net.reconnect_attempt"] = "Connection lost, reconnecting... ({0}/{1})",
+                ["net.back_to_lobby"] = "Back to Lobby",
+                ["net.spectating_switch"] = "Spectating - Tab to switch view",
+                ["net.spectating_wait"] = "Spectating - waiting for players...",
+                ["net.status_enemies"] = "  Enemies {0}",
+                ["net.status_players"] = "  Players {0}",
                 ["levelup.title"] = "LEVEL UP!  Choose an Upgrade",
                 ["upgrade.unlock"] = "Unlock - {0}",
                 ["upgrade.level"] = "Upgrade - {0} Lv{1}",

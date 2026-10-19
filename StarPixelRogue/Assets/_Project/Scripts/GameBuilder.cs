@@ -95,6 +95,9 @@ namespace StarPixel
             // M32：联机本地守卫对称性（翻转手法自检 / 远程零广播 / 本地必须广播 / 全局状态不被污染 / 恢复）
             if (HasArg("-guardProbe")) { StartGuardProbe(); return; }
 
+            // M33：本地化覆盖完整性（扫描器自检 / 中文态基线 / 英文态零中文 / 动态键不回退 / 恢复）
+            if (HasArg("-locProbe")) { StartLocProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -572,6 +575,15 @@ namespace StarPixel
             Application.targetFrameRate = 60;
             PrepareStage();
             StarPixel.Dev.GuardProbe.Start(ArgValue("-guardScene", "BASE"));
+        }
+
+        private static void StartLocProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;
+            PrepareStage();
+            StarPixel.Dev.LocProbe.Start(ArgValue("-locScene", "BASE"));
         }
 
         private static void StartSubProbe()

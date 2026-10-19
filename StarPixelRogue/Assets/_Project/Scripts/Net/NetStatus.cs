@@ -56,8 +56,10 @@ namespace StarPixel.Net
             sb.Append(NetSession.ModeLabel());
             sb.Append("  FPS ").Append(Mathf.RoundToInt(1f / Mathf.Max(Time.unscaledDeltaTime, 0.0001f)));
 #if FISHNET_ENABLED
-            sb.Append("  敌人 ").Append(NetEnemyRegistry.Count);
-            sb.Append("  玩家 ").Append(NetPlayerRegistry.Count);
+            // M33：这两个标签原本硬编码中文，英文界面下诊断 HUD 会冒中文。
+            // 顺带把计数并进占位符，避免"标签本地化了、数字却另拼一段"的割裂。
+            sb.Append(Core.Localization.T("net.status_enemies", NetEnemyRegistry.Count));
+            sb.Append(Core.Localization.T("net.status_players", NetPlayerRegistry.Count));
 #endif
             _text.text = sb.ToString();
         }
