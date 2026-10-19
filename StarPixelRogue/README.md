@@ -1,4 +1,4 @@
-# 《星界像素狂潮》— Unity 工程原型（M1 – M26）
+# 《星界像素狂潮》— Unity 工程原型（M1 – M27）
 
 > 像素肉鸽割草（吸血鬼幸存者类）· 单机即开即玩，联机（Fish-Net 状态同步）为可选模块。
 > 本目录为可运行原型源码，对应《联机肉鸽技术设计文档》的 M1–M4 里程碑。
@@ -1199,6 +1199,36 @@ python visual_probe.py --only LEFTOVER    # 只跑「重开局特效残留」
 回归（异常均 0）：**M26 五场景**、单机冒烟 45s（击杀 67/波次 4/等级 4/选卡 3）、M25 六场景、M24 五场景、
 M23 三场景、合规门 6 场景、防沉迷 MINOR+ADULT、持久化 SAVE+TELEMETRY、设置 M22 六场景、云存档 5 场景+UI、
 **联机双开 60s（玩家 1/2、峰值 2/2、波次 6/6、击杀 105/73、双端 Boss 是）**、静态审计 ERROR 0 / WARN 0 / INFO 8。
+
+### M27 伤害飘字对象池无头实测
+
+最后一个没池化的高频对象（伤害飘字）已纳入 `PoolManager`；过程中挖出一个
+**此前 26 轮无人发现的系统性泄漏**：`GameBuilder.Track()` 登记的是 `AddComponent`
+的返回值——**组件**，而 `Object.Destroy(组件)` 只摘组件、GameObject 本体与它的所有子物体
+全部留在场景里，于是**每重开一局就遗留一整套空壳管理器**（实测 8 个空壳 + 2 块残留画布，
+一局一局往下堆）。`LevelUpManager.BuildPanel` 注释里写的「随管理器一起拆世界」从未兑现。
+
+| 场景 | 断言 |
+|---|---|
+| `POOL` | 120 次高频伤害：累计新建 ≤40（未池化实测 120）、复用率 ≥50%、峰值并发 ≥10、结束后活跃 0 |
+| `REUSE` | 同一实例**第二次**被使用：复用同一实例 / 文案更新为 89 / 0.30s 后仍在场 / alpha >0.2 / 字体仍在 |
+| `BURST` | 单帧 40 次伤害：峰值并发必须 =40（一张不丢）、随后全部归还 |
+| `LEFTOVER` | 真实重开后：上一局飘字存活 0、空壳管理器 0、`DmgCanvas` 只剩 1 块 |
+
+区分力验证三次且互不相交：回退 `Track` → 仅 LEFTOVER 红（空壳 **8**、画布 **2**）；
+飘字改回每次 `new GameObject` → 仅 POOL 红（新建 **120**、复用率 **0.0%**）与 REUSE「非同一实例」；
+`Init` 不重置 `_life` → **仅 REUSE 红（1/6）**，POOL / BURST 全绿——
+说明「没池化」与「池化了但状态没重置」是两种必须分开判的失败。
+
+```bash
+python pool_probe.py                    # 4 个场景（约 3 分钟）
+python pool_probe.py --only REUSE       # 只跑「复用实例状态重置」
+```
+
+产出：`Dev/PoolProbe.cs`、`../pool_probe.py`；`DamageNumberManager` 模板化 +
+`FloatingText.Init` 重置寿命与透明度 + `UIFactory.UIFont` 收敛字体实现；
+`GameBuilder.Track` 归一为登记 GameObject 并补 `ClearSingletons`。
+详见 `pool_m27.md`。
 
 ## 架构与目录
 

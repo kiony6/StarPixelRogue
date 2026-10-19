@@ -26,7 +26,17 @@ namespace StarPixel
 
         private static T Track<T>(T obj) where T : Object
         {
-            if (obj != null) _created.Add(obj);
+            if (obj == null) return obj;
+
+            // M27：一律登记 **GameObject**，不是组件。
+            // 此前 Track(new GameObject("X").AddComponent<Y>()) 传进来的是 AddComponent 的返回值——
+            // 组件，而 Object.Destroy(组件) 只把这个组件摘掉，GameObject 本体和**它的所有子物体**
+            // 全都留在场景里。于是每重开一局就遗留一整套空壳管理器：
+            //   · "DamageNumberManager" 连同它的 DmgCanvas 与飘字模板（一个残留的 Overlay 画布）
+            //   · "LevelUpManager"（其 BuildPanel 注释写着"随管理器一起拆世界"，实际从未兑现）
+            //   · "HUD" / "PoolManager" / "CombatManager" / "HitstopManager" 等共约 10 个空壳
+            // 这些对象一局一局堆下去，永远不会消失。
+            _created.Add(obj is Component c ? c.gameObject : obj);
             return obj;
         }
 
@@ -66,6 +76,9 @@ namespace StarPixel
 
             // M26：可见层第二批（字体/伤害飘字/受击冲击/前摇警示圈）无头实测（正常启动不受影响）
             if (HasArg("-visualProbe")) { StartVisualProbe(); return; }
+
+            // M27：伤害飘字对象池无头实测（新建数有上限 / 复用实例状态重置 / 爆发不丢字 / 重开无残留）
+            if (HasArg("-poolProbe")) { StartPoolProbe(); return; }
 
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
@@ -482,6 +495,24 @@ namespace StarPixel
             StarPixel.Dev.VisualProbe.Start(ArgValue("-visualScene", "FONT"));
         }
 
+        /// <summary>
+        /// M27 无头实测入口：交给 <see cref="Dev.PoolProbe"/> 验证
+        /// 「伤害飘字改对象池后：累计新建有上限 / 复用实例的状态被重置 / 单帧爆发一张不丢 / 重开无残留」。
+        /// 参数：-poolScene POOL|REUSE|BURST|LEFTOVER（默认 POOL）
+        ///
+        /// 飘字是全项目每秒触发次数最多的对象（每个敌人每次被打一张），却一直没池化；
+        /// 而"改成池"这一步本身才是危险的地方：复用实例时字段初始化器不会重跑，
+        /// 漏了重置 _life 的话玩家会看到"数字只出现前几次，之后全消失"——日志一行都不会有。
+        /// </summary>
+        private static void StartPoolProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;
+            PrepareStage();
+            StarPixel.Dev.PoolProbe.Start(ArgValue("-poolScene", "POOL"));
+        }
+
         private static void OpenLobby()
         {
             new GameObject("NetLobby").AddComponent<Net.NetLobby>();
@@ -546,7 +577,7 @@ namespace StarPixel
             foreach (var o in _created)
             {
                 if (o == null) continue;
-                if (o is Core.ISingletonInstance s) s.ClearInstance();
+                ClearSingletons(o);
                 Object.Destroy(o);
             }
             _created.Clear();
@@ -554,6 +585,32 @@ namespace StarPixel
             Core.PlaytimeGuard.GameRunning = false;      // 菜单不计游戏时长
             Core.MusicManager.Instance?.PlayMenu();      // M7：拆世界回菜单乐
             if (UI.MainMenu.Instance != null) UI.MainMenu.Instance.RefreshRecords();
+        }
+
+        /// <summary>
+        /// 销毁一个已登记对象前，先清掉它身上的单例引用。
+        ///
+        /// M27：Track 改成登记 GameObject 之后，这里不能再只判断"被登记的那个对象是不是单例"——
+        /// GameObject 当然不是 ISingletonInstance，于是 EnemyManager / PickupManager /
+        /// PlayerController 的静态 Instance 全都留在指向已销毁组件的状态上，
+        /// 紧随其后的 Build() 会被「Instance != null」守卫整个拦下：
+        /// 玩家拿不到、管理器全缺——正是 M24 修过的那个失败模式。
+        /// GameObject 与组件两种登记形态都要走到。
+        /// </summary>
+        private static void ClearSingletons(Object o)
+        {
+            var go = o as GameObject;
+            if (go != null)
+            {
+                // 走 MonoBehaviour 再判接口：GetComponents<接口> 的可用性随 Unity 版本而异
+                foreach (var mb in go.GetComponents<MonoBehaviour>())
+                {
+                    if (mb == null) continue;                       // 已销毁/缺失脚本
+                    if (mb is Core.ISingletonInstance s) s.ClearInstance();
+                }
+                return;
+            }
+            if (o is Core.ISingletonInstance single) single.ClearInstance();
         }
 
         public static void Build()

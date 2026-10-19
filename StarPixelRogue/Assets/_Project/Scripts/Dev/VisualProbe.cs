@@ -205,18 +205,33 @@ namespace StarPixel.Dev
             em.ActiveEnemies.Clear();
         }
 
+        /// <summary>
+        /// 场上**正在显示**的飘字数：排除池模板，也排除已归还到池里的（inactive）实例。
+        /// M27：跳字改为对象池复用后，归还池里的实例仍然是场景里的 FloatingText 对象，
+        /// 再按「全部」计数的话，「打完后残留 0」会永远为假——那时它只是被回收，不是泄漏。
+        /// </summary>
         private static int CountFloating()
         {
             int n = 0;
             foreach (var f in Resources.FindObjectsOfTypeAll<FloatingText>())
-                if (f != null) n++;
+            {
+                if (f == null) continue;
+                if (f.gameObject.name.EndsWith("Template")) continue;   // 池模板不是"在用的"
+                if (!f.gameObject.activeInHierarchy) continue;          // 已归还
+                n++;
+            }
             return n;
         }
 
         private static FloatingText FirstFloating()
         {
             foreach (var f in Resources.FindObjectsOfTypeAll<FloatingText>())
-                if (f != null) return f;
+            {
+                if (f == null) continue;
+                if (f.gameObject.name.EndsWith("Template")) continue;
+                if (!f.gameObject.activeInHierarchy) continue;
+                return f;
+            }
             return null;
         }
 
