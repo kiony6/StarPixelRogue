@@ -1,4 +1,4 @@
-# 《星界像素狂潮》— Unity 工程原型（M1 – M27）
+# 《星界像素狂潮》— Unity 工程原型（M1 – M28）
 
 > 像素肉鸽割草（吸血鬼幸存者类）· 单机即开即玩，联机（Fish-Net 状态同步）为可选模块。
 > 本目录为可运行原型源码，对应《联机肉鸽技术设计文档》的 M1–M4 里程碑。
@@ -1229,6 +1229,67 @@ python pool_probe.py --only REUSE       # 只跑「复用实例状态重置」
 `FloatingText.Init` 重置寿命与透明度 + `UIFactory.UIFont` 收敛字体实现；
 `GameBuilder.Track` 归一为登记 GameObject 并补 `ClearSingletons`。
 详见 `pool_m27.md`。
+
+### M28 新建对象归属无头实测：把「连续三轮靠人肉复查才找到的泄漏」做成机器检查
+
+**为什么**：`new GameObject` 出来的东西没人负责回收，连续三轮踩到——M24 池化实体漏到新世界、
+M26 警示圈/爆发环漏到开局画面、M27 每次重开遗留一整套空壳管理器。三轮的修法都是「补登记表/补一行 SetParent」，
+但**检查手段**始终是人肉 grep。本轮固化成两层防护。
+
+**第一层：静态检查**（`audit_project.py` 第 7 项）
+扫描运行时每一处 `new GameObject(` / `Instantiate(`，必须能判定归属，否则 ERROR：
+
+| 判定 | 依据 |
+|---|---|
+| 挂了父物体 | 同方法内 `SetParent` / `.parent =` |
+| 进了登记表 | `Track(...)` 或 `Add/Enqueue/Push` —— **且该类必须有 `DestroyAll`/`ResetAll`/`OnDestroy` 清理方法** |
+| 工厂方法 | `CreateXxx()` new + return，调用方写了 `Track(CreateXxx())` |
+| 字段持有 | 赋给字段/属性且类里有销毁它的地方（允许 `w.auraVisual = go` 带点左值） |
+| 应用级单体宿主 | 挂的正是**本文件自己的类**，且有 `Instance =` 或继承 `MonoSingleton<T>` |
+| 显式声明 | `// @owner: parent` / `field(名)` / `registry(名)` / `app` / `stage` |
+
+注解是**封闭词汇且逐项机器验证**，不是逃脱口：声明 `@owner: field(X)` 就必须真有销毁 X 的地方；
+`@owner: app` 必须有 `Instance =` / `MonoSingleton<T>` / `DontDestroyOnLoad` / 处于联机条件编译段；
+`@owner: stage` 必须是 `Ensure*/Setup*/Prepare*/Open*` 或有 `== null` 守卫。
+**刻意不提供 `@owner: self`**——M26 的警示圈本来就会自毁，但结算面板 `timeScale=0` 把它冻住、重开后才播完，自毁盖不住归属缺口。
+
+**自检**（`python audit_project.py --selftest`，10 个夹具）：静态检查最可能的失败不是误报而是**永远不报错**。
+夹具中「进了登记表却没人清」正是 M24 的原始形态，「只靠计时自毁」是 M26 的形态，「注解撒谎」验证注解不是逃脱口。
+
+**第二层：运行时探针**（`orphan_probe.py` + `Dev/OrphanProbe.cs`，`-orphanProbe -orphanScene`）
+CHAIN（链闪电：冻结时间后重开，一个都不许留下）· BOSS（上一局活着的 Boss 不许被带进新世界）·
+ROOT（通用兜底：重开后场景根对象 multiset 差必须为 0）。
+
+**扫出来的三处真实缺陷**：
+① **`ChainBolt` 的电弧段/闪光**——与 M26 的 `TempEffect` 同形且**未修**：静态 Spawn、场景根、
+   靠 `Time.deltaTime` 自毁；`timeScale=0` 把它冻住、重开后才播完。补存活登记表 + `DestroyAll`。
+② **上一局还活着的 Boss 会被带进新世界**——Boss 是 `Instantiate` 出来的、既不在 `ActiveEnemies`
+   也不挂在任何管理器下，只由 `ActiveBoss` 持有，而 `ResetAll` 只清 `ActiveEnemies`。
+   **它会继续追着新玩家跑、继续开火**。补 `Destroy(ActiveBoss.gameObject)`。
+③ **`NetStatus` 画布挂在场景根**（同类文件都写了 `SetParent`，只有它漏了）。
+
+> 附带澄清：`TouchJoystick._root` / `SpectatorCamera._root` 首轮看着像泄漏，实际 `OnDestroy` 里都清了——真归属。
+
+**区分力验证三次回退，变红互不相交**：
+① 回退 `ChainBolt.DestroyAll()` → CHAIN 1/3（存活 6）+ ROOT（多出 2）；
+② 回退 Boss 清理 → BOSS 1/2（`BossTemplate(Clone)`）+ ROOT（多出 1），**静态检查也独立报红**
+   「声明 `@owner: field(ActiveBoss)` 但全文找不到销毁 ActiveBoss 的地方」——注解确实不是逃脱口；
+③ 回退 `NetStatus` 的 `SetParent` → 离线不可达，**只有静态检查能抓**。
+
+**实测（异常均 0）**：CHAIN 3/3 · BOSS 2/2 · ROOT 2/2（29 → 29，多出 0）· 静态审计 ERROR 0/WARN 0/INFO 16 · 自检 10/10。
+
+**踩坑**：① 注解写在注释里而 `strip_noise` 剥注释——必须读原文行（初版 5 处注解全部"看不到"）；
+② 删块注释不能吃掉换行，否则去噪后行号与原文错位（实测错位 8 行）；
+③ **必须先剥行注释再剥块注释**——`Resources/Legal/*.txt` 里的 `/*` 会把后面几十行整段吞掉；
+④ 方法区间切分必须就地收尾，否则"最后一个方法"的区间吞到文件底造成漏报；
+⑤ "应用级单体"必须限定"挂的是自己的类"，否则 `_root.AddComponent<Canvas>()` 被误放行；
+⑥ ROOT 要立刻冻结波次——`Build()` 同步刷出第一波，新世界的当波敌人会被当成残留（首轮误报 2 个 `EnemyTemplate(Clone)`）。
+
+**教训**：① 同一类缺陷第三次出现就该换方法——修第三次时该修的是**检查手段**，不是再修一次泄漏；
+② 静态检查必须配自检，它最可能的失败是"永远不报错"；③ 注解机制要封闭且可验证，否则就是给逃脱口发许可证；
+④ 通用兜底判据最容易"假绿"，采样时机必须卡在"新世界刚建好"这一刻；⑤ 静态与运行时互为交叉验证，只留一边就有盲区。
+
+完整报告见 `orphan_m28.md`。
 
 ## 架构与目录
 

@@ -134,7 +134,8 @@ namespace StarPixel.Enemy
             if (cam != null) cam.backgroundColor = ZoneColors[(zone - 1) % ZoneColors.Length];
         }
 
-        private void SpawnBoss()
+        // M28：改为 public —— 实测脚本要单独造一个 Boss 来验证「重开一局时上一局的 Boss 是否被清掉」。
+        public void SpawnBoss()
         {
             // M4.5：Boss 血量与单机版一致（400+90*wave，无额外难度缩放，见 Boss.Init）
             float bossHp = 400f + 90f * Mathf.Max(1, _wave);
@@ -158,6 +159,7 @@ namespace StarPixel.Enemy
             // 联机 Boss 走 NetWorld 简化镜像（无 BossBrain 模式），变体模式不生效。
             int variant = Random.Range(0, 3);
 
+            // @owner: field(ActiveBoss) —— 由 ResetAll 显式销毁（Boss 不在 ActiveEnemies 里）
             var go = Instantiate(_bossTemplate);
             go.SetActive(true);
             go.transform.localScale = Vector3.one * 1.6f;
@@ -289,6 +291,12 @@ namespace StarPixel.Enemy
         {
             foreach (var e in ActiveEnemies) if (e != null) Object.Destroy(e.gameObject);
             ActiveEnemies.Clear();
+            // M28：Boss 是 Instantiate(_bossTemplate) 出来的、既不在 ActiveEnemies 里
+            // 也不挂在任何管理器下（它是被 ActiveBoss 单独持有的）。此前漏了这一句——
+            // 重开一局时，上一局**还活着**的 Boss 会原封不动出现在新世界里，
+            // 而且会继续追着新玩家跑、继续开火。比静态特效严重得多。
+            if (ActiveBoss != null) Object.Destroy(ActiveBoss.gameObject);
+            ActiveBoss = null;
             _wave = 0;
             _zone = 0;
             _bossActive = false;

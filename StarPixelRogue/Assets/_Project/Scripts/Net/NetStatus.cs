@@ -21,6 +21,7 @@ namespace StarPixel.Net
         private void BuildUI()
         {
             var canvasGO = new GameObject("NetStatusCanvas");
+            canvasGO.transform.SetParent(transform, false);   // M28：随管理器一起拆世界，防重开后残留画布
             var canvas = canvasGO.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
             var scaler = canvasGO.AddComponent<CanvasScaler>();

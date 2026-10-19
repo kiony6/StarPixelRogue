@@ -28,13 +28,28 @@ namespace StarPixel.Combat.Skill
             }
         }
 
+        // M28：存活登记表。此前 BoltSeg / BoltFlash 与 M26 修过的警示圈是**同一个缺陷形态**——
+        // new GameObject 建在场景根节点上、无人登记、只靠 Update 里的计时自毁。
+        // 而自毁依赖时间推进：选卡/结算面板的 timeScale=0 会把它们冻住，
+        // 重开一局后它们整批出现在新世界的开局画面里（电弧横在屏幕上一动不动）。
+        private static readonly List<GameObject> _alive = new List<GameObject>();
+
+        /// <summary>拆世界时清掉全部在飞的链闪电（由 GameBuilder.TeardownWorld 调用）。</summary>
+        public static void DestroyAll()
+        {
+            foreach (var go in _alive)
+                if (go != null) Object.Destroy(go);
+            _alive.Clear();
+        }
+
         private static void DrawSegment(Vector2 a, Vector2 b, Color color)
         {
             Vector2 delta = b - a;
             float len = delta.magnitude;
             if (len < 0.01f) return;
 
-            var go = new GameObject("BoltSeg");
+            var go = new GameObject("BoltSeg");   // @owner: registry(_alive)
+            _alive.Add(go);
             var sr = go.AddComponent<SpriteRenderer>();
             sr.sprite = SpriteFactory.MakeSolidSprite();
             sr.color = color;
@@ -50,7 +65,8 @@ namespace StarPixel.Combat.Skill
 
         private static void Flash(Vector2 pos, Color color)
         {
-            var go = new GameObject("BoltFlash");
+            var go = new GameObject("BoltFlash");   // @owner: registry(_alive)
+            _alive.Add(go);
             var sr = go.AddComponent<SpriteRenderer>();
             sr.sprite = SpriteFactory.MakeSolidSprite();
             sr.color = color;
@@ -65,6 +81,12 @@ namespace StarPixel.Combat.Skill
 
         private float _life;
         private bool _shrink;
+
+        // 自毁时也要出表，否则 _alive 会一直攒着已销毁的引用（生命周期内命中越多、表越长）。
+        void OnDestroy()
+        {
+            _alive.Remove(gameObject);
+        }
 
         void Update()
         {

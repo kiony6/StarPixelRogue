@@ -14,6 +14,10 @@
   4. Resources 资源存在性   Resources.Load("x") 找不到文件 = 运行时静默失败，不报错
   5. 同类重复成员           重复声明会"后写覆盖先写"（M9 在模拟器里真实踩过 UNLOCKABLE_IDS）
   6. 缺少 using              用了某命名空间的类型却没导入（M17/M18 实测发现 4 处，此前查不出）
+  7. 新建对象归属            运行时 new GameObject / Instantiate 出来的东西若既无父物体、
+                             也无登记表、也不属于某个会被销毁的字段，就会永远堆在场景根节点上。
+                             M24（池化实体）/ M26（警示圈）/ M27（空壳管理器）连续三轮踩到，
+                             每次都靠人肉复查才找到——本项把它变成机器检查。
 
 用法：  python audit_project.py
 退出码：0 = 无 ERROR；1 = 存在 ERROR（WARN/INFO 不计入）
@@ -113,9 +117,38 @@ def strip_noise(text):
     text = _strip_char_literals(text)                      # 先：char 字面量 'x' '\\' '"'
     text = re.sub(r'@"(?:""|[^"])*"', '""', text)          # 再：逐字字符串（"" 表示一个引号）
     text = re.sub(r'"(?:\\.|[^"\\\n])*"', '""', text)      # 再：普通字符串
-    text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+    # 先剥行注释、再剥块注释：正文里出现 `Resources/Legal/*.txt` 这种写在 /// 行注释里的
+    # "伪块注释起点"时，若反过来先扫块注释，就会从 Legal/* 一路找到下一个真的 */ ，
+    # 把中间几十行代码整段吞掉（实测表现为 LegalTexts.cs 括号不平衡）。
     text = re.sub(r'//[^\n]*', '', text)
+    text = _strip_block_comments(text)                     # 最后：块注释（保留换行，见下）
     return text
+
+
+def _strip_block_comments(text):
+    """
+    删 /* ... */，但**补回等量换行**。
+
+    用 re.sub(r'/\\*.*?\\*/', '', ..., re.S) 会把注释内部的换行一起吃掉，
+    于是"去噪后的第 N 行"不再对应"原文的第 N 行"。括号平衡看不出来，
+    但第 7 项检查要用原文行去读 @owner 注解，行号一错就读到别的行上
+    （实测 FishNetBackend 的 8 行块注释让全文错位 8 行，注解被判成"没写"）。
+    """
+    out = []
+    i = 0
+    while True:
+        j = text.find('/*', i)
+        if j < 0:
+            out.append(text[i:])
+            break
+        out.append(text[i:j])
+        k = text.find('*/', j + 2)
+        if k < 0:                      # 未闭合：剩下的当作代码，不能截断（截断=凭空少半个括号）
+            out.append(text[j:])
+            break
+        out.append('\n' * text[j:k + 2].count('\n'))
+        i = k + 2
+    return "".join(out)
 
 
 # ── 1. 括号平衡 ────────────────────────────────────────────────
@@ -466,7 +499,461 @@ def check_missing_usings():
                      % (rel(path), ns, "/".join(hit[:4]), ns))
 
 
+# ── 7. 新建对象归属 ────────────────────────────────────────────
+# M28 新增。动机见文件头第 7 条：M24 / M26 / M27 连续三轮踩到「new GameObject 出来的
+# 东西没人负责回收」，每次都是靠人肉复查才找到，不该再碰运气。
+#
+# 判定分两级：
+#   (a) 自动推断——父物体 / 登记表 / 被销毁的字段 / 应用级单体，任一成立即视为有归属；
+#   (b) 显式声明——以上都判不出来时，必须在创建点写 `// @owner: <kind>`。
+# 为避免注解沦为逃脱口，kind 是封闭词汇且**逐项机器验证**（见 OWNER_KINDS 的 verifier）；
+# 特别地「自毁」不算归属：M26 的警示圈本来就会自毁，但结算面板的 timeScale=0 把它冻住，
+# 重开后才播完——自毁盖不住归属缺口，所以这里没有 `@owner: self` 这一档。
+OWNER_ANNOT = re.compile(r'//\s*@owner\s*:\s*([A-Za-z]+)(?:\s*\(\s*([^)]*)\))?', re.I)
+
+# 既不挂父物体、也不进登记表的合法形态：整局/整应用生命周期的单体宿主。
+# 判据是该文件里存在 `Instance = `（写入静态单例引用）——它随应用共存亡，不参与拆世界。
+APP_LIFETIME = re.compile(r'\bInstance\s*=(?!=)')
+# 登记表：某个集合字段，且存在会 Destroy 它内容的方法（DestroyAll / ResetAll / Clear 等）
+# 注意包含 OnDestroy：很多类是在自己的 OnDestroy 里清登记表（如 PlayerController 清 orbitBlades），
+# 只认 DestroyAll/ResetAll 会把这类真有归属的误判成孤儿。
+TEARDOWN_METHOD = re.compile(
+    r'\b(?:public|private|protected|internal|static)?[ \t\w]*(?:void|int|bool)?[ \t]*'
+    r'(DestroyAll|ResetAll|ClearAll|Teardown|Dispose|OnDestroy)\w*\s*\(')
+
+
+def method_spans(lines):
+    """
+    切出各方法的行区间 [(start, end, decl), ...]。
+
+    本工程统一 4 空格缩进（check_duplicate_members 已经基于同一假设）：
+    类声明缩进 4、成员（方法/属性）缩进 8、方法体 >= 12。
+    因此「缩进恰为 8 且含 '('」即方法声明，直到下一个缩进 8 的 `}` 或新声明为止。
+    """
+    spans, cur = [], None
+    for i, ln in enumerate(lines):
+        if not ln.strip():
+            continue
+        ind = len(ln) - len(ln.lstrip())
+        s = ln.strip()
+        if ind == 4 and re.match(r'(?:public|internal|private|protected|static|sealed|abstract|'
+                                 r'partial|\s)*(?:class|struct|interface)\s', s):
+            if cur:
+                spans.append(cur)
+                cur = None
+            continue
+        if ind == 8 and '(' in s and not s.startswith('//'):
+            if cur:
+                # 必须就地收尾：初版把 end 留成文件末尾、只在遇到缩进 8 的 `}` 时才回填，
+                # 于是"最后一个方法"的区间会一路吞到文件底（实测 97 行），
+                # 把别处的 Destroy 当成"本方法内就地销毁"，造成漏报。
+                cur[1] = i - 1
+                spans.append(cur)
+            cur = [i, len(lines) - 1, s]
+            continue
+        if ind == 8 and cur is not None and s.startswith('}'):
+            cur[1] = i
+            spans.append(cur)
+            cur = None
+    if cur:
+        spans.append(cur)
+    return [tuple(x) for x in spans]
+
+
+def _owner_of(raw_lines, i):
+    """
+    第 i 行（0-based）上的 @owner 注解；本行没有就看上一行（注解常被写在创建点上方）。
+
+    必须读**未去注释的原文**：注解本身就是注释，用 strip_noise 之后的行去查必然一无所获
+    （初版正是这么写的，于是 5 处注解全部"看不到"，改完还是照样报红）。
+    """
+    for j in (i, i - 1):
+        if 0 <= j < len(raw_lines):
+            m = OWNER_ANNOT.search(raw_lines[j])
+            if m:
+                return m.group(1).lower(), (m.group(2) or "").strip()
+    return None, None
+
+
+def _body_for(lines, spans, i):
+    """返回 (方法体, 方法名)。切不出方法时方法名为空。"""
+    for s, e, decl in spans:
+        if s <= i <= e:
+            m = re.search(r'(\w+)\s*\(', decl)
+            return "\n".join(lines[s:e + 1]), (m.group(1) if m else "")
+    return lines[i], ""
+
+
+def _own_types(code):
+    """本文件声明的类型名（缩进 4 的 class/struct），用于识别"单体宿主"。"""
+    return set(re.findall(
+        r'^ {4}(?:public|internal|private|protected|static|sealed|abstract|partial|\s)*'
+        r'(?:class|struct)\s+(\w+)', code, re.M))
+
+
+def _classify(body, code, target, line, own_types=(), method="", file_code=""):
+    """返回 (是否可判定有归属, 自动判定的理由)。target 为 None 表示匿名/内联创建。"""
+    if re.search(r'\bTrack\s*\(', body):
+        return True, "Track"
+    # 工厂方法：`CreateEnemyTemplate()` 里 new 出来、return 给调用方，由调用方 Track(...)。
+    # 只看方法体会把这类误报成孤儿（GameBuilder 里 11 处模板与玩家都是这个形态）。
+    # （CreatePlayer 返回的是组件而非 go，所以这里认"方法里有 return"，不苛求返回的就是 target。）
+    if method and re.search(r'\breturn\b', body) \
+            and re.search(r'\bTrack\s*\(\s*' + re.escape(method) + r'\s*\(', file_code or code):
+        return True, "工厂方法(调用方 Track)"
+    t = re.escape(target) if target else None
+    if t:
+        if re.search(t + r'\.transform\.SetParent\s*\(', body):
+            return True, "SetParent"
+        if re.search(r'SetParent\s*\(\s*' + t + r'\s*[,)]', body):
+            return True, "SetParent"
+        if re.search(t + r'\.transform\.parent\s*=', body):
+            return True, "parent="
+        if re.search(r'\b\w+\.(?:Add|Enqueue|Push)\s*\(\s*' + t + r'\s*\)', body):
+            # 进了登记表还不够——登记表自己也得有人清。M24 的原始缺陷正是"池化实体都进了
+            # 队列、却没有 DestroyAll"，只是换了个地方堆积。
+            if TEARDOWN_METHOD.search(code):
+                return True, "登记表"
+            return False, ("进了登记表，但这个类没有 DestroyAll / ResetAll 之类的清理方法，"
+                           "——登记表只是换了个地方堆积（M24 的原始缺陷形态）")
+        # 赋给某个字段/属性，且该类里有销毁它的地方。
+        # 左侧允许带点：`w.auraVisual = go;` + `Destroy(w.auraVisual)`（PlayerController 光环环属此类）。
+        # 初版左侧只写 \w*，点号写法匹配不到，于是把真有归属的对象误报成孤儿。
+        lhs = re.search(r'([\w\.]+)\s*=\s*' + t + r'\s*;', body)
+        if lhs and re.search(r'\bDestroy\s*\(\s*' + re.escape(lhs.group(1)) + r'\b', code):
+            return True, "字段+显式销毁"
+        if re.search(r'\bDestroy\s*\(\s*' + t + r'\b', body):
+            return True, "就地销毁"
+        # 本类的字段，且该类里有销毁它的地方（典型：OnDestroy 里 Destroy(_root)）。
+        # 这条刻意看**整个文件**而不是方法体——清理通常写在另一个方法（OnDestroy）里，
+        # 只看方法体会把它漏判成孤儿（SpectatorCamera._root 就是这类）。
+        if re.search(r'^\s*(?:private|public|protected|internal)?\s*'
+                     r'(?:static\s+)?(?:readonly\s+)?[\w<>\[\],\.\?]+\s+' + t + r'\s*;', code, re.M) \
+           and re.search(r'\bDestroy\s*\(\s*' + t + r'\b', code):
+            return True, "字段+显式销毁"
+    # 应用级单体宿主：这个 GameObject 挂的正是**本文件自己的类**（`new GameObject("X")
+    # .AddComponent<X>()`），而该类是单体（文件里写了 `Instance =`，或继承 MonoSingleton<T>，
+    # 其 Instance 在基类里）。它随应用共存亡，不参与拆世界。
+    #
+    # 必须限定"挂的是自己的类"：第一版只要求 body 里出现过 AddComponent 就放行，
+    # 于是 TouchJoystick / SpectatorCamera 里 `_root.AddComponent<Canvas>()` 这类
+    # "给自己的画布挂组件"也被当成单体宿主放过了——而那个 _root 恰恰是漏的对象。
+    if own_types and (APP_LIFETIME.search(code) or 'MonoSingleton<' in code):
+        altern = "|".join(re.escape(t) for t in own_types)
+        if target:
+            if re.search(re.escape(target) + r'\.AddComponent\s*<\s*(?:' + altern + r')\s*>', body):
+                return True, "应用级单体"
+        elif re.search(r'\.AddComponent\s*<\s*(?:' + altern + r')\s*>', line):
+            return True, "应用级单体"
+    return False, None
+
+
+def _verify_owner(kind, arg, code, line, in_fishnet=False, method="", body="", raw=""):
+    """验证 @owner 注解是否名副其实。返回 None 表示通过，否则返回不通过的原因。"""
+    if kind == 'parent':
+        if 'SetParent' not in line and 'SetParent' not in code:
+            return "声明 @owner: parent 但全文找不到 SetParent"
+        return None
+    if kind == 'field':
+        name = arg.strip()
+        if not name:
+            return "@owner: field 需要写明字段名，如 // @owner: field(_root)"
+        if not re.search(re.escape(name) + r'\s*=', code):
+            return "声明 @owner: field(%s) 但全文没有给 %s 赋值" % (name, name)
+        if not re.search(r'\bDestroy\s*\(\s*[^)]*\b' + re.escape(name.lstrip('_')), code):
+            return "声明 @owner: field(%s) 但全文找不到销毁 %s 的地方" % (name, name)
+        return None
+    if kind == 'registry':
+        name = arg.strip()
+        if not name:
+            return "@owner: registry 需要写明登记表名，如 // @owner: registry(_alive)"
+        if not re.search(r'\b' + re.escape(name) + r'\b', code):
+            return "声明 @owner: registry(%s) 但全文没有这个登记表" % name
+        if not TEARDOWN_METHOD.search(code):
+            return "声明 @owner: registry(%s) 但没有 DestroyAll/ResetAll 之类的清理方法" % name
+        return None
+    if kind == 'app':
+        # 应用级单体的三种形态：自己写 Instance = / 继承 MonoSingleton<T>（Instance 在基类）/
+        # 处于 #if FISHNET_ENABLED 段内的联机服务对象（随 NetSession 拆装，由联机冒烟覆盖）。
+        if APP_LIFETIME.search(code) or 'MonoSingleton<' in code or in_fishnet \
+                or 'DontDestroyOnLoad' in (raw or ""):
+            return None
+        return ("声明 @owner: app 但全文既没有 `Instance =`、也没有 MonoSingleton<T>、"
+                "没有 DontDestroyOnLoad、也不在联机条件编译段")
+    if kind == 'stage':
+        # 幂等装配：只在"缺失时"建一次，全程存活、不随世界拆装（相机 / EventSystem / 大厅）。
+        # 验证方式即它的定义本身：所在方法是 Ensure*/Setup*/Prepare*/Open*，
+        # 或方法体内创建之前有 == null / != null 守卫。
+        if method and re.match(r'(Ensure|Setup|Prepare|Open)', method):
+            return None
+        if re.search(r'(?:==|!=)\s*null', body):
+            return None
+        return "声明 @owner: stage 但所在方法既不是 Ensure*/Setup*/Prepare*/Open*，方法体内也没有 null 守卫"
+    return "未知的 @owner 类型 '%s'（可用：parent / field(名) / registry(名) / app）" % kind
+
+
+def check_orphan_gameobjects():
+    """
+    运行时创建的对象必须有明确的回收路径。
+
+    刻意只检查运行时脚本（_Project/Scripts，排除 Dev/）：
+      - Dev/ 下是实测探针，它们自己负责收尾，且形态与生产代码差异很大；
+      - Assets/Editor 下是构建脚本，不参与运行时生命周期。
+    """
+    creation = re.compile(r'\bnew\s+GameObject\s*\(')
+    instantiate = re.compile(r'(?<![\w.])Instantiate\s*\(')
+    # 赋值目标：`var go = ...` / `_root = ...` / `w.visual = ...`；`==` 不算。
+    assign = re.compile(r'(\w+)\s*=(?!=)[^=]*?$')
+
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)            # 未去注释的原文：DontDestroyOnLoad 常写在注释里说明生命周期
+        code = strip_noise(raw)
+        lines = code.split('\n')
+        spans = method_spans(lines)
+        net_ranges = fishnet_ranges(lines)
+        own_types = _own_types(code)
+        raw_lines = raw.split('\n')
+
+        for i, ln in enumerate(lines):
+            if not (creation.search(ln) or instantiate.search(ln)):
+                continue
+            body, method = _body_for(lines, spans, i)
+            in_fishnet = in_ranges(i, net_ranges)
+
+            # 赋值目标：取 creation 之前、最近的那个 `x =`
+            target = None
+            head = ln.split('new GameObject(')[0].split('Instantiate(')[0]
+            m = assign.search(head.rstrip())
+            if m and not m.group(1) in ('var', 'GameObject', 'Object', 'UnityEngine'):
+                target = m.group(1)
+
+            ok, why = _classify(body, code, target, ln, own_types, method, code)
+            kind, arg = _owner_of(raw_lines, i)
+            if kind:
+                bad = _verify_owner(kind, arg, code, ln, in_fishnet, method, body, raw)
+                if bad:
+                    err("归属声明无效: %s 第 %d 行 —— %s" % (rp, i + 1, bad))
+                else:
+                    info("归属声明: %s 第 %d 行 @owner: %s%s（人工确认）"
+                         % (rp, i + 1, kind, "(%s)" % arg if arg else ""))
+                continue
+            if ok:
+                continue
+            if why:
+                err("归属无效: %s 第 %d 行 —— %s\n      %s"
+                    % (rp, i + 1, ln.strip()[:90], why))
+                continue
+            err("新建对象无归属: %s 第 %d 行 —— %s\n"
+                "      该对象既没有 SetParent、也没有进任何登记表、也不属于会被销毁的字段；\n"
+                "      拆世界时没人回收它，会永远堆在场景根节点上（M24/M26/M27 连续三轮的真实缺陷）。\n"
+                "      修法三选一：挂到管理器 transform 下 / 登记进带 DestroyAll 的表 / 写 // @owner: <kind>。"
+                % (rp, i + 1, ln.strip()[:90]))
+
+
+# ── 自检：证明"归属判据真的会红" ──────────────────────────────
+# 静态检查最容易出现的失败是"永远不报错"——第 7 项若写成摆设，工程照样一片绿，
+# 而 M24/M26/M27 那三处缺陷会继续静静地堆在场景里。
+# 所以这里用一组最小夹具反向验证：该红的必须红、不该红的必须不红。
+SELFTEST = [
+    ("01_场景根孤儿", True, """
+namespace A
+{
+    public class Fx
+    {
+        public static void Spawn()
+        {
+            var go = new GameObject("Ring");
+            go.AddComponent<Fx>();
+        }
+    }
+}
+"""),
+    ("02_挂了父物体", False, """
+namespace A
+{
+    public class Fx
+    {
+        public void Build()
+        {
+            var go = new GameObject("Canvas");
+            go.transform.SetParent(transform, false);
+        }
+    }
+}
+"""),
+    ("03_进了登记表且有清理", False, """
+namespace A
+{
+    public class Fx
+    {
+        private readonly List<GameObject> _alive = new List<GameObject>();
+        public static void Spawn()
+        {
+            var go = new GameObject("Ring");
+            _alive.Add(go);
+        }
+        public static void DestroyAll()
+        {
+            foreach (var g in _alive) Object.Destroy(g);
+            _alive.Clear();
+        }
+    }
+}
+"""),
+    ("04_进了登记表却没人清", True, """
+namespace A
+{
+    public class Fx
+    {
+        private readonly List<GameObject> _alive = new List<GameObject>();
+        public static void Spawn()
+        {
+            var go = new GameObject("Ring");
+            _alive.Add(go);
+        }
+    }
+}
+"""),
+    ("05_应用级单体宿主", False, """
+namespace A
+{
+    public class Svc : Core.MonoSingleton<Svc>
+    {
+        public static void Ensure()
+        {
+            new GameObject("Svc").AddComponent<Svc>();
+        }
+    }
+}
+"""),
+    ("06_字段持有且OnDestroy清理", False, """
+namespace A
+{
+    public class Fx
+    {
+        private GameObject _root;
+        private void BuildUI()
+        {
+            _root = new GameObject("Banner");
+        }
+        void OnDestroy()
+        {
+            if (_root != null) Destroy(_root);
+        }
+    }
+}
+"""),
+    ("07_只靠计时自毁", True, """
+namespace A
+{
+    public class Fx
+    {
+        private float _life;
+        public static void Spawn()
+        {
+            var go = new GameObject("Flash");
+            go.AddComponent<Fx>();
+        }
+        void Update()
+        {
+            _life -= Time.deltaTime;
+            if (_life <= 0f) { Destroy(gameObject); return; }
+        }
+    }
+}
+"""),
+    ("08_注解撒谎", True, """
+namespace A
+{
+    public class Fx
+    {
+        private GameObject _root;
+        private void BuildUI()
+        {
+            _root = new GameObject("Banner");   // @owner: field(_ghost)
+        }
+    }
+}
+"""),
+    ("09_幂等装配声明", False, """
+namespace A
+{
+    public class Stage
+    {
+        private static void SetupCamera()
+        {
+            var camGo = new GameObject("MainCamera");   // @owner: stage
+            camGo.AddComponent<Camera>();
+        }
+    }
+}
+"""),
+    ("10_工厂方法由调用方Track", False, """
+namespace A
+{
+    public class Builder
+    {
+        private static GameObject MakeTemplate()
+        {
+            var go = new GameObject("EnemyTemplate");
+            go.AddComponent<BoxCollider2D>();
+            return go;
+        }
+        private static void Build()
+        {
+            var t = Track(MakeTemplate());
+        }
+    }
+}
+"""),
+]
+
+
+def selftest():
+    """把夹具写进临时目录跑一遍归属检查，逐个核对"该红/不该红"。"""
+    import shutil
+    import tempfile
+
+    global ASSETS_DIR
+    tmp = tempfile.mkdtemp(prefix="starpixel-audit-selftest-")
+    saved, saved_errors, saved_infos = ASSETS_DIR, errors[:], infos[:]
+    try:
+        for name, _expect, code in SELFTEST:
+            with open(os.path.join(tmp, name + ".cs"), "w", encoding="utf-8") as f:
+                f.write(code.lstrip("\n"))
+        ASSETS_DIR = tmp
+        errors.clear()
+        infos.clear()
+        check_orphan_gameobjects()
+        flagged = {name for name, _e, _c in SELFTEST
+                   if any(name in e for e in errors)}
+    finally:
+        ASSETS_DIR = saved
+        errors[:], infos[:] = saved_errors, saved_infos
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    bad = [(n, e) for n, e, _c in SELFTEST if (n in flagged) != e]
+    print("=" * 68)
+    print("归属检查自检（%d 个夹具）" % len(SELFTEST))
+    print("=" * 68)
+    for name, expect, _c in SELFTEST:
+        got = name in flagged
+        mark = "  OK" if got == expect else "FAIL"
+        print("  [%s] %-26s 期望%s 实际%s"
+              % (mark, name, "报错" if expect else "放行", "报错" if got else "放行"))
+    print("-" * 68)
+    print("结果：" + ("通过" if not bad else "未通过（%d 项不符）" % len(bad)))
+    return 1 if bad else 0
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("--selftest", "-t"):
+        return selftest()
+
     if not os.path.isdir(SCRIPTS_DIR):
         print("找不到脚本目录: %s" % SCRIPTS_DIR)
         return 1
@@ -477,6 +964,7 @@ def main():
     check_resources()
     check_duplicate_members()
     check_missing_usings()
+    check_orphan_gameobjects()
 
     n = len(cs_files())
     print("=" * 68)

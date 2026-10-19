@@ -80,6 +80,9 @@ namespace StarPixel
             // M27：伤害飘字对象池无头实测（新建数有上限 / 复用实例状态重置 / 爆发不丢字 / 重开无残留）
             if (HasArg("-poolProbe")) { StartPoolProbe(); return; }
 
+            // M28：新建对象归属（链闪电 / Boss / 场景根兜底）无头实测（正常启动不受影响）
+            if (HasArg("-orphanProbe")) { StartOrphanProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -89,7 +92,7 @@ namespace StarPixel
             Core.CloudSave.CloudSaveService.Ensure();   // M13 云存档（未开启/未配置时不联网）
             Core.PlaytimeGuard.Ensure();                // 青少年限时/健康提示
             // M7：背景音乐（DontDestroyOnLoad，不纳入 Track——跨菜单/对局/结算全程存活）
-            new GameObject("MusicManager").AddComponent<Core.MusicManager>();
+            new GameObject("MusicManager").AddComponent<Core.MusicManager>();   // @owner: app
             Core.Telemetry.Log(Core.Telemetry.EvAppStart,
                 "version", Core.VersionInfo.Version,
                 "net", Net.NetBackend.Instance != null ? 1 : 0,
@@ -513,9 +516,18 @@ namespace StarPixel
             StarPixel.Dev.PoolProbe.Start(ArgValue("-poolScene", "POOL"));
         }
 
+        private static void StartOrphanProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;
+            PrepareStage();
+            StarPixel.Dev.OrphanProbe.Start(ArgValue("-orphanScene", "CHAIN"));
+        }
+
         private static void OpenLobby()
         {
-            new GameObject("NetLobby").AddComponent<Net.NetLobby>();
+            new GameObject("NetLobby").AddComponent<Net.NetLobby>();   // @owner: stage
         }
 
         /// <summary>阶段准备：相机与事件系统（幂等，可重复调用）。</summary>
@@ -570,6 +582,9 @@ namespace StarPixel
             // M26：临时特效（前摇警示圈 / Nova 爆发环）同样是 new GameObject 建在场景根上的，
             // 不属于任何管理器 —— 漏掉这一行，上一局的圈会整批出现在新世界的开局画面里。
             Effects.TempEffect.DestroyAll();
+            // M28：链闪电的电弧段/闪光与警示圈是同一个形态（场景根 + 只靠计时自毁），
+            // 由 audit_project.py 第 7 项静态检查扫出来。
+            Combat.Skill.ChainBolt.DestroyAll();
 
             // 再同步清理单例引用：Object.Destroy 的销毁延迟到帧末，
             // 若不清 Instance，紧随其后的 Build() 会被「EnemyManager.Instance != null」守卫错误拦下
@@ -769,7 +784,7 @@ namespace StarPixel
             var cam = Camera.main;
             if (cam == null)
             {
-                var camGo = new GameObject("MainCamera");
+                var camGo = new GameObject("MainCamera");   // @owner: stage
                 camGo.tag = "MainCamera";
                 cam = camGo.AddComponent<Camera>();
             }
@@ -782,7 +797,7 @@ namespace StarPixel
         private static void SetupEventSystem()
         {
             if (Object.FindObjectOfType<UnityEngine.EventSystems.EventSystem>() != null) return;
-            var es = new GameObject("EventSystem");
+            var es = new GameObject("EventSystem");   // @owner: stage
             es.AddComponent<UnityEngine.EventSystems.EventSystem>();
             es.AddComponent<UnityEngine.EventSystems.StandaloneInputModule>();
         }

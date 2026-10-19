@@ -134,7 +134,7 @@ namespace StarPixel.Net
                  * 修法：先在**未激活**的物体上加组件（Awake 不会执行），
                  * 把预制体集合与传输层配好后再激活，让 Awake 能顺利通过校验。
                  * 兜底场景仍属异常配置，故同时输出明确指引。 */
-                var go = new GameObject("[NetworkManager]");
+                var go = new GameObject("[NetworkManager]");   // @owner: app
                 go.SetActive(false);
                 _nm = go.AddComponent<NetworkManager>();
                 EnsureSpawnablesPopulated(_nm);
