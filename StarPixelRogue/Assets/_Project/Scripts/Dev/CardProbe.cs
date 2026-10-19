@@ -81,10 +81,22 @@ namespace StarPixel.Dev
         private bool _btTakeOk, _btTwiceOk, _btBadIdOk, _btRangeOk, _btEvictOk, _btApplyOk;
         private int _btEvicted, _btPending;
         private string _btTook = "?";
+        private bool _btEvictEventOk;
+        private string _btEvictedIds = "?";
 
         // —— RESTORE ——
         private bool _rsQueueOk, _rsPanelClosedOk, _rsLocalOk, _rsNoErrOk;
         private int _rsPending;
+
+        // —— GATE（M38）：待确认表纯逻辑 ——
+        private bool _gtConfirmOk, _gtTwiceOk, _gtUnknownOk, _gtMismatchOk, _gtRejectOk,
+                     _gtTimeoutOk, _gtInvalidateOk;
+        private int _gtConfirmed, _gtRejected, _gtTimedOut, _gtPending;
+
+        // —— INVAL（M38）：批次作废必须能被撤销 ——
+        private bool _ivShownOk, _ivClosedOk, _ivQueueOk, _ivKeptOk, _ivOtherOk;
+        private int _ivInvalidated, _ivPending;
+        private string _ivAfter = "?";
 
         // 制造可辨识的候选组（真实 BuildOffers 的标题是本地化串，分不清是哪一组）
         private static List<UpgradeOffer> Group(string tag, List<string> applied)
@@ -163,6 +175,8 @@ namespace StarPixel.Dev
                 case "DRAIN":   body = Drain();   break;
                 case "ORDER":   body = Order();   break;
                 case "BATCH":   body = Batch();   break;
+                case "GATE":    body = Gate();    break;   // M38：纯逻辑，不搭世界
+                case "INVAL":   body = Inval();   break;   // M38：批次作废撤销
                 case "RESTORE": body = Restore(); break;
                 default:        body = Base();    break;
             }
@@ -458,6 +472,147 @@ namespace StarPixel.Dev
             _orDropOk = _orDropped == 0;
         }
 
+        // =====================================================================================
+        // GATE：待确认表纯逻辑（M38，不依赖 FishNet，单机直接测）
+        //
+        // 这里钉的是「本地镜像不许先斩后奏」：一次选择必须先记账、等房主回执、
+        // 回执对得上才许生效，且一笔只许结一次。
+        // =====================================================================================
+        private IEnumerator Gate()
+        {
+            var g = new UpgradeApplyGate();
+
+            // 1) 正常路径：提交 → 确认一次成功
+            int a1 = g.Submit(7, 1);
+            _gtConfirmOk = a1 > 0 && g.Confirm(a1, 7, 1) && g.ConfirmedCount == 1;
+            Judge(_gtConfirmOk,
+                  "正常确认没生效（ackId=" + a1 + "、确认数=" + g.ConfirmedCount + "）——"
+                  + "房主点头之后本地镜像反而没应用，玩家选了卡却什么都没得到");
+
+            // 2) 同一笔确认两次：第二次必须无效（防重放 / 防重复发放强化）
+            _gtTwiceOk = !g.Confirm(a1, 7, 1) && g.ConfirmedCount == 1;
+            Judge(_gtTwiceOk,
+                  "同一笔选择被确认了两次（确认数=" + g.ConfirmedCount + "）——"
+                  + "一条回执能刷两次强化，玩家点一次卡拿到两份");
+
+            // 3) 未知 ackId（伪造回执 / 不是自己那笔）
+            _gtUnknownOk = !g.Confirm(9999, 7, 1) && !g.Confirm(0, 0, 0);
+            Judge(_gtUnknownOk, "伪造/未知的回执竟然被接受了——回执没有归属校验，可被重放");
+
+            // 4) 回执与请求对不上（批次或 index 不符）：必须拒绝
+            //    这正是「客户端按自己记得的那组去应用」的入口，对不上就不能算数
+            int a2 = g.Submit(8, 2);
+            _gtMismatchOk = !g.Confirm(a2, 8, 0) && !g.Confirm(a2, 9, 2) && g.ConfirmedCount == 1;
+            Judge(_gtMismatchOk,
+                  "回执与请求对不上也被接受了（batch/index 不一致仍生效）——"
+                  + "客户端会拿着自己记的那一组去应用，与房主认定的不是同一张");
+
+            // 5) 被拒：一笔只算一次，且确认不许再生效
+            int a3 = g.Submit(10, 0);
+            _gtRejectOk = g.Reject(a3) && !g.Reject(a3) && !g.Confirm(a3, 10, 0)
+                          && g.RejectedCount == 1;
+            Judge(_gtRejectOk,
+                  "拒绝路径不对（拒收数=" + g.RejectedCount + "、之后还能被确认）——"
+                  + "房主拒绝了，客户端却仍有办法把它算成生效");
+
+            // 6) 房主不回：超时按被拒处理，不许永远悬着
+            var g2 = new UpgradeApplyGate();
+            int b1 = g2.Submit(11, 0, 100f);
+            int b2 = g2.Submit(12, 1, 100f);
+            int b3 = g2.Submit(13, 2, 200f);          // 这一笔还没到超时
+            int purged = g2.PurgeExpired(100f + UpgradeApplyGate.DefaultTimeout + 1f);
+            _gtTimedOut = g2.TimedOutCount;
+            _gtPending = g2.PendingCount;
+            _gtTimeoutOk = purged == 2 && b3 > 0 && g2.PendingCount == 1 && !g2.Confirm(b1, 11, 0);
+            Judge(_gtTimeoutOk,
+                  "超时清理不对（清理=" + purged + "、残余=" + g2.PendingCount + "）——"
+                  + "房主不回时选择会永远悬着，客户端既不敢应用也不敢丢弃");
+
+            _gtConfirmed = g.ConfirmedCount;
+            _gtRejected = g.RejectedCount + g2.TimedOutCount;
+
+            // 7) 批次作废：该批下面悬着的全部作废（房主淘汰了这一批）
+            var g3 = new UpgradeApplyGate();
+            g3.Submit(20, 0, 0f);
+            g3.Submit(20, 2, 0f);
+            g3.Submit(21, 1, 0f);
+            int n = g3.Invalidate(20);
+            _gtInvalidateOk = n == 2 && g3.InvalidatedCount == 2 && g3.PendingCount == 1
+                              && !g3.Confirm(1, 20, 0);
+            Judge(_gtInvalidateOk,
+                  "批次作废不对（作废=" + n + "、残余=" + g3.PendingCount + "）——"
+                  + "房主淘汰了这一批，客户端还留着它的选择等一个永远不会来的回执");
+
+            yield break;
+        }
+
+        // =====================================================================================
+        // INVAL：房主淘汰某批 → 客户端必须能把它撤掉（M38）
+        //
+        // 修之前：淘汰只记了个 EvictedCount，没有出口。玩家眼前摆着一张"点了也没用"的卡。
+        // =====================================================================================
+        private IEnumerator Inval()
+        {
+            GameBuilder.Build();
+            yield return Quiet();
+            yield return WaitReal(0.3f);
+
+            var lum = LevelUpManager.Instance;
+            if (lum == null) { Fail("读不到 LevelUpManager——INVAL 判据全部失灵"); yield break; }
+
+            lum.SetExternalCards(true);
+
+            // 第一组上屏（批次 101），后两组入队（批次 102、103）
+            lum.PresentExternal(101, Group("V1", null), _ => { });
+            yield return Quiet();
+            lum.PresentExternal(102, Group("V2", null), _ => { });
+            lum.PresentExternal(103, Group("V3", null), _ => { });
+            yield return Quiet();
+
+            _ivShownOk = lum.CurrentBatchId == 101 && ShowsGroup(lum, "V1");
+            Judge(_ivShownOk,
+                  "上屏的批次 id 不对（CurrentBatchId=" + lum.CurrentBatchId + "、应 101）——"
+                  + "没有批次游标，房主就没法告诉客户端该撤哪一张");
+
+            // 1) 作废**正在展示**的那批 → 面板必须关掉，并自动补弹队列里的下一批
+            bool hit = lum.InvalidateExternal(101);
+            yield return Until(() => lum.CurrentPanel != null && lum.ExternalInvalidated > 0);
+            yield return Quiet();
+            _ivClosedOk = hit && lum.ExternalInvalidated == 1 && lum.CurrentBatchId == 102
+                          && ShowsGroup(lum, "V2");
+            _ivAfter = PanelText(lum);
+            Judge(_ivClosedOk,
+                  "作废正在展示的那批之后面板没被正确替换（作废计数=" + lum.ExternalInvalidated
+                  + "、当前批次=" + lum.CurrentBatchId + "、面板=" + _ivAfter + "）——"
+                  + "玩家眼前会留着一张点了也没用的卡");
+
+            // 2) 作废**队列里**的那批（103）→ 只剩空队列
+            bool hit2 = lum.InvalidateExternal(103);
+            _ivPending = lum.ExternalPendingCount;
+            _ivQueueOk = hit2 && _ivPending == 0 && lum.ExternalInvalidated == 2;
+            Judge(_ivQueueOk,
+                  "作废队列里的批次没生效（残余=" + _ivPending + "、作废计数="
+                  + lum.ExternalInvalidated + "）——队列里会留下一张永远不会被选的废卡");
+
+            // 3) 作废一个不存在的批次：不许误伤、不许计数
+            _ivOtherOk = !lum.InvalidateExternal(9999) && lum.ExternalInvalidated == 2
+                         && lum.CurrentBatchId == 102;
+            Judge(_ivOtherOk,
+                  "作废不存在的批次误伤了当前面板（当前批次=" + lum.CurrentBatchId + "）——"
+                  + "撤销必须精确命中，不能把玩家正在选的卡一并干掉");
+
+            // 4) 剩下的那一张还能正常选掉（撤销没把本地路径堵死）
+            _ivKeptOk = lum.IsShowing;
+            Judge(_ivKeptOk, "撤销之后没有任何面板在展示了——撤销做过头了，把正常的卡也收走了");
+
+            lum.AutoChooseFirst();
+            yield return Until(() => lum.CurrentPanel == null);
+            _ivInvalidated = lum.ExternalInvalidated;
+            bool noDrop = lum.ExternalDropped == 0;
+            Line("零丢弃", Yn(noDrop));
+            Judge(noDrop, "全程丢弃 " + lum.ExternalDropped + " 组（应 0）");
+        }
+
         /// <summary>当前面板上写着哪一组（按 CARD_Ox# 前缀判断）。</summary>
         private static string ShownTag(LevelUpManager lum)
         {
@@ -510,6 +665,10 @@ namespace StarPixel.Dev
 
             // 上限淘汰：容量 3，连开 4 批 → 最旧那批被淘汰，其余仍在
             var b3 = new UpgradeOfferBatches(3);
+            // M38：淘汰**必须有出口**——只记 EvictedCount 是不够的，房主得能立刻
+            // 通知对端把那张卡撤掉，否则玩家眼前摆着一张点了也没用的卡（详见 INVAL）。
+            var evictedIds = new List<int>();
+            b3.OnEvicted += id => evictedIds.Add(id);
             int e1 = b3.Add(Group("E1", null));
             b3.Add(Group("E2", null));
             b3.Add(Group("E3", null));
@@ -520,6 +679,14 @@ namespace StarPixel.Dev
             Judge(_btEvictOk,
                   "上限淘汰不对：淘汰=" + _btEvicted + "（应 1）、残余=" + _btPending + "（应 3）——"
                   + "玩家长时间不选卡时未回应的批次会无限堆积，必须淘汰最旧的并计数报警");
+
+            _btEvictedIds = evictedIds.Count > 0
+                ? string.Join(",", evictedIds.ConvertAll(x => x.ToString()).ToArray()) : "-";
+            _btEvictEventOk = evictedIds.Count == 1 && evictedIds[0] == e1;
+            Judge(_btEvictEventOk,
+                  "淘汰没有出口：OnEvicted 事件没触发或带错了批次 id（实际=" + _btEvictedIds
+                  + "、应 " + e1 + "）——只把 EvictedCount 加了 1，房主没法通知对端撤卡，"
+                  + "玩家眼前会留着一张点了也没用的卡");
 
             // TryApply 必须真的执行这一批自己那张卡的 apply
             var applied2 = new List<string>();
@@ -611,7 +778,9 @@ namespace StarPixel.Dev
                        : _scene == "QUEUE" ? 4
                        : _scene == "DRAIN" ? 5
                        : _scene == "ORDER" ? 3
-                       : _scene == "BATCH" ? 6
+                       : _scene == "BATCH" ? 7
+                       : _scene == "GATE" ? 7
+                       : _scene == "INVAL" ? 6
                        : _scene == "RESTORE" ? 4 : 0;
 
             bool pass = _errors == 0 && _fail.Count == 0 && _checked == expect && _ok == expect;
@@ -664,7 +833,32 @@ namespace StarPixel.Dev
                     Line("上限淘汰", _btEvicted.ToString());
                     Line("淘汰后残余", _btPending.ToString());
                     Line("淘汰正确", Yn(_btEvictOk));
+                    Line("淘汰有出口", Yn(_btEvictEventOk));
+                    Line("淘汰事件批次", _btEvictedIds);
                     Line("应用的是本批那张", Yn(_btApplyOk));
+                    break;
+                case "GATE":
+                    Line("确认后才生效", Yn(_gtConfirmOk));
+                    Line("重复确认被拒", Yn(_gtTwiceOk));
+                    Line("伪造回执被拒", Yn(_gtUnknownOk));
+                    Line("回执对不上被拒", Yn(_gtMismatchOk));
+                    Line("拒绝路径正确", Yn(_gtRejectOk));
+                    Line("超时清理正确", Yn(_gtTimeoutOk));
+                    Line("批次作废生效", Yn(_gtInvalidateOk));
+                    Line("确认数", _gtConfirmed.ToString());
+                    Line("拒绝数", _gtRejected.ToString());
+                    Line("超时数", _gtTimedOut.ToString());
+                    Line("超时后残余", _gtPending.ToString());
+                    break;
+                case "INVAL":
+                    Line("上屏批次id正确", Yn(_ivShownOk));
+                    Line("作废展示中的批次", Yn(_ivClosedOk));
+                    Line("作废队列中的批次", Yn(_ivQueueOk));
+                    Line("不存在的批次不误伤", Yn(_ivOtherOk));
+                    Line("其余卡片仍在", Yn(_ivKeptOk));
+                    Line("作废计数", _ivInvalidated.ToString());
+                    Line("队列残余", _ivPending.ToString());
+                    Line("替换后面板", _ivAfter);
                     break;
                 case "RESTORE":
                     Line("队列残余", _rsPending.ToString());

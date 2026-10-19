@@ -51,6 +51,15 @@ namespace StarPixel.Combat
         public int IssuedCount { get; private set; }
 
         /// <summary>
+        /// M38：某批被上限淘汰时触发（参数是批次 id）。
+        ///
+        /// M37 把淘汰只做成了**计数**（EvictedCount），没有出口——房主知道这批没了，
+        /// 客户端不知道，玩家眼前还摆着那张卡，点了之后回传被拒、什么也没发生。
+        /// 有这个回调，房主才能在淘汰的同一时刻通知对端把那张卡撤掉（M38 实测缺陷）。
+        /// </summary>
+        public event System.Action<int> OnEvicted;
+
+        /// <summary>
         /// 登记一批候选并分配批次 id。
         /// </summary>
         /// <returns>批次 id（>=1）；候选为空时返回 0（调用方应据此跳过推卡，别发空面板）。</returns>
@@ -70,7 +79,12 @@ namespace StarPixel.Combat
             {
                 int oldest = _order[0];
                 _order.RemoveAt(0);
-                if (_batches.Remove(oldest)) EvictedCount++;
+                if (_batches.Remove(oldest))
+                {
+                    EvictedCount++;
+                    var h = OnEvicted;                 // M38：淘汰必须能被对端感知（详见事件注释）
+                    if (h != null) h.Invoke(oldest);
+                }
             }
             return id;
         }
@@ -105,8 +119,21 @@ namespace StarPixel.Combat
         public bool TryApply(int batchId, int index)
         {
             UpgradeOffer o;
-            if (!TryTake(batchId, index, out o)) return false;
-            if (o.apply != null) o.apply.Invoke();
+            return TryApply(batchId, index, out o);
+        }
+
+        /// <summary>
+        /// 同上，并把**房主认定的那一张**带回来（M38）。
+        ///
+        /// 客户端本地镜像要应用的是**房主认定的这张**，不是"客户端自己记的那一组第 index 张"——
+        /// 后者正是先斩后奏的根源：客户端按自己记得的组去应用，房主按自己的表去应用，
+        /// 两边一旦对不上，客户端就是自说自话。由房主回传 kind，本地镜像才没有第二种可能。
+        /// </summary>
+        public bool TryApply(int batchId, int index, out UpgradeOffer offer)
+        {
+            offer = default(UpgradeOffer);
+            if (!TryTake(batchId, index, out offer)) return false;
+            if (offer.apply != null) offer.apply.Invoke();
             return true;
         }
 

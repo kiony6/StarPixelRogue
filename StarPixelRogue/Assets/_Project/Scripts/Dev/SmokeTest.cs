@@ -43,6 +43,21 @@ namespace StarPixel.Dev
         private int _extDropped;
         private int _extPending;
         private int _hostOffered;    // 房主侧：为远程玩家推过几批（对端自述的对照）
+
+        /// <summary>
+        /// M38：本地镜像 vs 房主权威。两边必须**逐次相等**——不相等就是双端分叉：
+        /// 客户端自己先加了成、房主没加（或反过来），而这类分叉不报错、不崩，
+        /// 表现出来只是"客户端好像跑得快一点"。
+        /// </summary>
+        private int _hostApplied;    // 房主权威应用成功次数
+        private int _hostRejected;   // 房主拒绝次数
+        private int _localApplied;   // 客户端本地镜像真正应用次数（只在收到确认后）
+        private int _ackPending;     // 还悬着没等到回执的
+        private int _ackRejected;    // 被房主拒的
+        private int _ackInvalidated; // 因批次被淘汰而作废的
+        private int _ackTimedOut;    // 等回执等到超时的
+        private int _localApplyTotal;// 本机**实际**应用过几次（含未在确认路径上的应用）
+        private int _extInvalidated; // 面板侧收到作废通知的次数
         private int _hostEvicted;    // 房主侧：被上限淘汰的批次
 
         /// <summary>
@@ -319,7 +334,24 @@ namespace StarPixel.Dev
                     if (p == null) return;
                     _hostOffered += p.CardsOffered;
                     _hostEvicted += p.CardsEvicted;
+                    // M38：房主权威应用/拒绝——与客户端自述的「本地已应用」对账
+                    _hostApplied += p.CardsApplied;
+                    _hostRejected += p.CardsRejected;
                 });
+                // M38：客户端自述。同样必须**同刻**采——收尾瞬时采时房主的玩家对象
+                // 可能已随对端退出而被回收，两侧又对不上了（M36/M37 已经栽过两次）。
+                var self = StarPixel.Net.NetPlayer.Local;
+                if (self != null)
+                {
+                    _localApplied = self.LocalAppliedCount;
+                    // 这一条是**实际**应用次数（ApplyKind/ApplyStat 全算，含闭包路径）。
+                    // 只有把它和上面的"确认次数"分开统计，才抓得住"确认之外又加了一次"的先斩后奏。
+                    _localApplyTotal = StarPixel.Combat.UpgradeCatalog.ApplyCount;
+                    _ackPending = self.AckPendingCount;
+                    _ackRejected = self.AckRejectedCount;
+                    _ackInvalidated = self.AckInvalidatedCount;
+                    _ackTimedOut = self.AckTimedOutCount;
+                }
             }
 
             // M14：观战者是否仍持有一个属于自己的（IsOwner）玩家对象。
@@ -467,6 +499,7 @@ namespace StarPixel.Dev
                 _extQueued = lum.ExternalQueued;
                 _extDropped = lum.ExternalDropped;
                 _extPending = lum.ExternalPendingCount;
+                _extInvalidated = lum.ExternalInvalidated;
             }
             // 上面已在收尾前 1 秒采过；这里只补一次（那次没采到时至少不是空的）
             if (!_endSampled)
@@ -475,6 +508,8 @@ namespace StarPixel.Dev
                     if (p == null) return;
                     _hostOffered += p.CardsOffered;
                     _hostEvicted += p.CardsEvicted;
+                    _hostApplied += p.CardsApplied;
+                    _hostRejected += p.CardsRejected;
                 });
 #endif
 
@@ -514,6 +549,16 @@ namespace StarPixel.Dev
                 Debug.Log("[SMOKE] 队列残余    " + _extPending);
                 Debug.Log("[SMOKE] 房主推卡批次  " + _hostOffered);
                 Debug.Log("[SMOKE] 批次淘汰    " + _hostEvicted);
+                Debug.Log("[SMOKE] 面板作废    " + _extInvalidated);
+                // M38：双端对账——本地镜像已应用 vs 房主权威已应用，必须相等
+                Debug.Log("[SMOKE] 房主已应用  " + _hostApplied);
+                Debug.Log("[SMOKE] 本地已应用  " + _localApplied);
+                Debug.Log("[SMOKE] 本地强化次数  " + _localApplyTotal);
+                Debug.Log("[SMOKE] 房主已拒绝  " + _hostRejected);
+                Debug.Log("[SMOKE] 本地被拒    " + _ackRejected);
+                Debug.Log("[SMOKE] 本地作废    " + _ackInvalidated);
+                Debug.Log("[SMOKE] 待确认残留  " + _ackPending);
+                Debug.Log("[SMOKE] 回执超时    " + _ackTimedOut);
             }
             Debug.Log("[SMOKE] 会话角色    " + (_spectator ? "观战"
                 : StarPixel.Net.NetSession.IsHost ? "房主"

@@ -33,9 +33,14 @@ namespace StarPixel.UI
 
         private struct PendingExternal
         {
+            /// <summary>M38：房主给这一批的批次 id——房主淘汰某批时要能按 id 把它撤掉。</summary>
+            public int batchId;
             public List<UpgradeOffer> offers;
             public System.Action<int> onChosen;
         }
+
+        /// <summary>M38：当前正在展示的那一批的批次 id（0 = 无）。作废通知按它比对。</summary>
+        private int _currentBatchId;
 
         // —— M37 计数：全部只增不减，供 CardProbe / SmokeTest 断言「一次都不许丢」——
         /// <summary>收到的外部推卡次数（空候选不计）。</summary>
@@ -48,6 +53,10 @@ namespace StarPixel.UI
         public int ExternalDropped { get; private set; }
         /// <summary>当前队列里还压着几批。</summary>
         public int ExternalPendingCount { get { return _pendingExternal.Count; } }
+        /// <summary>M38：被房主通知作废的批次数（>0 说明玩家长时间不选卡，或回传链路断了）。</summary>
+        public int ExternalInvalidated { get; private set; }
+        /// <summary>M38：当前正在展示的批次 id（0 = 没在展示）。</summary>
+        public int CurrentBatchId { get { return _active ? _currentBatchId : 0; } }
         /// <summary>面板是否正在展示（供探针判定"是否在选卡态"，不许再靠 timeScale 推断）。</summary>
         public bool IsShowing { get { return _active; } }
         /// <summary>当前面板（供探针读取**真实上屏文本**，而不是内部列表——M35 的教训）。</summary>
@@ -86,6 +95,7 @@ namespace StarPixel.UI
             // M37：拆世界时队列里未弹的卡必须一起清掉——留着会让下一局
             // 收到第一张推卡时被旧批次插队（玩家拿到的是上一局的卡）
             _pendingExternal.Clear();
+            _currentBatchId = 0;                  // M38：批次游标跟着队列一起清
             // M4.5：断线拆世界时防止时间缩放卡在 0（选卡面板打开中被销毁）
             if (Core.HitstopManager.Instance != null) Core.HitstopManager.Instance.SetPaused(false);
             else Time.timeScale = 1f;
@@ -127,6 +137,18 @@ namespace StarPixel.UI
         /// </summary>
         public void PresentExternal(List<UpgradeOffer> offers, System.Action<int> onChosen)
         {
+            PresentExternal(0, offers, onChosen);
+        }
+
+        /// <summary>
+        /// 外部供选入口（联机模式），带<b>批次 id</b>。
+        ///
+        /// M38：批次 id 不是记账用的，是**撤销**用的——房主那边的批次表有上限，
+        /// 玩家长时间不选卡时最旧的一批会被淘汰。没有 id，房主就没法告诉客户端
+        /// "你眼前那张卡已经作废了"，玩家点了之后什么也不会发生（M38 实测缺陷）。
+        /// </summary>
+        public void PresentExternal(int batchId, List<UpgradeOffer> offers, System.Action<int> onChosen)
+        {
             if (offers == null || offers.Count == 0) return;
             ExternalReceived++;
 
@@ -141,12 +163,70 @@ namespace StarPixel.UI
                     ExternalDropped++;
                     _pendingExternal.RemoveAt(0);
                 }
-                _pendingExternal.Add(new PendingExternal { offers = offers, onChosen = onChosen });
+                _pendingExternal.Add(new PendingExternal
+                {
+                    batchId = batchId,
+                    offers = offers,
+                    onChosen = onChosen
+                });
                 ExternalQueued++;
                 return;
             }
+            _currentBatchId = batchId;
             ShowPanel(offers, onChosen, false);   // 联机下不暂停（避免冻结网络心跳）
             ExternalPresented++;
+        }
+
+        /// <summary>
+        /// M38：房主通知某一批作废——把队列里的它撤掉；若正在展示的就是它，直接关面板。
+        ///
+        /// 不作废的后果：那张卡还摆在玩家眼前，玩家点了，客户端把选择发上去，
+        /// 房主查不到这一批、拒绝，什么也没发生——玩家看到的是"点了没反应"。
+        /// 撤掉至少让界面和事实一致。
+        /// </summary>
+        /// <returns>是否真的撤到了（false = 已经选掉或早已不在）。</returns>
+        public bool InvalidateExternal(int batchId)
+        {
+            if (batchId <= 0) return false;
+
+            if (_active && _currentBatchId == batchId)
+            {
+                ExternalInvalidated++;
+                CloseShownPanelWithoutChoosing();
+                return true;
+            }
+
+            for (int i = 0; i < _pendingExternal.Count; i++)
+            {
+                if (_pendingExternal[i].batchId != batchId) continue;
+                _pendingExternal.RemoveAt(i);
+                ExternalInvalidated++;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// M38：关掉当前面板但**不算作选择**（不触发 onChosen）。
+        /// 与 <see cref="Choose"/> 的区别只在这里：作废不是"玩家选了"，不能走回调。
+        /// </summary>
+        private void CloseShownPanelWithoutChoosing()
+        {
+            var panel = transform.Find("LevelUpCanvas");
+            if (panel != null) Destroy(panel.gameObject);
+            _active = false;
+            _chooser = null;
+            _currentBatchId = 0;
+
+            // 后面还压着别的批次就继续弹——玩家还有别的卡要选
+            if (_pendingExternal.Count > 0)
+            {
+                var next = _pendingExternal[0];
+                _pendingExternal.RemoveAt(0);
+                _active = true;
+                _currentBatchId = next.batchId;
+                StartCoroutine(PresentQueuedExternal(next.batchId, next.offers, next.onChosen));
+            }
         }
 
         /// <summary>
@@ -154,13 +234,15 @@ namespace StarPixel.UI
         /// 必须**延后**到帧末之后：Destroy(panel) 到帧末才真正生效，立刻新建的话
         /// transform.Find("LevelUpCanvas") 会先找到刚被标记销毁的那一块。
         /// </summary>
-        private System.Collections.IEnumerator PresentQueuedExternal(List<UpgradeOffer> offers,
+        private System.Collections.IEnumerator PresentQueuedExternal(int batchId,
+                                                                     List<UpgradeOffer> offers,
                                                                      System.Action<int> onChosen)
         {
             yield return null;
             yield return null;
             if (this == null) yield break;        // 期间可能被拆世界
             _chooser = onChosen;
+            _currentBatchId = batchId;            // M38：补弹的这一批也要能被撤销
             BuildPanel(offers);
             ExternalPresented++;
         }
@@ -265,6 +347,7 @@ namespace StarPixel.UI
             Destroy(panel);
             _active = false;
             _chooser = null;
+            _currentBatchId = 0;                  // M38：这一批已经选掉，别再被作废通知误伤
             _pending = Mathf.Max(0, _pending - 1);
 
             // M37：先消化外部队列（联机客户端的全部选卡都从这里来），再回到本地待弹计数。
@@ -274,7 +357,8 @@ namespace StarPixel.UI
                 var next = _pendingExternal[0];
                 _pendingExternal.RemoveAt(0);
                 _active = true;
-                StartCoroutine(PresentQueuedExternal(next.offers, next.onChosen));
+                _currentBatchId = next.batchId;
+                StartCoroutine(PresentQueuedExternal(next.batchId, next.offers, next.onChosen));
                 return;
             }
 

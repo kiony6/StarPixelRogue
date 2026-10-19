@@ -370,6 +370,15 @@ def main():
         ("推卡丢弃", host_data.get("推卡丢弃", "?"), client_data.get("推卡丢弃", "?")),
         ("批次淘汰", host_data.get("批次淘汰", "?"), client_data.get("批次淘汰", "?")),
         ("升级选卡", host_data.get("升级选卡", "?"), client_data.get("升级选卡", "?")),
+        # M38：双端对账。**房主权威应用**在房主侧采、**本地镜像应用**在客户端侧采——
+        # 两边必须一致：客户端多一次就是"自己先加了成"，房主多一次就是回执丢了。
+        ("房主已应用", host_data.get("房主已应用", "?"), "-"),
+        ("本地已应用", "-", client_data.get("本地已应用", "?")),
+        ("本地强化次数", "-", client_data.get("本地强化次数", "?")),
+        ("房主已拒绝", host_data.get("房主已拒绝", "?"), "-"),
+        ("本地被拒", "-", client_data.get("本地被拒", "?")),
+        ("待确认残留", "-", client_data.get("待确认残留", "?")),
+        ("面板作废", host_data.get("面板作废", "?"), client_data.get("面板作废", "?")),
         ("遇到Boss", host_data.get("遇到Boss", "?"), client_data.get("遇到Boss", "?")),
         ("运行时长", host_data.get("时长", "?"), client_data.get("时长", "?")),
     ]
@@ -555,6 +564,50 @@ def main():
         problems.append(
             "M37：客户端上屏了 %d 组卡却只完成 %d 次选卡——面板弹出后没人/没法选，"
             "游戏会卡在选卡界面里" % (c_pres, c_picked))
+
+    # —— M38 双端对账：本地镜像必须与房主权威逐次相等 ——
+    # 这是「先斩后奏」唯一的直接证据：修复前客户端在面板回调里**无条件**先把本地权威数据
+    # （移速 / 磁吸范围 / 生命上限）加上，房主那边一旦拒绝（批次淘汰 / 越界 / 重放），
+    # 客户端就比房主多一次强化，而没有任何日志——表现出来只是"客户端好像跑得快一点"。
+    #
+    # 为什么用不等式而不是判相等：两侧都在**收尾前 1 秒**各采各的，允许有一个回执还在路上。
+    # 在途的那笔在客户端侧是"待确认残留"，所以上界要把它算进去——这样既不漏判也不假红。
+    h_applied = as_int(host_data, "房主已应用", -1)
+    c_local = as_int(client_data, "本地已应用", -1)
+    c_pending = as_int(client_data, "待确认残留", -1)
+    h_rejected = as_int(host_data, "房主已拒绝", -1)
+    c_rejected = as_int(client_data, "本地被拒", -1)
+
+    if aligned and h_applied >= 0 and c_local >= 0:
+        # 最硬的一条：本机**每一次**应用都必须来自一次确认。
+        # 只比"确认数 vs 房主应用数"抓不到先斩后奏——那种写法是在确认之外又加了一次，
+        # 确认计数照样对得上，只有"实际应用次数"多出来的那几个才无处可藏。
+        c_apply_total = as_int(client_data, "本地强化次数", -1)
+        if c_apply_total >= 0 and c_local >= 0 and c_apply_total > c_local:
+            problems.append(
+                "M38：本机实际应用了 %d 次强化，其中只有 %d 次来自房主确认——"
+                "多出的 %d 次是客户端自己加给自己的（先斩后奏），双端权威数据已分叉。"
+                "这类分叉不报错、不崩，表现出来只是「客户端好像跑得快一点」"
+                % (c_apply_total, c_local, c_apply_total - c_local))
+        if c_local > h_applied:
+            problems.append(
+                "M38：客户端本地应用了 %d 次强化，房主只权威应用了 %d 次——"
+                "客户端把强化先加给了自己（先斩后奏），双端权威数据已经分叉。"
+                "修复前就是这么静默发生的：房主拒绝得越干净，客户端比房主多越多"
+                % (c_local, h_applied))
+        slack = max(0, c_pending) if c_pending >= 0 else 1
+        if h_applied > c_local + slack:
+            problems.append(
+                "M38：房主权威应用了 %d 次，客户端只应用了 %d 次（在途 %d）——"
+                "确认回执在链路上丢了，玩家选了卡却没拿到强化" % (h_applied, c_local, c_pending))
+        if c_pending > 2:
+            problems.append(
+                "M38：收尾时客户端还压着 %d 笔选择没等到回执——房主不回或回执丢了，"
+                "这些选择既没生效也没被拒" % c_pending)
+        if c_rejected > h_rejected:
+            problems.append(
+                "M38：客户端自述被拒 %d 次，房主只拒绝过 %d 次——有选择被客户端单方面判死"
+                % (c_rejected, h_rejected))
 
     # —— M11 断线重连专项判定 ——
     # 三层证据缺一不可：客户端自述重连成功 + 进度没回退 + 房主侧真的观测到「2→1→2」。

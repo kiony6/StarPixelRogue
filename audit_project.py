@@ -2649,6 +2649,175 @@ SELFTEST_LEGAL = [
 ]
 
 
+# 第 16 项夹具：本地镜像不许先斩后奏（M38）
+# 全都是源码文本——本项查的正是"两处都对、放一起就分叉"那种编译得过跑得也过的写法。
+SELFTEST_LA = [
+    # M38 修掉的那处原样：请求发出去（可能被拒），紧接着无条件把强化加给本地
+    ("la01_先斩后奏", True, """
+namespace A
+{
+    public class NetPlayer : NetworkBehaviour
+    {
+        private void ShowCardsTargetRpc(NetworkConnection conn, int batchId, int[] kinds)
+        {
+            LevelUpManager.Instance.PresentExternal(offers, index =>
+            {
+                RequestChooseUpgradeServerRpc(batchId, index);
+                UpgradeCatalog.ApplyKind(kinds[index], _ctrl);
+            });
+        }
+
+        [ServerRpc]
+        private void RequestChooseUpgradeServerRpc(int batchId, int index)
+        {
+            if (!IsServerInitialized) return;
+            _offerBatches.TryApply(batchId, index);
+        }
+    }
+}
+"""),
+    # 修好之后：先拿 ackId 记账，等房主确认（早退守卫式）才应用
+    ("la02_确认后才应用", False, """
+namespace A
+{
+    public class NetPlayer : NetworkBehaviour
+    {
+        [TargetRpc]
+        private void ConfirmUpgradeTargetRpc(NetworkConnection conn, int ackId, int kind)
+        {
+            if (!_applyGate.Confirm(ackId)) return;
+            UpgradeCatalog.ApplyKind(kind, _ctrl);
+        }
+
+        [ServerRpc]
+        private void RequestChooseUpgradeServerRpc(int ackId, int batchId, int index)
+        {
+            if (!IsServerInitialized) return;
+            _offerBatches.TryApply(batchId, index);
+        }
+    }
+}
+"""),
+    # 按**方法**配对：确认写在别的方法里不算——那个方法管不到这一处
+    ("la03_确认在别的方法里", True, """
+namespace A
+{
+    public class NetPlayer : NetworkBehaviour
+    {
+        private void ApplyMirror(int kind)
+        {
+            UpgradeCatalog.ApplyKind(kind, _ctrl);
+        }
+
+        [TargetRpc]
+        private void ConfirmUpgradeTargetRpc(NetworkConnection conn, int ackId)
+        {
+            if (!_applyGate.Confirm(ackId)) return;
+        }
+
+        [ServerRpc]
+        private void RequestChooseUpgradeServerRpc(int ackId, int index)
+        {
+            if (!IsServerInitialized) return;
+        }
+    }
+}
+"""),
+    # 没有 RPC 的纯单机文件：本地就是权威，无条件应用是对的
+    ("la04_单机本地权威放行", False, """
+namespace A
+{
+    public class LocalUpgrades
+    {
+        public void Pick(int kind, PlayerController p)
+        {
+            UpgradeCatalog.ApplyKind(kind, p);
+        }
+    }
+}
+"""),
+    # 显式豁免且理由非空
+    ("la05_豁免有理由", False, """
+namespace A
+{
+    public class NetPlayer : NetworkBehaviour
+    {
+        [TargetRpc]
+        private void SyncTargetRpc(NetworkConnection conn, int kind)
+        {
+            // @nolocalapplyguard: 房主重放进度快照，本身就是权威数据，无需再确认
+            UpgradeCatalog.ApplyKind(kind, _ctrl);
+        }
+
+        [ServerRpc]
+        private void PingServerRpc() { }
+    }
+}
+"""),
+    # 豁免但没写理由：空理由无效，照报
+    ("la06_豁免无理由", True, """
+namespace A
+{
+    public class NetPlayer : NetworkBehaviour
+    {
+        [TargetRpc]
+        private void SyncTargetRpc(NetworkConnection conn, int kind)
+        {
+            // @nolocalapplyguard:
+            UpgradeCatalog.ApplyKind(kind, _ctrl);
+        }
+
+        [ServerRpc]
+        private void PingServerRpc() { }
+    }
+}
+"""),
+    # 顺序反了：先应用再确认——确认发生在应用之后，等于没确认
+    ("la07_确认写在应用之后", True, """
+namespace A
+{
+    public class NetPlayer : NetworkBehaviour
+    {
+        [TargetRpc]
+        private void ConfirmUpgradeTargetRpc(NetworkConnection conn, int ackId, int kind)
+        {
+            UpgradeCatalog.ApplyKind(kind, _ctrl);
+            if (!_applyGate.Confirm(ackId)) return;
+        }
+
+        [ServerRpc]
+        private void RequestChooseUpgradeServerRpc(int ackId, int index)
+        {
+            if (!IsServerInitialized) return;
+        }
+    }
+}
+"""),
+    # 另一种正确写法：确认写在 if 块里、应用也在块内
+    ("la08_块内确认后应用", False, """
+namespace A
+{
+    public class NetPlayer : NetworkBehaviour
+    {
+        [TargetRpc]
+        private void ConfirmUpgradeTargetRpc(NetworkConnection conn, int ackId, int kind)
+        {
+            if (_applyGate.Confirm(ackId))
+            {
+                UpgradeCatalog.ApplyKind(kind, _ctrl);
+            }
+        }
+
+        [ServerRpc]
+        private void RequestChooseUpgradeServerRpc(int ackId, int index)
+        {
+            if (!IsServerInitialized) return;
+        }
+    }
+}
+"""),
+]
+
 # 第 15 项夹具：推卡批次一致性（M37）
 # 正例/反例都只造源码文本——本项查的正是"多次推入 vs 一份状态"这种
 # 编译得过、跑起来也对、只有并排比对才看得出的写法。
@@ -2790,6 +2959,96 @@ namespace A
 ]
 
 
+# ============================================================================
+# 第 16 项：本地镜像不许先斩后奏（M38）
+# ============================================================================
+# M37 把房主侧改成了"取不到就拒绝"，并把它当成安全网。这话只对了一半——
+# 客户端那半边当时是**先斩后奏**的：面板回调里先把本地权威数据加上，再发 RPC 请房主应用。
+# 于是房主每拒绝一次，客户端就比房主多一次强化，而且没有任何日志、任何计数。
+# 安全网被另一半的写法抵消掉了：越严格，双端分叉越多。
+#
+# 判据：联机相关文件（含 [ServerRpc]/[TargetRpc]）里，本地应用强化
+# （ApplyKind / ApplyStat）之前，同一方法体内必须先有"确认"语义的校验。
+# 只看调用点是不够的——"确认"必须发生在"应用"**之前**（夹具 la07 就是顺序反了）。
+
+# 本地应用强化：`UpgradeCatalog.ApplyKind(...)`，也可能直接写 `ApplyStat(...)`
+LOCAL_APPLY_RE = re.compile(r'(?:UpgradeCatalog\s*\.\s*)?Apply(?:Kind|Stat)\s*\(')
+# 确认语义：必须真的是"房主点过头"（Confirm / ackId），**不含**记账动作。
+# 初版把 applygate 与裸 `ack` 也算进去，于是 `int ack = _applyGate.Submit(...)` 这种
+# **只是记了一笔账**的写法也被当成守卫放行——自检里没暴露，是 M38 的 R1 注入把它打出来的：
+# 先斩后奏恰恰是"记了账、也发了请求，但不等回执就先加成了"。
+CONFIRM_GUARD_RE = re.compile(r'(?i)(confirm|ackid)')
+# 联机相关文件：有 ServerRpc 或 TargetRpc 声明的，才存在"本地镜像 vs 房主权威"的问题
+RPC_DECL_RE = re.compile(r'\[\s*(?:ServerRpc|TargetRpc)\s*\]')
+
+
+def check_local_apply_guarded():
+    """
+    本地镜像必须等房主确认后才许应用（M38）。
+
+    联机下客户端会维护一份**本地镜像**（移速 / 磁吸范围 / 生命上限这类权威数据），
+    目的是让客户端不必等一个来回就能有手感。但镜像只能是"房主已经同意"的复刻，
+    不能是"客户端自己觉得应该有"——后者就是先斩后奏：
+
+        RequestChooseUpgradeServerRpc(batchId, index);       // 可能被拒
+        UpgradeCatalog.ApplyKind(kinds[index], _ctrl);       // 无条件先加上
+
+    房主一旦拒绝（批次被淘汰 / 越界 / 重放），客户端就比房主多一次强化。
+    不报错、不崩、看字段也对，表现出来只是"客户端好像跑得快一点"。
+
+    判据：含 <c>[ServerRpc]</c>/<c>[TargetRpc]</c> 的文件里，每次本地应用强化
+    （<c>ApplyKind</c> / <c>ApplyStat</c>）**之前**，同一方法体内必须出现
+    确认语义（Confirm / ApplyGate / ackId）。按方法配对而不是按文件——
+    确认写在别的方法里不算（夹具 la03）。
+
+    可用 `// @nolocalapplyguard: 理由` 显式豁免，且**空理由无效**。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)
+        lines = strip_noise(raw).split('\n')
+        raw_lines = raw.split('\n')
+        if not any(RPC_DECL_RE.search(ln) for ln in lines):
+            continue                      # 没有 RPC 的文件不存在"双端权威"这回事
+        spans = method_spans(lines)
+
+        for i, ln in enumerate(lines):
+            if not LOCAL_APPLY_RE.search(ln):
+                continue
+            s, e = _span_of(spans, i)
+            if s is None:
+                continue
+            # 调用点**之前**的同一方法体。
+            # 必须跳过声明行（s）：方法名里常带 Confirm（ConfirmUpgradeTargetRpc），
+            # 把它算进去的话"确认写在应用之后"也能蒙混过关（自检夹具 la07 就是这么被放行的）。
+            before = "\n".join(lines[s + 1:i])
+            if CONFIRM_GUARD_RE.search(before):
+                continue
+
+            ok = False
+            for j in range(max(0, i - 3), min(len(raw_lines), i + 2)):
+                if ('@nolocalapplyguard:' in raw_lines[j]
+                        and raw_lines[j].split('@nolocalapplyguard:', 1)[1].strip()):
+                    ok = True
+                    break
+            if ok:
+                info("本地应用豁免: %s 第 %d 行（人工确认）" % (rp, i + 1))
+                continue
+
+            err("本地镜像先斩后奏: %s 第 %d 行 %s —— 方法 %s\n"
+                "      这里是**无条件**把强化加给本地（移速/磁吸范围/生命上限），"
+                "而房主那边的请求可能被拒（批次被淘汰 / 越界 / 重放）。\n"
+                "      房主一旦拒绝，客户端就比房主多一次强化，且没有日志、没有计数——\n"
+                "      表现出来只是「客户端好像跑得快一点」，是最难查的那种双端分叉。\n"
+                "      更要命的是它与 M37 的安全设计**互相抵消**：房主拒绝得越干净，分叉越多。\n"
+                "      修法：先记账拿 ackId，等房主确认（回执带它认定的 kind）之后再应用，\n"
+                "      一笔只许结一次；确属可无条件应用则写 // @nolocalapplyguard: 理由。"
+                % (rp, i + 1, ln.strip()[:70], lines[s].strip()[:60]))
+
+
 def _run_legal_fixtures(fixtures, checks=None):
     """把夹具写成 Resources/Legal 下的 txt 跑第 14 项，返回被报错的夹具名集合。"""
     import shutil
@@ -2856,6 +3115,7 @@ def selftest():
         # 第 14 项造的是 .txt 而不是 .cs，用专属驱动（前 7 项统一走 _run_fixtures）
         ("法务文本双语检查（第 14 项）", SELFTEST_LEGAL, None),
         ("推卡批次一致性检查（第 15 项）", SELFTEST_OF, [check_offer_batch_consistency]),
+        ("本地镜像确认检查（第 16 项）", SELFTEST_LA, [check_local_apply_guarded]),
     ]
 
     all_bad = 0
@@ -2904,6 +3164,7 @@ def main():
     check_language_refresh()
     check_legal_texts_localized()
     check_offer_batch_consistency()
+    check_local_apply_guarded()
 
     n = len(cs_files())
     print("=" * 68)

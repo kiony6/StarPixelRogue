@@ -55,12 +55,39 @@ namespace StarPixel.Net
         private readonly UpgradeOfferBatches _offerBatches = new UpgradeOfferBatches();
         private int _lastKnownLevel = 1;
 
+        /// <summary>
+        /// M38：客户端侧「已发起、还没等到房主回执」的选择。
+        ///
+        /// 为什么非要这张表：修复前客户端是**先斩后奏**——面板回调里先把本地权威数据
+        /// （移速 / 磁吸范围 / 生命上限）加上，再发 RPC 请房主应用。房主一旦拒绝
+        /// （批次被淘汰 / 越界 / 重放），客户端就已经比房主多一次强化，且完全静默。
+        /// M37 那张"宁可少发一次也不能发错"的安全网，每拦一次就制造一次双端分叉。
+        /// 改成先记账、等确认、确认后才应用，一笔只许结一次。
+        /// </summary>
+        private readonly UpgradeApplyGate _applyGate = new UpgradeApplyGate();
+
+        private int _cardsApplied;    // 房主侧：本玩家**权威应用**成功的次数
+        private int _cardsRejected;   // 房主侧：被拒绝的次数（批次过期/越界/重放）
+        private int _localApplied;    // 客户端侧：本地镜像**真正应用**的次数（只在确认后 +1）
+
         /// <summary>M37：房主为**本玩家**推过几次卡（探针/冒烟核对用）。</summary>
         public int CardsOffered { get { return _offerBatches.IssuedCount; } }
         /// <summary>M37：推了还没收到选择的批次数。</summary>
         public int CardsPending { get { return _offerBatches.PendingCount; } }
         /// <summary>M37：因玩家长时间不选导致被上限淘汰的批次数。</summary>
         public int CardsEvicted { get { return _offerBatches.EvictedCount; } }
+        /// <summary>M38：房主权威应用成功的次数（客户端本地应用数必须与它相等）。</summary>
+        public int CardsApplied { get { return _cardsApplied; } }
+        /// <summary>M38：房主拒绝的次数。</summary>
+        public int CardsRejected { get { return _cardsRejected; } }
+        /// <summary>M38：客户端本地镜像真正应用了几次（只在收到确认后累加）。</summary>
+        public int LocalAppliedCount { get { return _localApplied; } }
+        /// <summary>M38：还悬着没等到回执的选择数（收尾应为 0）。</summary>
+        public int AckPendingCount { get { return _applyGate.PendingCount; } }
+        /// <summary>M38：被房主拒绝 / 作废 / 等超时的选择数（客户端自述，用于与房主对账）。</summary>
+        public int AckRejectedCount { get { return _applyGate.RejectedCount; } }
+        public int AckInvalidatedCount { get { return _applyGate.InvalidatedCount; } }
+        public int AckTimedOutCount { get { return _applyGate.TimedOutCount; } }
 
         /// <summary>M11 断线重连：本玩家对应的重连令牌（由客户端首连时上报，房主据此暂存/匹配进度）。</summary>
         private string _reconnectToken = "";
@@ -95,6 +122,19 @@ namespace StarPixel.Net
 
         /// <summary>本机是否持有该玩家对象（观战回收校验用）。</summary>
         public bool IsLocalOwned => IsOwner;
+
+        void Awake()
+        {
+            // M38：批次被上限淘汰时立刻通知对端把那张卡撤掉。
+            // 不撤的话玩家眼前还摆着一张"点了也没用"的卡（详见 InvalidateBatchTargetRpc）。
+            _offerBatches.OnEvicted += OnBatchEvicted;
+        }
+
+        private void OnBatchEvicted(int batchId)
+        {
+            if (!IsServerInitialized) return;
+            InvalidateBatchTargetRpc(Owner, batchId);
+        }
 
         public override void OnStartClient()
         {
@@ -246,6 +286,11 @@ namespace StarPixel.Net
             {
                 ApplyWeaponInventory();                  // SyncList → 本地武器（表现/开火请求用）
 
+                // M38：等回执等到超时的选择不能一直悬着（房主不回 / 回执丢了）。
+                // 按"被拒"处理——宁可少一次强化，也不能让客户端自己说了算。
+                if (_applyGate.PendingCount > 0)
+                    _applyGate.PurgeExpired(Time.unscaledTime);
+
                 // M11：握手重发兜底（详见 _handshakeDone 注释）。
                 // 重连场景下 OnStartClient 里那条 ServerRpc 会被丢弃，没有这里就永远匹配不上进度快照。
                 if (!_handshakeDone)
@@ -348,23 +393,73 @@ namespace StarPixel.Net
             // M37：onChosen 闭包捕获 batchId——回传时必须带它，房主才知道该应用哪一批。
             // 这是「客户端排队」的另一半：客户端这边排队保证不丢单，房主这边批次化保证不错配，
             // 少一半都修不干净（只排队：不丢了但会发错；只批次化：不错了但会丢）。
-            LevelUpManager.Instance?.PresentExternal(offers, index =>
+            //
+            // M38：这里**不许**再顺手 ApplyKind 了。修复前的写法是
+            //   RequestChooseUpgradeServerRpc(batchId, index);        // 可能被拒
+            //   UpgradeCatalog.ApplyKind(kinds[index], _ctrl);        // 无条件先加上
+            // 后者是"先斩后奏"：房主拒绝得越严格，客户端就比房主多越多强化，
+            // 而且没有任何日志——M37 的安全网被这半边抵消掉了。
+            // 现在只记账（拿 ackId）+ 发请求，本地镜像等 ConfirmUpgradeTargetRpc 才动。
+            LevelUpManager.Instance?.PresentExternal(batchId, offers, index =>
             {
-                RequestChooseUpgradeServerRpc(batchId, index);           // 权威：房主按批次应用
-                if (index >= 0 && index < kinds.Length)
-                    UpgradeCatalog.ApplyKind(kinds[index], _ctrl);       // 本地镜像：客户端权威数据（移速/磁吸范围/生命上限）
+                int ack = _applyGate.Submit(batchId, index, UnityEngine.Time.unscaledTime);
+                if (ack > 0) RequestChooseUpgradeServerRpc(ack, batchId, index);
             });
         }
 
         // RequireOwnership 保持默认 true：只有持有该玩家对象的客户端能回应自己的选卡，
         // 避免恶意客户端代替他人应用强化。
         [ServerRpc]
-        private void RequestChooseUpgradeServerRpc(int batchId, int index)
+        private void RequestChooseUpgradeServerRpc(int ackId, int batchId, int index)
         {
             if (!IsServerInitialized || _ctrl == null) return;
             // M37：按批次取回——批次不存在/已取走/越界一律拒绝。
             // 宁可少发一次强化，也绝不能拿别的批次的卡来凑（那才是真的事故）。
-            _offerBatches.TryApply(batchId, index);
+            UpgradeOffer applied;
+            if (!_offerBatches.TryApply(batchId, index, out applied))
+            {
+                // M38：拒绝必须有出口。以前这里默默 return，客户端那边已经先加了成，
+                // 于是"房主拒绝了"这件事谁都看不见——双端分叉就此产生。
+                _cardsRejected++;
+                RejectUpgradeTargetRpc(Owner, ackId, batchId, index);
+                return;
+            }
+            _cardsApplied++;
+            // 回执带上**房主认定的那一张**的 kind：客户端本地镜像应用的就是这一张，
+            // 而不是"客户端自己记得的那组第 index 张"——后者正是先斩后奏的根源。
+            ConfirmUpgradeTargetRpc(Owner, ackId, batchId, index, applied.kind);
+        }
+
+        /// <summary>M38：房主确认——客户端此时才允许应用本地镜像。</summary>
+        [TargetRpc]
+        private void ConfirmUpgradeTargetRpc(NetworkConnection conn, int ackId, int batchId,
+                                             int index, int kind)
+        {
+            // 一笔只许结一次：重复回执 / 伪造回执 / 已作废的一律不算。
+            if (!_applyGate.Confirm(ackId, batchId, index)) return;
+            if (_ctrl == null) return;
+            UpgradeCatalog.ApplyKind(kind, _ctrl);
+            _localApplied++;
+        }
+
+        /// <summary>M38：房主拒绝——客户端此前**没有**应用，这里只记账 + 留痕。</summary>
+        [TargetRpc]
+        private void RejectUpgradeTargetRpc(NetworkConnection conn, int ackId, int batchId, int index)
+        {
+            if (!_applyGate.Reject(ackId)) return;
+            Debug.Log("[M38] 选卡被房主拒绝 batch=" + batchId + " index=" + index
+                      + "（批次已过期或已结算，本次不发放强化）");
+        }
+
+        /// <summary>
+        /// M38：房主淘汰了某一批 → 通知对端把它撤掉（队列里压着的移除，正在展示的关面板）。
+        /// 玩家眼前不能摆一张点了也没用的卡。
+        /// </summary>
+        [TargetRpc]
+        private void InvalidateBatchTargetRpc(NetworkConnection conn, int batchId)
+        {
+            _applyGate.Invalidate(batchId);
+            LevelUpManager.Instance?.InvalidateExternal(batchId);
         }
 
         /// <summary>M6.2：客户端上报角色选择，房主权威应用（属性/起始武器）。</summary>

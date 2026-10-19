@@ -187,6 +187,15 @@ namespace StarPixel.Combat
         public const int StatOfferCount = 7;
 
         /// <summary>
+        /// M38：本机**真正**应用过几次强化（ApplyKind / ApplyStat 全算，含闭包路径）。
+        ///
+        /// 为什么非要这个数：光看"确认了几次"抓不到先斩后奏——那种写法是在**确认之外**
+        /// 又加了一次，确认计数照样对得上。只有把"实际应用的次数"和"确认的次数"分开统计，
+        /// 多出来的那几次才无处可藏（判据：两者必须相等，多一次都是自己给自己发的）。
+        /// </summary>
+        public static int ApplyCount { get; private set; }
+
+        /// <summary>
         /// 第 index 个属性强化供选（单一数据源：BuildOffers 与联机 ApplyKind 共用）。
         /// apply 闭包统一转调 <see cref="ApplyStat"/>，保证单机与联机客户端镜像效果一致。
         /// </summary>
@@ -212,13 +221,21 @@ namespace StarPixel.Combat
         public static void ApplyKind(int kind, PlayerController p)
         {
             if (p == null) return;
+            ApplyCount++;                     // M38：真实应用次数（详见 ApplyCount 注释）
             if (kind >= 200) p.LevelUpWeapon(kind - 200);
             else if (kind >= 100) p.AddSkill(CreateById(kind - 100));
-            else ApplyStat(kind, p);
+            else ApplyStatCore(kind, p);      // 走内核，避免同一笔被计两次
         }
 
         /// <summary>按序号应用属性强化（与 <see cref="StatOffer"/> 一一对应）。</summary>
         public static void ApplyStat(int index, PlayerController p)
+        {
+            ApplyCount++;                     // M38：闭包路径（房主 offer.apply）也要计进去
+            ApplyStatCore(index, p);
+        }
+
+        /// <summary>属性强化的实际落地（两条公开入口共用，保证 ApplyCount 一笔只加一次）。</summary>
+        private static void ApplyStatCore(int index, PlayerController p)
         {
             switch (index)
             {
