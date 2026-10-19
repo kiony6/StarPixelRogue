@@ -92,6 +92,9 @@ namespace StarPixel
             // M31：升级选卡生效链路（地基 / 属性 / 武器等级 / 解锁 / 组合技广播）无头实测
             if (HasArg("-upgradeProbe")) { StartUpgradeProbe(); return; }
 
+            // M32：联机本地守卫对称性（翻转手法自检 / 远程零广播 / 本地必须广播 / 全局状态不被污染 / 恢复）
+            if (HasArg("-guardProbe")) { StartGuardProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -555,6 +558,20 @@ namespace StarPixel
             Application.targetFrameRate = 60;
             PrepareStage();
             StarPixel.Dev.UpgradeProbe.Start(ArgValue("-upgradeScene", "BASE"));
+        }
+
+        /// <summary>
+        /// M32：联机本地守卫对称性。
+        /// 单机下 isLocal 恒为 true，"远程玩家串台"这类缺陷天然测不出来——探针靠翻转
+        /// isLocal 把远程分支拉到单机环境里断言，无需真开联机。
+        /// </summary>
+        private static void StartGuardProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;
+            PrepareStage();
+            StarPixel.Dev.GuardProbe.Start(ArgValue("-guardScene", "BASE"));
         }
 
         private static void StartSubProbe()

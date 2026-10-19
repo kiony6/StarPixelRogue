@@ -185,9 +185,15 @@ namespace StarPixel.Player
                 }
             }
 
-            ComboManager.Instance?.Recompute(GetTags());
-            CheckCombos();
-            if (isLocal) EventBus.RaiseWeaponsChanged();
+            // M32：ComboManager 是全局单体，远程玩家在这里 Recompute 会用自己的武器池
+            // 覆盖本地玩家的组合加成（实测把房主伤害倍率从 1.5 改写成 1.4），
+            // 于是房主的实际伤害由别人决定——本地加成只该由本地玩家写入。
+            if (isLocal)
+            {
+                ComboManager.Instance?.Recompute(GetTags());
+                CheckCombos();
+                EventBus.RaiseWeaponsChanged();
+            }
         }
 
         /// <summary>
@@ -214,9 +220,13 @@ namespace StarPixel.Player
         {
             var w = _weapons.Find(x => x.def.id == id);
             if (w != null && w.level < SkillDef.MaxLevel) w.level++;
-            ComboManager.Instance?.Recompute(GetTags());
-            CheckCombos();
-            if (isLocal) EventBus.RaiseWeaponsChanged();
+            // M32：远程玩家升级武器不得改写本地加成，也不得往本地 HUD 广播
+            if (isLocal)
+            {
+                ComboManager.Instance?.Recompute(GetTags());
+                CheckCombos();
+                EventBus.RaiseWeaponsChanged();
+            }
         }
 
         /// <summary>M7：对比新旧激活组合集，新激活的组合向本地 HUD/音效广播（仅本地玩家，联机远程玩家不重复提示）。</summary>
@@ -623,9 +633,15 @@ namespace StarPixel.Player
             // 于是"解锁一把新武器刚好凑成组合"这条最自然的路径上，玩家白凑了一个组合、
             // 全程毫不知情；而走"武器升级"路径凑成同一个组合却有提示——同一效果两条路
             // 表现不一致，且**没有任何报错**，只能靠订阅事件才测得出来。
-            ComboManager.Instance?.Recompute(GetTags());
-            CheckCombos();
-            EventBus.RaiseWeaponsChanged();
+            // M32：这两条原本都无守卫（Raise 连 isLocal 都没有，Recompute 同样漏了），
+            // 而同类的 LevelUpWeapon 两条都有——远程玩家解锁武器时房主 HUD 会被别人的
+            // 武器变动刷新，ComboManager 单例也被远程玩家的武器池覆盖（实测 1.5 → 1.4）。
+            if (isLocal)
+            {
+                ComboManager.Instance?.Recompute(GetTags());
+                CheckCombos();
+                EventBus.RaiseWeaponsChanged();
+            }
             Core.SaveManager.Instance?.DiscoverWeapon(def.id);   // M6.4 图鉴
         }
 
@@ -721,10 +737,11 @@ namespace StarPixel.Player
             // 血量：按比例恢复到（断线前的）生命值
             if (damageable != null) damageable.SetHpRatio(Mathf.Clamp(s.hpRatio, 0.05f, 1f));
 
-            ComboManager.Instance?.Recompute(GetTags());
-            CheckCombos();
+            // M32：断线重连恢复同理——只恢复本地玩家自己的状态与广播
             if (isLocal)
             {
+                ComboManager.Instance?.Recompute(GetTags());
+                CheckCombos();
                 Core.EventBus.RaiseWeaponsChanged();
                 Core.EventBus.RaiseLevelUp(level);
                 Core.EventBus.RaiseXpChanged(XpRatio);

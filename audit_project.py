@@ -997,6 +997,117 @@ def check_derive_broadcast():
                 % (rp, i + 1, ln.strip()[:70], method or "?"))
 
 
+LOCAL_FIELD_RE = re.compile(r'\bbool\s+isLocal\b')
+RAISE_RE = re.compile(r'EventBus\s*\.\s*Raise\w*\s*\(')
+GUARD_IF_RE = re.compile(r'\bif\s*\(\s*isLocal\b')
+EARLY_RE = re.compile(r'\bif\s*\(\s*!\s*isLocal\s*\)\s*(?:return|continue)\s*;')
+
+
+def _span_of(spans, i):
+    """返回包含第 i 行的方法区间 (start, end)；切不出方法时返回 (None, None)。"""
+    for s, e, _d in spans:
+        if s <= i <= e:
+            return s, e
+    return None, None
+
+
+def _local_guard_ranges(lines, s, e):
+    """
+    方法体内「if (isLocal)」守卫覆盖到的行区间。
+
+    三种写法都要认：
+      if (isLocal) X();              —— 单行体，只盖本行
+      if (isLocal) { ... }           —— 花括号在本行
+      if (isLocal)\\n{ ... }          —— 花括号在下一行（本工程 PlayerController 就是这种）
+    """
+    ranges = []
+    for j in range(s, e + 1):
+        if not GUARD_IF_RE.search(lines[j]):
+            continue
+        if '{' in lines[j]:
+            brace = j
+        elif j + 1 <= e and lines[j + 1].strip() == '{':
+            brace = j + 1
+        else:
+            ranges.append((j, j))      # 单行体
+            continue
+        depth, end = 0, e
+        for k in range(brace, e + 1):
+            depth += lines[k].count('{') - lines[k].count('}')
+            if depth <= 0:
+                end = k
+                break
+        ranges.append((brace, end))
+    return ranges
+
+
+def check_local_guard_symmetry():
+    """
+    本地守卫对称性（M32）。
+
+    只查「有本地玩家概念」的类型：文件里声明了 `bool isLocal` 才纳入。
+    这类文件里的每一次 EventBus.Raise 都必须处在本地守卫之下
+    （`if (isLocal)` 同行 / 块内，或方法内更早处有 `if (!isLocal) return;` 早退）。
+
+    为什么值得单列一项：
+    漏守卫的后果只在联机下出现——单机时 isLocal 恒为 true，走哪条路都一样，
+    于是"远程玩家串台"这类缺陷天然测不出（M31 收尾时 AddSkill 就是这么漏的：
+    同类的 LevelUpWeapon 有守卫，它没有）。这类不一致不报错、不崩，
+    看字段也对，只能靠"同文件内逐处比对守卫"才看得见。
+
+    可用 `// @nolocalguard: 理由` 显式豁免，且**空理由无效**。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)
+        # 本文件没有"本地玩家"这个概念，本项不管（Net 层用的是另一套 IsServer 守卫）
+        if not LOCAL_FIELD_RE.search(raw):
+            continue
+
+        lines = strip_noise(raw).split('\n')
+        raw_lines = raw.split('\n')
+        spans = method_spans(lines)
+
+        for i, ln in enumerate(lines):
+            if not RAISE_RE.search(ln):
+                continue
+            if GUARD_IF_RE.search(ln):
+                continue                       # 同一行的 if (isLocal) 守卫
+
+            s, e = _span_of(spans, i)
+            if s is None:
+                continue
+
+            # 早退式守卫必须出现在调用点**之前**：写在后面的 return 挡不住已经发出去的广播
+            if any(EARLY_RE.search(lines[k]) for k in range(s, i)):
+                continue
+
+            if any(a <= i <= b for a, b in _local_guard_ranges(lines, s, e)):
+                continue
+
+            ok = False
+            for j in range(max(0, i - 3), min(len(raw_lines), i + 2)):
+                if '@nolocalguard:' in raw_lines[j] and raw_lines[j].split('@nolocalguard:', 1)[1].strip():
+                    ok = True
+                    break
+            if ok:
+                info("本地守卫豁免: %s 第 %d 行（人工确认）" % (rp, i + 1))
+                continue
+
+            err("本地事件广播缺少 isLocal 守卫: %s 第 %d 行 %s\n"
+                "      这个类型区分本地/远程玩家，但这次广播没有 isLocal 守卫——"
+                "联机下远程玩家对象的同一条路径也会往本地 HUD 发事件，\n"
+                "      房主界面会被别人的变动带着刷新（M32 实测缺陷：AddSkill 缺守卫，"
+                "而同类的 LevelUpWeapon 有）。\n"
+                "      单机永远测不出来（isLocal 恒为 true），这也是它一直没被发现的原因。\n"
+                "      修法：补 if (isLocal)（与同类路径保持一致）；"
+                "确属需无条件广播则写 // @nolocalguard: 理由。"
+                % (rp, i + 1, ln.strip()[:70]))
+
+
 # ── 自检：证明"判据真的会红" ──────────────────────────────
 # 静态检查最容易出现的失败是"永远不报错"——第 7 项若写成摆设，工程照样一片绿，
 # 而 M24/M26/M27 那三处缺陷会继续静静地堆在场景里。
@@ -1490,6 +1601,135 @@ namespace A
 ]
 
 
+SELFTEST_GUARD = [
+    # M32 真实缺陷的形态：同类两条路，一条有守卫一条没有
+    ("guard01_广播无守卫", True, """
+namespace A
+{
+    public class Player
+    {
+        public bool isLocal = false;
+
+        public void AddSkill(SkillDef def)
+        {
+            weapons.Add(def);
+            EventBus.RaiseWeaponsChanged();
+        }
+    }
+}
+"""),
+    ("guard02_同行守卫", False, """
+namespace A
+{
+    public class Player
+    {
+        public bool isLocal = false;
+
+        public void LevelUpWeapon(int id)
+        {
+            weapons[id].level++;
+            if (isLocal) EventBus.RaiseWeaponsChanged();
+        }
+    }
+}
+"""),
+    ("guard03_早退守卫", False, """
+namespace A
+{
+    public class Player
+    {
+        public bool isLocal = false;
+
+        public void Tick()
+        {
+            if (!isLocal) return;
+            EventBus.RaisePlayerHealthRatio(1f);
+        }
+    }
+}
+"""),
+    # 花括号在下一行的块式守卫（本工程 PlayerController 就是这种写法）
+    ("guard04_块式守卫", False, """
+namespace A
+{
+    public class Player
+    {
+        public bool isLocal = false;
+
+        public void ApplyFromSave(Save s)
+        {
+            if (isLocal)
+            {
+                EventBus.RaiseWeaponsChanged();
+                EventBus.RaiseLevelUp(s.level);
+            }
+        }
+    }
+}
+"""),
+    # 没有"本地玩家"这个概念的类型不该被本项管（Net 层用的是另一套 IsServer 守卫）
+    ("guard05_无本地概念不查", False, """
+namespace A
+{
+    public class Enemy
+    {
+        public void Die()
+        {
+            EventBus.RaiseEnemyKilled(1);
+        }
+    }
+}
+"""),
+    ("guard06_带理由豁免", False, """
+namespace A
+{
+    public class Player
+    {
+        public bool isLocal = false;
+
+        public void SyncAll()
+        {
+            // @nolocalguard: 断线重连需无条件刷新一次 HUD
+            EventBus.RaiseWeaponsChanged();
+        }
+    }
+}
+"""),
+    # 注解是"封闭词汇"：空理由等于没写理由，不能拿来绕过检查
+    ("guard07_空理由豁免", True, """
+namespace A
+{
+    public class Player
+    {
+        public bool isLocal = false;
+
+        public void SyncAll()
+        {
+            // @nolocalguard:
+            EventBus.RaiseWeaponsChanged();
+        }
+    }
+}
+"""),
+    # 顺序陷阱：早退写在调用之后，挡不住已经发出去的广播
+    ("guard08_早退在调用之后", True, """
+namespace A
+{
+    public class Player
+    {
+        public bool isLocal = false;
+
+        public void AddSkill(SkillDef def)
+        {
+            EventBus.RaiseWeaponsChanged();
+            if (!isLocal) return;
+        }
+    }
+}
+"""),
+]
+
+
 def _run_fixtures(fixtures, checks):
     """把夹具写进临时目录跑一遍指定检查，返回被报错的夹具名集合。"""
     import shutil
@@ -1521,6 +1761,7 @@ def selftest():
         ("事件总线订阅检查（第 8 项）", SELFTEST_EB, [check_eventbus_subscriptions]),
         ("运行时资源缓存检查（第 9 项）", SELFTEST_RES, [check_runtime_asset_cache]),
         ("派生物广播检查（第 10 项）", SELFTEST_CB, [check_derive_broadcast]),
+        ("本地守卫对称性检查（第 11 项）", SELFTEST_GUARD, [check_local_guard_symmetry]),
     ]
 
     all_bad = 0
@@ -1562,6 +1803,7 @@ def main():
     check_eventbus_subscriptions()
     check_runtime_asset_cache()
     check_derive_broadcast()
+    check_local_guard_symmetry()
 
     n = len(cs_files())
     print("=" * 68)
