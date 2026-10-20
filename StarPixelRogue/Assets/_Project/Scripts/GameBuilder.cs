@@ -104,6 +104,9 @@ namespace StarPixel
             // M37：联机升级选卡不丢单（外部供选排队 / 批次表取回 / 顺序不乱 / 本地路径未被堵死）
             if (HasArg("-cardProbe")) { StartCardProbe(); return; }
 
+            // M41：长局稳定性压测（对象增长 / 长程数值曲线 / 长局后重开局是否干净）
+            if (HasArg("-longrunProbe")) { StartLongRunProbe(); return; }
+
             // M17 无头冒烟实测：带 -smokeTest 时跳过合规门与主菜单直接开局（正常启动不受影响）
             if (HasArg("-smokeTest")) { StartSmokeTest(); return; }
 
@@ -196,6 +199,54 @@ namespace StarPixel
         }
 
         /// <summary>
+        /// M41：读取 -smokeSpeed N（默认 1）。>1 时把 <see cref="Core.HitstopManager.BaseScale"/>
+        /// 提上去，让"游戏内 30 分钟"能在数分钟真实时间里跑完。
+        /// 为什么必须有：长局要测的是**累积**（每波残留、池化是否收敛、数值曲线是否越界），
+        /// 而这些只有在波次推到很远之后才暴露；真等 30 分钟既跑不动回归，也没法做四组区分力注入。
+        /// 注意它放大的是**模拟步长**（每帧 deltaTime），不是真实负载——真实时长档另跑。
+        /// </summary>
+        private static float SmokeSpeed()
+        {
+            try
+            {
+                var args = System.Environment.GetCommandLineArgs();
+                for (int i = 0; i < args.Length - 1; i++)
+                    if (args[i] == "-smokeSpeed" && float.TryParse(args[i + 1], out float v))
+                        return Mathf.Max(0.01f, v);
+            }
+            catch { }
+            return 1f;
+        }
+
+        /// <summary>
+        /// M41 长局稳定性压测入口：`-longrunProbe -longrunScene 场景名 [-smokeSeconds N] [-smokeSpeed N]`。
+        /// 与短局冒烟的两点区别：玩家保活（否则测到的是死亡流程）、时间按 -smokeSpeed 加速。
+        /// 正常启动不会走进这里。
+        /// </summary>
+        private static void StartLongRunProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Core.PlaytimeGuard.Ensure();
+            Core.SettingsManager.Instance.AgreeTerms(Core.VersionInfo.ComplianceVersion);
+
+            Application.targetFrameRate = 60;
+            PrepareStage();
+
+            string scene = ArgValue("-longrunScene", "GROWTH");
+            float seconds = HasArg("-smokeSeconds") ? SmokeSeconds() : 300f;
+            float speed = SmokeSpeed();
+
+            // 探针先建：它要尽早订阅日志以统计运行期异常
+            StarPixel.Dev.LongRunProbe.Start(Mathf.Max(6f, seconds - 1f), scene, speed);
+
+            Build();                                       // 单机世界
+            Core.HitstopManager.SetBaseScale(speed);        // 世界已建，实例此时在位
+            StarPixel.Dev.SmokeTest.Immortal = true;        // 长局不因阵亡终止
+            StarPixel.Dev.SmokeTest.Start(seconds);         // 复用已验证的自动驾驶驱动对局
+        }
+
+        /// <summary>
         /// M17 无头冒烟实测入口：正常启动要先过合规门、再由人工点主菜单才能开局，
         /// 无人值守环境下跑不起来；本路径直接同意协议并构建单机世界，再挂上 SmokeTest 采集状态。
         /// 不创建 MusicManager——无头环境通常没有音频设备。
@@ -212,6 +263,10 @@ namespace StarPixel
             Application.targetFrameRate = 60;
             PrepareStage();
             Build();                                  // 单机世界（此时 NetBackend 为 null）
+            // M41：-smokeSpeed / -smokeImmortal 对普通冒烟同样有效（长局压测的加速与保活能力复用同一处）
+            float speed = SmokeSpeed();
+            if (speed != 1f) Core.HitstopManager.SetBaseScale(speed);
+            StarPixel.Dev.SmokeTest.Immortal = HasArg("-smokeImmortal");
             StarPixel.Dev.SmokeTest.Start(SmokeSeconds());
         }
 

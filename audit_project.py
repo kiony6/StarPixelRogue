@@ -3072,6 +3072,123 @@ namespace A
 ]
 
 
+# 第 19 项夹具：timeScale 必须由唯一写者掌管（M41）
+#
+# 这一项是 M41 加"长局加速"时才暴露的：HitstopManager 自称是 timeScale 的唯一写者，
+# 但"正常速度 = 1"这个事实同时被抄进了 LevelUpManager / GameOverPanel 的兜底分支。
+# 同一份事实有两处定义，平时看不出——直到有人想改基准（长局压测要 6x 推进），
+# 面板关闭/顿帧结束的瞬间就会被拽回 1，长局压测只能真等 30 分钟。
+SELFTEST_TS = [
+    # ① 兜底分支读基准：与唯一写者同源，放行
+    ("ts01_基准走BaseScale", False, """
+namespace A
+{
+    public class P
+    {
+        private void Resume()
+        {
+            Time.timeScale = Core.HitstopManager.BaseScale;
+        }
+    }
+}
+"""),
+    # ② 直接走唯一写者，放行
+    ("ts02_走唯一写者", False, """
+namespace A
+{
+    public class P
+    {
+        private void Resume()
+        {
+            Core.HitstopManager.Instance.SetPaused(false);
+        }
+    }
+}
+"""),
+    # ③ 修复前的原样：把"正常速度"又抄了一遍
+    ("ts03_直写1f", True, """
+namespace A
+{
+    public class P
+    {
+        private void Resume()
+        {
+            Time.timeScale = 1f;
+        }
+    }
+}
+"""),
+    # ④ 写 0f 是"冻结"而不是"恢复正常速度"——与基准无关，不拦
+    #    （拦了会逼人给所有 SetPaused 兜底加豁免注释，反而把真正的违规淹掉）
+    ("ts04_直写0f冻结", False, """
+namespace A
+{
+    public class P
+    {
+        private void Freeze()
+        {
+            Time.timeScale = 0f;
+        }
+    }
+}
+"""),
+    # ⑤ 显式豁免且理由非空 → 放行并记录
+    ("ts05_豁免有理由", False, """
+namespace A
+{
+    public class P
+    {
+        // @rawscale: 世界尚未建立、唯一写者还不存在，此处只能自己写
+        private void Resume()
+        {
+            Time.timeScale = 1f;
+        }
+    }
+}
+"""),
+    # ⑥ 写了豁免标记却没给理由 → 照样报错（空豁免等于没说）
+    ("ts06_豁免空理由", True, """
+namespace A
+{
+    public class P
+    {
+        // @rawscale:
+        private void Resume()
+        {
+            Time.timeScale = 1f;
+        }
+    }
+}
+"""),
+    # ⑦ 只读比较：不写，放行
+    ("ts07_只读比较", False, """
+namespace A
+{
+    public class P
+    {
+        private void Tick()
+        {
+            if (Time.timeScale <= 0f) return;
+        }
+    }
+}
+"""),
+    # ⑧ 别的正常速度字面量同样是第二份事实（顺手改个倍率也会打架）
+    ("ts08_直写2f倍率", True, """
+namespace A
+{
+    public class P
+    {
+        private void Resume()
+        {
+            Time.timeScale = 2f;
+        }
+    }
+}
+"""),
+]
+
+
 # 第 15 项夹具：推卡批次一致性（M37）
 # 正例/反例都只造源码文本——本项查的正是"多次推入 vs 一份状态"这种
 # 编译得过、跑起来也对、只有并排比对才看得出的写法。
@@ -3505,6 +3622,69 @@ def check_no_text_over_net():
                     % (rp, b + 1, lines[b].strip()[:70], mname))
 
 
+# ============================================================================
+# 第 19 项：timeScale 必须由唯一写者掌管（M41）
+# ============================================================================
+# 只拦"把正常速度写成字面量"（1f / 2f / 0.04f…）。写 0f 是冻结，与"正常速度是多少"
+# 无关，不拦——否则每个 SetPaused 的兜底分支都要挂豁免，真正的违规反而被淹掉。
+RAW_SCALE_RE = re.compile(r'\bTime\.timeScale\s*=\s*(?:1f|[1-9][0-9]*(?:\.[0-9]+)?f?|0\.[1-9][0-9]*f?)\b')
+
+
+def check_timescale_single_writer():
+    """
+    <c>Time.timeScale</c> 的"正常速度"只允许定义一次（M41）。
+
+    <c>HitstopManager</c> 注释里写着自己是 timeScale 的唯一写者，但"正常速度 = 1"
+    这个事实同时被抄进了 LevelUpManager 与 GameOverPanel 的兜底分支：
+
+        if (HitstopManager.Instance != null) HitstopManager.Instance.SetPaused(false);
+        else Time.timeScale = 1f;          // ← 第二份"正常速度"
+
+    同一份事实两处定义，平时看不出任何问题——直到 M41 想给长局压测加个加速档
+    （`-smokeSpeed 6`，否则 30 分钟游戏时间就得真等 30 分钟）：倍率一设上去，
+    面板关闭或顿帧结束的瞬间就被上面那行拽回 1，世界又变成实时推进。
+
+    这不是"为了测试才要改"的洁癖：倍率一旦有了第二份定义，以后任何一处改时间策略
+    （慢动作、结算减速、新手引导变速）都会踩同一颗雷，且症状是"偶尔失效"最难查。
+
+    判据：HitstopManager 之外不得把 timeScale 写成正数倍率字面量。
+    可用 `// @rawscale: 理由` 显式豁免，且**空理由无效**。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        if norm.endswith('/Core/HitstopManager.cs'):
+            continue            # 唯一写者本身：它写 0f / _hitstopScale / BaseScale 都是本职
+        raw = read(path)
+        lines = strip_noise(raw).split('\n')
+        raw_lines = raw.split('\n')
+
+        for i, ln in enumerate(lines):
+            if not RAW_SCALE_RE.search(ln):
+                continue
+            # 豁免注释通常挂在**方法/语句上方**（注释、签名、大括号，共 3~4 行），
+            # 故窗口向上放宽到 i-4；向下只取 1 行，避免顺手套走下一个方法的注释
+            exempt = False
+            for x in range(max(0, i - 4), min(len(raw_lines), i + 2)):
+                if ('@rawscale:' in raw_lines[x]
+                        and raw_lines[x].split('@rawscale:', 1)[1].strip()):
+                    exempt = True
+                    break
+            if exempt:
+                info("timeScale 直写豁免: %s 第 %d 行（人工确认）" % (rp, i + 1))
+                continue
+            err("timeScale 被写成字面量: %s 第 %d 行 %s\n"
+                "      “正常速度是多少”已经有了唯一定义：HitstopManager.BaseScale。\n"
+                "      这里又写了一遍字面量，等于把同一份事实存成两份——\n"
+                "      任何一处改时间策略（长局加速 / 慢动作 / 结算减速）都会被另一处拽回去，\n"
+                "      且症状是“偶尔失效”，最难查。\n"
+                "      修法：走 HitstopManager（SetPaused / ApplyNow），兜底分支写 BaseScale；\n"
+                "      确属有意为之则写 // @rawscale: 理由。"
+                % (rp, i + 1, ln.strip()[:70]))
+
+
 def _run_legal_fixtures(fixtures, checks=None):
     """把夹具写成 Resources/Legal 下的 txt 跑第 14 项，返回被报错的夹具名集合。"""
     import shutil
@@ -3574,6 +3754,7 @@ def selftest():
         ("本地镜像确认检查（第 16 项）", SELFTEST_LA, [check_local_apply_guarded]),
         ("收场可见出口检查（第 17 项）", SELFTEST_NF, [check_notice_on_endings]),
         ("跨端文案检查（第 18 项）", SELFTEST_XT, [check_no_text_over_net]),
+        ("时间缩放唯一写者检查（第 19 项）", SELFTEST_TS, [check_timescale_single_writer]),
     ]
 
     all_bad = 0
@@ -3625,6 +3806,7 @@ def main():
     check_local_apply_guarded()
     check_notice_on_endings()
     check_no_text_over_net()
+    check_timescale_single_writer()
 
     n = len(cs_files())
     print("=" * 68)

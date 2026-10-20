@@ -18,12 +18,31 @@ namespace StarPixel.Core
         private float _hitstopDuration;
         private float _hitstopScale;
 
+        /// <summary>
+        /// M41：正常速度基准（默认 1）。此前 <see cref="Apply"/> 的兜底分支写死 `1f`，
+        /// 于是"正常速度"这个事实被复制到了两份地方——只要有人想改基准（长局压测要加速推进，
+        /// 否则 30 分钟游戏时间就得真等 30 分钟），就必须在每一处硬编码里各改一遍，
+        /// 漏一处就会在顿帧结束/面板关闭的瞬间被拽回 1。现在基准只有这一处。
+        /// 静态而非实例字段：Instance 尚未创建时的兜底写入也要能读到同一个值。
+        /// </summary>
+        private static float s_baseScale = 1f;
+
+        /// <summary>正常速度基准。仅供无头实测的加速档设置（`-smokeSpeed`），正式游戏恒为 1。</summary>
+        public static float BaseScale { get { return s_baseScale; } }
+
+        /// <summary>设置基准倍率并立刻应用一次。</summary>
+        public static void SetBaseScale(float scale)
+        {
+            s_baseScale = Mathf.Max(0.01f, scale);
+            if (Instance != null) Instance.ApplyNow();
+        }
+
         /// <summary>选卡等需要完全冻结时调用（仅单机路径；联机客户端不走暂停）。</summary>
         public void SetPaused(bool paused)
         {
             _paused = paused;
             if (paused) _hitstopTimer = 0f;   // 暂停期间不叠加 hitstop
-            Apply();
+            ApplyNow();
         }
 
         /// <summary>
@@ -42,7 +61,7 @@ namespace StarPixel.Core
                 _hitstopTimer = duration;
                 _hitstopScale = scale;
             }
-            Apply();
+            ApplyNow();
         }
 
         void Update()
@@ -52,14 +71,15 @@ namespace StarPixel.Core
                 _hitstopTimer -= Time.unscaledDeltaTime;
                 if (_hitstopTimer < 0f) _hitstopTimer = 0f;
             }
-            Apply();
+            ApplyNow();
         }
 
-        private void Apply()
+        /// <summary>把当前优先级结果写进 <see cref="Time.timeScale"/>（唯一写入点）。</summary>
+        public void ApplyNow()
         {
             if (_paused) Time.timeScale = 0f;
             else if (_hitstopTimer > 0f) Time.timeScale = _hitstopScale;
-            else Time.timeScale = 1f;
+            else Time.timeScale = s_baseScale;
         }
 
         protected override void Awake()

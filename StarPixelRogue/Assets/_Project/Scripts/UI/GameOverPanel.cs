@@ -29,8 +29,9 @@ namespace StarPixel.UI
         {
             Core.EventBus.OnRunEnded -= ShowRun;
             // 防御：面板被销毁时恢复时间（优先走 HitstopManager，避免与顿帧/选卡暂停的 timeScale 互相踩踏）
+            // M41：兜底写死 1f 会在加速档下把基准拽回 1（同 LevelUpManager 的注释）
             if (Core.HitstopManager.Instance != null) Core.HitstopManager.Instance.SetPaused(false);
-            else Time.timeScale = 1f;
+            else Time.timeScale = Core.HitstopManager.BaseScale;
         }
 
         private void ShowRun(int wave, float time, int kills, int level, bool victory)
@@ -96,8 +97,9 @@ namespace StarPixel.UI
         private void CloseAndResume()
         {
             // 恢复时间缩放（优先走 HitstopManager，与 GameOver 冻结/顿帧保持唯一写者一致）
+            // M41：兜底写死 1f 会在加速档下把基准拽回 1（同 LevelUpManager 的注释）
             if (Core.HitstopManager.Instance != null) Core.HitstopManager.Instance.SetPaused(false);
-            else Time.timeScale = 1f;
+            else Time.timeScale = Core.HitstopManager.BaseScale;
             _showing = false;
             if (_root != null) { Core.UIFactory.Destroy(_root); _root = null; }
         }

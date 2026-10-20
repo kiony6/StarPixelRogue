@@ -144,6 +144,14 @@ namespace StarPixel.Dev
         private bool _peerDropSeen;
         private bool _peerRejoinSeen;
 
+        /// <summary>
+        /// M41：长局压测用——保活，且阵亡不终止本轮。
+        /// 默认测的是 45～60 秒的短局，玩家撑得住；但要看 30 分钟量级的累积效应就必须让玩家活到底，
+        /// 否则测到的是"死亡流程"而不是"世界持续演化的稳定性"。
+        /// 静态而非实例：由 GameBuilder 在 Start 之前按命令行设置。
+        /// </summary>
+        public static bool Immortal { get; set; }
+
         /// <summary>由 GameBuilder 调用，开始一轮实测。</summary>
         public static void Start(float seconds)
         {
@@ -307,9 +315,14 @@ namespace StarPixel.Dev
 
             // M18：联机模式保活。房主一旦阵亡，敌人不再被击杀、波次停止推进，
             // 两端同步数值会同时冻结，交叉核对就失去意义——故持续把血补满。
-            if (_netMode && pc != null && pc.damageable != null && pc.damageable.maxHp > 0f)
+            //
+            // M41：长局压测（Immortal）同样需要保活，且要求更高——短局用 60% 阈值足够，
+            // 但 30 分钟里总有被 Boss 一击打穿的瞬间，一旦阵亡就会弹结算面板并把 timeScale 压到 0，
+            // 世界冻住、本轮直接失去意义。故长局改为每帧维持满血。
+            if ((_netMode || Immortal) && pc != null && pc.damageable != null && pc.damageable.maxHp > 0f)
             {
-                if (pc.damageable.currentHp < pc.damageable.maxHp * 0.6f)
+                float need = Immortal ? 1.0f : 0.6f;
+                if (pc.damageable.currentHp < pc.damageable.maxHp * need)
                     pc.Heal(pc.damageable.maxHp);
             }
 #if FISHNET_ENABLED
@@ -393,7 +406,8 @@ namespace StarPixel.Dev
 #endif
 
             // 联机模式下阵亡只记录不终止（否则房主早退会让客户端永远连不上）
-            if (_t >= _limit || (_died && !_netMode)) Finish();
+            // M41：长局压测同样不终止（理由见 Immortal 注释）
+            if (_t >= _limit || (_died && !_netMode && !Immortal)) Finish();
         }
 
         /// <summary>

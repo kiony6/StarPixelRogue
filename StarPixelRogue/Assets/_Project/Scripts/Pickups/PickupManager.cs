@@ -21,6 +21,21 @@ namespace StarPixel.Pickups
         private const float CollectDist = 0.4f;
         private const float MagnetSpeed = 12f;
 
+        /// <summary>
+        /// M41：场上掉落物上限（两类各自计）。
+        ///
+        /// 为什么必须有：账本此前**只进不出**——只有玩家走到身上（CollectDist 内）才会被移除，
+        /// 既没有寿命也没有上限。短局里玩家跑得过来（45s 掉 30 个、捡走 28 个），看不出异常；
+        /// 但波次推高后每波上百只怪、玩家根本捡不完：实测 30 分钟游戏时间堆到
+        /// 887 个宝石 + 148 个回血球，而 <see cref="Update"/> 每帧都要把整张表遍历一遍算距离，
+        /// 于是**越玩越卡**——所有短局判据却依旧全绿，因为 45 秒里它根本来不及堆。
+        ///
+        /// 为什么回收"离玩家最远"的而不是"最早的"：玩家够得着的要留住，
+        /// 够不着的那个本来也捡不到，牺牲它对实际收益影响最小。
+        /// </summary>
+        private const int MaxGems = 240;
+        private const int MaxHealth = 80;
+
         public void Configure(GameObject gemTemplate, GameObject healthTemplate, PlayerController player)
         {
             _gemTemplate = gemTemplate;
@@ -37,6 +52,45 @@ namespace StarPixel.Pickups
             var gem = go.GetComponent<XpGem>();
             gem.Init(pos, xp, _gemTemplate);
             _gems.Add(gem);
+            TrimGems();
+        }
+
+        /// <summary>M41：超出上限时回收离玩家最远的一个（详见 <see cref="MaxGems"/> 注释）。</summary>
+        private void TrimGems()
+        {
+            if (_gems.Count <= MaxGems) return;
+            int worst = Farthest(_gems);
+            if (worst < 0) return;
+            var g = _gems[worst];
+            _gems.RemoveAt(worst);
+            if (g != null) g.Collect();          // 归还对象池：不加音效、不发经验
+        }
+
+        /// <summary>M41：超出上限时回收离玩家最远的一个。</summary>
+        private void TrimHealth()
+        {
+            if (_healths.Count <= MaxHealth) return;
+            int worst = Farthest(_healths);
+            if (worst < 0) return;
+            var h = _healths[worst];
+            _healths.RemoveAt(worst);
+            if (h != null) h.Collect();
+        }
+
+        /// <summary>账本里离玩家最远的那一项；全为空时返回 -1（空项由 Update 自行清理）。</summary>
+        private int Farthest<T>(List<T> list) where T : Component
+        {
+            Vector2 p = _player != null ? (Vector2)_player.transform.position : Vector2.zero;
+            int worst = -1;
+            float worstD = -1f;
+            for (int i = 0; i < list.Count; i++)
+            {
+                var c = list[i];
+                if (c == null) continue;
+                float d = Vector2.Distance((Vector2)c.transform.position, p);
+                if (d > worstD) { worstD = d; worst = i; }
+            }
+            return worst;
         }
 
         public void DropHealth(Vector3 pos, float amount)
@@ -47,6 +101,7 @@ namespace StarPixel.Pickups
             var h = go.GetComponent<HealthPickup>();
             h.Init(pos, amount, _healthTemplate);
             _healths.Add(h);
+            TrimHealth();
         }
 
         void Update()

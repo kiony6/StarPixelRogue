@@ -104,8 +104,10 @@ namespace StarPixel.UI
             _pendingExternal.Clear();
             _currentBatchId = 0;                  // M38：批次游标跟着队列一起清
             // M4.5：断线拆世界时防止时间缩放卡在 0（选卡面板打开中被销毁）
+            // M41：兜底分支此前写死 1f，与 HitstopManager 里的"正常速度"是两份事实。
+            // 加速档下会在选卡面板被销毁的瞬间把倍率拽回 1，长局压测因此只能跑真实时长。
             if (Core.HitstopManager.Instance != null) Core.HitstopManager.Instance.SetPaused(false);
-            else Time.timeScale = 1f;
+            else Time.timeScale = Core.HitstopManager.BaseScale;
         }
 
         /// <summary>M4.5：切换「外部供卡」模式。联机客户端开启后，本地不再自动建卡
@@ -384,8 +386,10 @@ namespace StarPixel.UI
             if (_pending > 0) TryPresent();
             else
             {
+                // M41：这一处是面板"选完了、恢复世界"的出口——与 OnDestroy 里的兜底同一类，
+                // 写死 1f 会在加速档下把倍率拽回 1（第 19 项静态检查抓到的就是它）
                 if (Core.HitstopManager.Instance != null) Core.HitstopManager.Instance.SetPaused(false);
-                else Time.timeScale = 1f;
+                else Time.timeScale = Core.HitstopManager.BaseScale;
             }
         }
 
