@@ -270,8 +270,14 @@ namespace StarPixel.Core
             // ① 主菜单被这层遮罩盖住；② _hintShowing 一直为真，下一局完全不计时。
             CloseHint();
             Debug.Log("[Playtime] 青少年模式达到每日时长上限，强制返回主菜单");
-            if (UI.MainMenu.Instance != null)
-                UI.MainMenu.Instance.ShowWithNotice(Localization.T("playtime.force_exit"));
+            // M47：主菜单必须先 **Ensure** 再提示，不能写成 `if (Instance != null)`。
+            // 那样写的后果是：任何没建过主菜单的启动路径（无头实测入口、将来可能的
+            // 快捷开局/续玩入口）一旦到点，玩家会被**静默**踢出——世界拆了、菜单没有、
+            // 一行解释也没有，屏幕上只剩一个空场景。合规功能最忌讳的就是这种沉默失败：
+            // 玩家不知道自己为什么不能玩了。可惜它此前从未被任何测试走到过
+            // （PlaytimeProbe 自己会先 MainMenu.Ensure()，恰好把这条静默路径遮住了）。
+            UI.MainMenu.Ensure();
+            UI.MainMenu.Instance.ShowWithNotice(Localization.T("playtime.force_exit"));
             GameBuilder.TeardownWorld();
         }
 
@@ -301,8 +307,22 @@ namespace StarPixel.Core
             UIFactory.Destroy(go);
         }
 
-        /// <summary>M19 实测：模拟玩家点击弹窗的「关闭」按钮。</summary>
-        public void DismissHintForTest() => CloseHint();
+        /// <summary>
+        /// M47：新一局开始时收起**跨局残留**的提示遮罩（由 <c>GameBuilder.Build</c> 调用）。
+        ///
+        /// 它与 M46 修的结算面板是同一个形态：<c>ShowHint</c> 用
+        /// <c>UIFactory.CreateModal</c> 在场景根上 new 出一层全屏遮罩，
+        /// 既不归 GameBuilder 的 <c>_created</c> 管，也不会随拆世界消失。
+        /// 于是这条真实路径会漏：玩家在 55 分钟预警挂起时没点「关闭」→ 继续玩到死 →
+        /// 结算面板弹出（两层模态叠在一起）→ 点「重新开始」→ 新世界建好了，
+        /// 而那层写着"今日时长已达 55 分钟"的遮罩**原封不动盖在新世界上**。
+        /// 提示本身跨局有效（剩下的 5 分钟还在走），但"遮罩跨局残留"不是——
+        /// 它挡的是新一局的操作界面。故收起它的责任放在"建世界"这一侧。
+        /// </summary>
+        public void DismissHint() => CloseHint();
+
+        /// <summary>M19 实测：模拟玩家点击弹窗的「关闭」按钮（走产品同一个入口）。</summary>
+        public void DismissHintForTest() => DismissHint();
 
         /// <summary>
         /// 实名认证结果接入点（TODO：正式版对接官方实名认证 SDK）。

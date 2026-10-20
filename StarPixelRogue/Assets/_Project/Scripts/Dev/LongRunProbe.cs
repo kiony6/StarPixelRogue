@@ -30,6 +30,11 @@ namespace StarPixel.Dev
     ///   RESTART  长局之后拆世界重开一局：根对象回落、掉落物清零、波次回到 1、全程零异常
     ///   PANEL    M46：走**玩家真实操作路径**重开——结算面板弹出 → 冻结 → 点「重新开始」按钮
     ///            → 时间恢复 / 面板消失 / HUD 唯一 / 波次回落 / 玩家可控 / 全程零异常
+    ///   EXIT     M47：青少年模式当日时长到点的**强制退出**走真实路径
+    ///            —— 预警弹出 → 死在结算面板上（时长照走）→ 面板挂起期间跨过上限 →
+    ///            PlaytimeGuard.ForceExitMinor 真的执行 → 面板被收 / 主菜单可见且有提示 /
+    ///            世界已拆 / 再点「开始游戏」被拦。M46 只模拟了 TeardownWorld 那一行，
+    ///            「踢回主菜单 + 二次开局拦截」这两步从未被走到过。
     ///
     /// 判据的区分力：
     ///   1) "后半程不加速堆积"比"最终值有上限"更狠：只加上限的话，堆到上限就不再涨，
@@ -92,6 +97,20 @@ namespace StarPixel.Dev
         private string _pnPanelText = "否", _pnFreezeText = "否", _pnResumeText = "否";
         private string _pnGoneText = "否", _pnHudText = "否", _pnWaveText = "否", _pnAdvanceText = "否";
         private string _pnScaleText = "?", _pnWaveLine = "?";
+
+        // —— EXIT（M47：青少年模式强制退出走真实路径）——
+        private bool _exF1, _exF2, _exF3, _exF4, _exF5, _exF6, _exF7, _exF8;
+        private bool _exMinorOn, _exStartOk;
+        private float _exSecWarn = -1f, _exSecDead = -1f, _exSecHang = -1f, _exSecEnd = -1f;
+        private int _exWarn = -1, _exForce = -1, _exBlocked = -1;
+        private bool _exHintAtWarn, _exHintAfterRestart;
+        private int _exPanelDead = -1, _exPanelRestart = -1, _exPanelDead2 = -1, _exPanelAfterForce = -1;
+        private int _exHudDead = -1, _exHudAfterForce = -1, _exCanvasAfterForce = -1;
+        private float _exScaleDead = -1f, _exScaleAfterForce = -1f;
+        private int _exWaveA = -1, _exWaveB = -1, _exGemsB = -1;
+        private bool _exClicked;
+        private bool _exMenuVisible, _exWorldGone, _exRunningFalse, _exSecondBlocked, _exNoErrOk;
+        private string _exNotice = "", _exScaleLine = "?", _exSecLine = "?", _exMenuLine = "?";
 
         private struct Sample
         {
@@ -174,10 +193,24 @@ namespace StarPixel.Dev
                 }
             }
 
+            // M47：强制退出按时间线分七段推进（青少年模式一旦到点就无法再重开，
+            // 故"点重开后遮罩残留"必须先于"死在面板上被踢"验证）
+            if (_scene == "EXIT")
+            {
+                if (!_exF1 && _t >= _limit * 0.10f) { _exF1 = true; ExitSetup(); }
+                if (!_exF2 && _t >= _limit * 0.18f) { _exF2 = true; ExitAdvanceToWarn(); }
+                if (!_exF3 && _t >= _limit * 0.26f) { _exF3 = true; StartCoroutine(ExitDeathAndRestart()); }
+                if (!_exF5 && _t >= _limit * 0.50f) { _exF5 = true; ExitSampleAdvance(); }
+                if (!_exF6 && _t >= _limit * 0.58f) { _exF6 = true; StartCoroutine(ExitForceFlow()); }
+                if (!_exF7 && _t >= _limit * 0.82f) { _exF7 = true; ExitSecondRun(); }
+                if (!_exF8 && _t >= _limit * 0.90f) { _exF8 = true; ExitRestore(); }
+            }
+
             if (_t >= _limit)
             {
                 if (_scene == "RESTART") FinishRestart();
                 else if (_scene == "PANEL") ReportPanel();
+                else if (_scene == "EXIT") ReportExit();
                 else Report();
                 enabled = false;
             }
@@ -612,6 +645,249 @@ namespace StarPixel.Dev
             // 那是本场景的预期状态，不是回归。用同一个键的话驱动脚本会把两者混在一起。
             Line("PANEL结论", (_errors == 0 && _fail.Count == 0 && _ok == _checked) ? "通过" : "不通过");
             foreach (var f in _fail) Line("PANEL失败项", f);
+        }
+
+        // =====================================================================================
+        //  EXIT（M47）：青少年模式当日时长到点 —— 强制退出走真实路径
+        //
+        //  M46 修的是"只拆不建时结算面板会赖在屏幕上"，但它的证据是**模拟**来的：
+        //  探针直接调 `TeardownWorld()` 冒充强制退出。真实那一串是
+        //    PlaytimeGuard.Tick 累计 → 55 分钟弹预警 → 玩家死在面板上（时长照走）→
+        //    跨过上限 → ForceExitMinor：关预警 → 主菜单 + 提示 → TeardownWorld
+        //    → 玩家再点「开始游戏」→ CanStartRun 拦下
+        //  头尾两段 M19 的 PlaytimeProbe 各自测过，但**中间那次组合**（面板开着 + 时长到点）
+        //  从未被执行——而它恰恰是 M46 那处修复的全部理由。
+        //
+        //  本场景把两件事压进同一条时间线，顺序不能换：青少年模式一旦到点就无法再重开，
+        //  所以"预警挂起时死亡 → 点重开"（M47 修复的那层遮罩）必须先于"死在面板上被踢"。
+        // =====================================================================================
+
+        private void ExitSetup()
+        {
+            Core.SettingsManager.Ensure();
+            Core.PlaytimeGuard.Ensure();
+            Core.SettingsManager.Instance.SetMinorMode(true);   // 走真实开关（会写设置，收尾还原）
+            Core.PlaytimeGuard.ResetToday();                    // 从 0 起算，避免上一场景串味
+            Core.PlaytimeGuard.ResetCounters();
+            // 真实玩家路径上主菜单是合规门通过后建的（GameBuilder 启动流程里 Ensure），
+            // 无头实测入口跳过了合规门，故这里补上同一个前置——否则"主菜单可见"这条判据
+            // 判的是一个本来就不存在的东西（M47 修的正是"没建过菜单就静默踢人"）。
+            UI.MainMenu.Ensure();
+            var em = EnemyManager.Instance;
+            _exStartOk = em != null && Core.PlaytimeGuard.GameRunning;
+            _exMinorOn = Core.SettingsManager.Instance.Current.minorMode;
+        }
+
+        /// <summary>喂的是线上同一个 Tick（Update 只负责把真实 deltaTime 喂进去）。</summary>
+        private static void AdvancePlaytimeTo(float target)
+        {
+            var g = Core.PlaytimeGuard.Instance;
+            if (g == null) return;
+            float remain = target - g.TodaySeconds;
+            if (remain <= 0f) return;
+            int steps = Mathf.CeilToInt(remain / 60f);
+            for (int i = 0; i < steps; i++) g.Tick(60f);
+        }
+
+        private void ExitAdvanceToWarn()
+        {
+            AdvancePlaytimeTo(Core.PlaytimeGuard.MinorDailyLimitSeconds -
+                              Core.PlaytimeGuard.MinorWarnBeforeSeconds + 60f);
+            var g = Core.PlaytimeGuard.Instance;
+            if (g == null) return;
+            _exSecWarn = g.TodaySeconds;
+            _exWarn = g.WarnCount;
+            _exHintAtWarn = g.HintShowing;       // 故意不关：真实玩家常常就这么晾着它
+        }
+
+        private System.Collections.IEnumerator ExitDeathAndRestart()
+        {
+            var g = Core.PlaytimeGuard.Instance;
+            var em = EnemyManager.Instance;
+            var pc = PlayerController.Instance;
+            _exWaveA = em != null ? em.CurrentWave : -1;
+
+            // 预警遮罩还挂在玩家屏幕上时，他死了
+            Core.EventBus.RaiseRunEnded(_exWaveA, _game, _kills, pc != null ? pc.level : 1, false);
+
+            yield return null;
+            yield return null;
+            _exPanelDead = CountNamed<Canvas>("GameOverCanvas");
+            _exScaleDead = Time.timeScale;
+            _exHudDead = CountNamed<UI.HUDController>(null);
+            _exSecDead = g != null ? g.TodaySeconds : -1f;
+
+            // 玩家点「重新开始」（不是调 OnRestart——那样就绕过了按钮这层）
+            _exClicked = ClickButton("RestartBtn");
+
+            yield return null;
+            yield return null;
+            _exPanelRestart = CountNamed<Canvas>("GameOverCanvas");
+            // M47：那层"今日时长已达 55 分钟"的模态遮罩不该跟着进新一局。
+            // 它是 CreateModal 在场景根上 new 出来的，不属于被拆的世界——与结算面板同一个形态。
+            _exHintAfterRestart = g != null && g.HintShowing;
+            _exF4 = true;
+        }
+
+        private void ExitSampleAdvance()
+        {
+            var em = EnemyManager.Instance;
+            _exWaveB = em != null ? em.CurrentWave : -1;
+            _exGemsB = CountGems();
+        }
+
+        private System.Collections.IEnumerator ExitForceFlow()
+        {
+            var em = EnemyManager.Instance;
+            var pc = PlayerController.Instance;
+            // 第二次死亡：这一次**不点任何按钮**——就让它挂在结算面板上等着被踢
+            Core.EventBus.RaiseRunEnded(em != null ? em.CurrentWave : 1, _game, _kills,
+                                        pc != null ? pc.level : 1, false);
+
+            yield return null;
+            yield return null;
+            _exPanelDead2 = CountNamed<Canvas>("GameOverCanvas");
+
+            var g = Core.PlaytimeGuard.Instance;
+            if (g != null)
+            {
+                // 面板挂起期间：时长必须照走（Tick 吃的是 unscaledDeltaTime，与 timeScale=0 无关）。
+                // 旧实现在这里停止计时，玩家只要死在面板上就永远到不了上限——限时形同虚设。
+                AdvancePlaytimeTo(Core.PlaytimeGuard.MinorDailyLimitSeconds - 60f);
+                _exSecHang = g.TodaySeconds;
+
+                // 跨过上限：**真实的** ForceExitMinor 在这一刻发生
+                AdvancePlaytimeTo(Core.PlaytimeGuard.MinorDailyLimitSeconds + 60f);
+                _exSecEnd = g.TodaySeconds;
+                _exForce = g.ForceExitCount;
+            }
+
+            yield return null;
+            yield return null;
+            var mm = UI.MainMenu.Instance;
+            _exPanelAfterForce = CountNamed<Canvas>("GameOverCanvas");
+            _exHudAfterForce = CountNamed<UI.HUDController>(null);
+            _exCanvasAfterForce = CountNamed<Canvas>("HUDCanvas");
+            _exScaleAfterForce = Time.timeScale;
+            _exMenuVisible = mm != null && mm.IsVisible;
+            _exNotice = mm != null ? mm.NoticeText : "";
+            _exWorldGone = EnemyManager.Instance == null;
+            _exRunningFalse = !Core.PlaytimeGuard.GameRunning;
+        }
+
+        private void ExitSecondRun()
+        {
+            var g = Core.PlaytimeGuard.Instance;
+            GameBuilder.Build();                 // 就是主菜单「开始游戏」按的同一个入口
+            if (g != null) _exBlocked = g.BlockedStartCount;
+            _exSecondBlocked = !Core.PlaytimeGuard.GameRunning && EnemyManager.Instance == null;
+        }
+
+        private void ExitRestore()
+        {
+            // 绝不把青少年模式与已累计时长留在用户的 settings.json / playtime.json 里
+            Core.SettingsManager.Instance?.SetMinorMode(false);
+            Core.PlaytimeGuard.ResetToday();
+        }
+
+        private void ReportExit()
+        {
+            _exScaleLine = _exScaleDead.ToString("F2") + " → " + _exScaleAfterForce.ToString("F2");
+            _exSecLine = Mathf.RoundToInt(_exSecWarn) + "（预警）→ " + Mathf.RoundToInt(_exSecDead) +
+                         "（死亡）→ " + Mathf.RoundToInt(_exSecHang) + "（面板挂起）→ " +
+                         Mathf.RoundToInt(_exSecEnd) + "（到点）";
+            _exMenuLine = _exMenuVisible ? ("可见，提示「" + _exNotice + "」") : "不可见";
+
+            // 1) 前置：青少年模式真的开着、对局真的在计时。恒假的话下面全是假绿。
+            Check("青少年模式且对局计时在走", _exMinorOn && _exStartOk);
+
+            // 2) 到点前 5 分钟弹一次预警，且遮罩真的挂起了（后面要它跨局）
+            Check("到点前弹出一次预警", _exWarn == 1 && _exHintAtWarn);
+
+            // 3) 死亡 → 结算面板弹出（后面"被收掉"才是修复生效，否则是平凡成立）
+            Check("死亡后结算面板弹出", _exPanelDead == 1);
+
+            // 4) 单机死亡冻结世界。这是"强退后时间解冻"的前提。
+            Check("死亡后世界冻结", _exScaleDead <= 0.0001f);
+
+            // 5) 【M47 修复】点重开后，上一局那层时长提示遮罩不许跟着进新一局
+            Check("重开后旧提示遮罩已收", !_exHintAfterRestart);
+
+            // 6) 点重开后面板必须收（M46 已覆盖，这里是同一条时间线上的交叉验证）
+            Check("重开后结算面板已收", _exPanelRestart == 0);
+
+            // 7) 重开后新世界真的在跑（否则第 5/6 条可能是"世界没建起来"的假象）
+            Check("重开后世界继续推进", _exWaveB > _exWaveA || _exGemsB > 20);
+
+            // 8) 第二次死亡：面板再次弹出，为"死在面板上被踢"铺路
+            Check("第二次死亡面板再次弹出", _exPanelDead2 == 1);
+
+            // 9) 【核心】面板挂起期间时长仍在累计——旧实现在这里停表，玩家死在面板上就永远到不了上限
+            Check("面板挂起期间时长仍在累计", _exSecHang > _exSecDead + 60f);
+
+            // 10) 强制退出恰好触发一次（不是靠探针自己调 TeardownWorld）
+            Check("到点恰好强制退出一次", _exForce == 1);
+
+            // 11) 【M46 修复的真实路径】没人点按钮，面板也得被收掉
+            Check("强制退出后结算面板被收", _exPanelAfterForce == 0);
+
+            // 12) HUD 必须随世界一起清零；时间必须解冻（否则菜单动画/下一局都卡着）
+            Check("强制退出后 HUD 清零", _exHudAfterForce == 0 && _exCanvasAfterForce == 0);
+            float expect = Core.HitstopManager.BaseScale;
+            Check("强制退出后时间解冻",
+                  _exScaleAfterForce > 0.0001f && Mathf.Abs(_exScaleAfterForce - expect) < 0.01f);
+
+            // 13) 【M47 修复】玩家必须看到"为什么被踢"——菜单可见且提示不是裸键
+            Check("强制退出后主菜单可见且有提示",
+                  _exMenuVisible && !string.IsNullOrEmpty(_exNotice) && !_exNotice.StartsWith("playtime."));
+
+            // 14) 世界确实被拆了、计时也停了（不是只收了个面板）
+            Check("强制退出后世界已拆", _exWorldGone && _exRunningFalse);
+
+            // 15) 【核心】回主菜单再点「开始游戏」必须被拦下（M19 的绕过手法之一）
+            Check("二次开局被拦下", _exBlocked >= 1 && _exSecondBlocked);
+
+            _exNoErrOk = _errors == 0;
+            Check("全程零异常", _exNoErrOk);
+
+            bool thaw = _exScaleAfterForce > 0.0001f && Mathf.Abs(_exScaleAfterForce - expect) < 0.01f;
+            bool noticeOk = !string.IsNullOrEmpty(_exNotice) && !_exNotice.StartsWith("playtime.");
+            bool menuOk = _exMenuVisible && noticeOk;
+
+            Debug.Log("[SMOKE] ===== 强制退出真实路径实测结果 =====");
+            Line("场景", _scene);
+            Line("断点通过", _ok + "/" + _checked);
+            Line("青少年模式且对局计时在走", (_exMinorOn && _exStartOk) ? "是" : "否");
+            Line("到点前弹出一次预警", _exWarn == 1 ? Yn(_exHintAtWarn) : ("否（次数 " + _exWarn + "）"));
+            Line("死亡后结算面板弹出", _exPanelDead == 1 ? "是" : ("否（画布 " + _exPanelDead + "）"));
+            Line("死亡后世界冻结", _exScaleDead <= 0.0001f ? "是" : ("否（" + _exScaleDead.ToString("F2") + "）"));
+            Line("重开后旧提示遮罩已收", !_exHintAfterRestart ? "是" : "否（遮罩跨局残留）");
+            Line("重开后结算面板已收", _exPanelRestart == 0 ? "是" : ("否（残留 " + _exPanelRestart + "）"));
+            Line("重开后世界继续推进", (_exWaveB > _exWaveA || _exGemsB > 20) ? "是"
+                 : ("否（波次 " + _exWaveA + " → " + _exWaveB + "，宝石 " + _exGemsB + "）"));
+            Line("第二次死亡面板再次弹出", _exPanelDead2 == 1 ? "是" : ("否（画布 " + _exPanelDead2 + "）"));
+            Line("面板挂起期间时长仍在累计", _exSecHang > _exSecDead + 60f ? "是"
+                 : ("否（" + Mathf.RoundToInt(_exSecDead) + " → " + Mathf.RoundToInt(_exSecHang) + "）"));
+            Line("到点恰好强制退出一次", _exForce == 1 ? "是" : ("否（" + _exForce + "）"));
+            Line("强制退出后结算面板被收", _exPanelAfterForce == 0 ? "是" : ("否（残留 " + _exPanelAfterForce + "）"));
+            Line("强制退出后 HUD 清零", (_exHudAfterForce == 0 && _exCanvasAfterForce == 0) ? "是"
+                 : ("否（HUD " + _exHudAfterForce + " / 画布 " + _exCanvasAfterForce + "）"));
+            Line("强制退出后时间解冻", thaw ? "是" : ("否（" + _exScaleAfterForce.ToString("F2") + "）"));
+            Line("强制退出后主菜单可见且有提示", menuOk ? "是" : (_exMenuVisible ? "否（提示为空或裸键）" : "否（菜单不可见）"));
+            Line("强制退出后世界已拆", (_exWorldGone && _exRunningFalse) ? "是"
+                 : ("否（已拆 " + Yn(_exWorldGone) + " / 计时已停 " + Yn(_exRunningFalse) + "）"));
+            Line("二次开局被拦下", (_exBlocked >= 1 && _exSecondBlocked) ? "是" : ("否（拦截 " + _exBlocked + " 次）"));
+            Line("全程零异常", Yn(_exNoErrOk));
+            // —— 详情（驱动脚本不判，仅供人读）——
+            Line("死亡后 HUD", _exHudDead.ToString());
+            Line("时长轨迹", _exSecLine);
+            Line("timeScale", _exScaleLine);
+            Line("强退后主菜单", _exMenuLine);
+            Line("按钮点击", _exClicked ? "成功" : "未找到 RestartBtn");
+            Line("首个异常", _firstError);
+            // 键名同样要避开 SmokeTest 的收尾报告：本场景故意以"世界已拆"收尾
+            Line("EXIT结论", (_errors == 0 && _fail.Count == 0 && _ok == _checked) ? "通过" : "不通过");
+            foreach (var f in _fail) Line("EXIT失败项", f);
         }
 
         // =====================================================================================

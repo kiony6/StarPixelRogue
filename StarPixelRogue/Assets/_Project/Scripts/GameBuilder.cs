@@ -885,6 +885,13 @@ namespace StarPixel
             Core.PlaytimeGuard.GameRunning = true;       // 对局开始：累计游戏时长
             UI.GameOverPanel.Ensure();                   // 幂等：主菜单/大厅路径可能未创建
 
+            // M47：新一局开始时收起**跨局残留**的时长提示遮罩（青少年预警 / 成人健康提示）。
+            // 那层遮罩由 PlaytimeGuard 在场景根上 new 出来，不属于被拆的世界——
+            // 于是"预警挂起时死亡 → 点重新开始"这条真实路径会把它一路带进新一局，
+            // 盖在玩家的操作界面上。放在拦截分支**之后**：被拦下的开局没有新世界，
+            // 此时收起提示会让玩家连"为什么开不了局"都看不到。
+            Core.PlaytimeGuard.Instance?.DismissHint();
+
             bool net = Net.NetSession.IsNetworked;
 
             if (!net)

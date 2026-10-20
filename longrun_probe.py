@@ -58,13 +58,16 @@ SCENARIOS = (
     ("GROWTH", "长局 30 分钟游戏时间（6x 加速）：掉落物有界且不加速堆积 / 堆收敛 / 数值不越界 / 零异常"),
     ("RESTART", "长局之后拆世界重开一局：根对象回落 / 波次重置 / 玩家可控 / 零异常"),
     ("PANEL", "M46 真实重开路径：结算面板弹出 → 冻结 → 点「重新开始」→ 时间恢复 / 面板消失 / HUD 唯一"),
+    ("EXIT", "M47 青少年模式强制退出走真实路径：预警 → 死在结算面板上 → 到点被踢 → 面板被收 / 主菜单提示 / 二次开局被拦"),
 )
 
 BACKUP_SUFFIX = ".m41bak"
 
 # 每个场景的时长（秒）。GROWTH 真跑 300s（= 游戏内 30 分钟），RESTART 120s 足够堆起来。
 # PANEL 前半程堆世界、后半程给新世界跑，120s 够。
-SECONDS = {"GROWTH": 300, "RESTART": 120, "PANEL": 120}
+# EXIT 有七段（开模式 → 推进到预警 → 死亡重开 → 新世界跑一段 → 再死 → 到点被踢 → 二次开局），
+# 180s 才排得开。
+SECONDS = {"GROWTH": 300, "RESTART": 120, "PANEL": 120, "EXIT": 180}
 SPEED = 6.0
 
 
@@ -125,7 +128,9 @@ def restore(data_dir, names):
 
 
 def clear_artifacts(data_dir):
-    for n in ("save.json", "settings.json"):
+    # playtime.json：EXIT 场景会真的把当日时长顶到上限并落盘，
+    # 探针收尾虽会 ResetToday，进程一旦被超时杀掉就得靠这里兜底。
+    for n in ("save.json", "settings.json", "playtime.json"):
         p = os.path.join(data_dir, n)
         if os.path.exists(p):
             os.remove(p)
@@ -221,6 +226,26 @@ def check(scene, res):
             ("拆世界后时间解冻", _yes),
             ("断点通过", _eq("11/11")),
         ],
+        "EXIT": [
+            ("青少年模式且对局计时在走", _yes),
+            ("到点前弹出一次预警", _yes),
+            ("死亡后结算面板弹出", _yes),
+            ("死亡后世界冻结", _yes),
+            ("重开后旧提示遮罩已收", _yes),
+            ("重开后结算面板已收", _yes),
+            ("重开后世界继续推进", _yes),
+            ("第二次死亡面板再次弹出", _yes),
+            ("面板挂起期间时长仍在累计", _yes),
+            ("到点恰好强制退出一次", _yes),
+            ("强制退出后结算面板被收", _yes),
+            ("强制退出后 HUD 清零", _yes),
+            ("强制退出后时间解冻", _yes),
+            ("强制退出后主菜单可见且有提示", _yes),
+            ("强制退出后世界已拆", _yes),
+            ("二次开局被拦下", _yes),
+            ("全程零异常", _yes),
+            ("断点通过", _eq("17/17")),
+        ],
     }.get(scene)
 
     if spec is None:
@@ -239,13 +264,14 @@ def check(scene, res):
         rows.append((key, shown, got, good))
         ok = ok and good
 
-    # M46：PANEL 场景故意以「世界已拆」收尾（强制退出路径），SmokeTest 随后按空世界
-    # 报出「波次 0 / 结论 未通过」。那是本场景的预期状态而不是回归，故 PANEL 只认
+    # M46：PANEL / EXIT 都故意以「世界已拆」收尾（强制退出路径），SmokeTest 随后按空世界
+    # 报出「波次 0 / 结论 未通过」。那是本场景的预期状态而不是回归，故只认
     # 探针自己的结论键（LongRunProbe 里同样刻意避开了同名键）。
-    if scene == "PANEL":
-        if res.get("PANEL结论") != "通过":
+    if scene in ("PANEL", "EXIT"):
+        key = scene + "结论"
+        if res.get(key) != "通过":
             ok = False
-        if res.get("PANEL失败项", "无") != "无":
+        if res.get(scene + "失败项", "无") != "无":
             ok = False
         return ok, rows
 
@@ -288,7 +314,7 @@ def main():
     print("  数据   %s" % data_dir)
     print("=" * 74)
 
-    backed = backup(data_dir, ["save.json", "settings.json"])
+    backed = backup(data_dir, ["save.json", "settings.json", "playtime.json"])
     if backed:
         print("  已备份 %d 个用户文件（跑后恢复）\n" % len(backed))
 
@@ -317,7 +343,8 @@ def main():
             for extra in ("最终波次", "最终等级", "最终击杀", "场上敌人", "宝石峰值",
                           "回血球峰值", "根对象", "对象总数", "托管堆MB", "平均帧率",
                           "长局末根对象", "重开后根对象", "重开后宝石", "重开后波次", "首个异常",
-                          "timeScale", "结算画布", "HUD", "波次轨迹", "按钮点击", "强制退出"):
+                          "timeScale", "结算画布", "HUD", "波次轨迹", "按钮点击", "强制退出",
+                          "时长轨迹", "强退后主菜单", "二次开局拦截", "死亡后 HUD"):
                 if extra in res and res[extra] not in ("", "无"):
                     print("        %-18s %s" % (extra, res[extra]))
 

@@ -4304,6 +4304,228 @@ namespace A
 ]
 
 
+FORCE_EXIT_SIG_RE = re.compile(r'\bvoid\s+ForceExitMinor\s*\(\s*\)')
+BUILD_SIG_RE = re.compile(r'\bstatic\s+void\s+Build\s*\(\s*\)')
+
+
+def check_force_exit_shows_menu():
+    """
+    强制退出必须**保证主菜单可达**（M47）。
+
+    青少年模式当日时长到点时，<c>PlaytimeGuard.ForceExitMinor</c> 会把玩家踢回主菜单。
+    原写法是 <c>if (UI.MainMenu.Instance != null) ShowWithNotice(...)</c>——
+    主菜单不存在时，这一整段被静默跳过：世界拆了、菜单没有、一行解释也没有，
+    玩家对着一个空场景，不知道自己为什么突然不能玩了。合规功能最忌讳这种沉默失败。
+
+    "主菜单不存在"不是假想：它是 <c>GameBuilder</c> 启动流程里 <c>MainMenu.Ensure()</c>
+    的产物，任何绕开那段流程的开局入口（无头实测入口就是其中一个）都不会有它。
+    这条路径此前从未被测试走到——M19 的 <c>PlaytimeProbe</c> 自己会先
+    <c>MainMenu.Ensure()</c>，恰好把它遮住了。
+
+    判据：<c>ForceExitMinor()</c> 方法体内必须先 <c>MainMenu.Ensure()</c> 再
+    <c>ShowWithNotice(...)</c>（注释里提到不算）。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)
+        if 'ForceExitMinor' not in raw:
+            continue
+        clean = strip_noise(raw)
+        for m in FORCE_EXIT_SIG_RE.finditer(clean):
+            brace = clean.find('{', m.end())
+            if brace < 0:
+                continue
+            body = _brace_body(clean, brace)
+            if 'MainMenu.Ensure()' in body and 'ShowWithNotice' in body:
+                continue
+            line = clean[:m.start()].count('\n') + 1
+            err("强制退出可能踢到一个没有菜单的空场景: %s 第 %d 行 ForceExitMinor()\n"
+                "      提示写成了 `if (MainMenu.Instance != null) ShowWithNotice(...)`——\n"
+                "      主菜单不存在时整段被静默跳过：世界已拆、菜单没有、一行解释也没有。\n"
+                "      MainMenu 是 GameBuilder 启动流程里 Ensure() 出来的，任何绕开那段流程的\n"
+                "      开局入口都不会有它（无头实测入口就是现成的一个）。\n"
+                "      修法：先 UI.MainMenu.Ensure() 再 ShowWithNotice(...)——\n"
+                "      玩家至少要知道自己为什么被踢。"
+                % (rp, line))
+
+
+def check_build_dismisses_hint():
+    """
+    建世界时必须收起**跨局残留**的时长提示遮罩（M47）。
+
+    <c>PlaytimeGuard.ShowHint</c> 用 <c>UIFactory.CreateModal</c> 在场景根上 new 出一层
+    全屏模态遮罩，既不归 <c>GameBuilder._created</c> 管，也不随拆世界消失——
+    与 M46 修的结算面板是同一个形态。于是这条真实路径会漏：
+
+    玩家在 55 分钟预警挂起时没点「关闭」→ 继续玩到死 → 结算面板弹出（两层模态叠着）
+    → 点「重新开始」→ 新世界建好了，而那层写着"今日时长已达 55 分钟"的遮罩
+    **原封不动盖在新一局的操作界面上**。
+
+    提示本身跨局有效（剩下的 5 分钟还在走），但"遮罩跨局残留"不是。
+    判据：建世界入口（方法体内置 <c>PlaytimeGuard.GameRunning = true</c> 的那个
+    <c>Build()</c>）必须调用 <c>DismissHint()</c>（注释里提到不算）。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)
+        if 'Build' not in raw:
+            continue
+        clean = strip_noise(raw)
+        for m in BUILD_SIG_RE.finditer(clean):
+            brace = clean.find('{', m.end())
+            if brace < 0:
+                continue
+            body = _brace_body(clean, brace)
+            if 'GameRunning = true' not in body:
+                continue                       # 不是建世界入口（UI 里另有一堆 Build()）
+            if 'DismissHint' in body or 'CloseHint' in body:
+                continue
+            line = clean[:m.start()].count('\n') + 1
+            err("建世界没收起跨局残留的时长提示遮罩: %s 第 %d 行 Build()\n"
+                "      那层遮罩由 PlaytimeGuard 在场景根上 new 出来，既不归 _created 管，\n"
+                "      也不随拆世界消失——与 M46 修的结算面板同一个形态。\n"
+                "      于是：预警挂起时死亡 → 点「重新开始」，遮罩会一路盖进新一局的操作界面。\n"
+                "      修法：在成功建世界之后调 PlaytimeGuard.Instance?.DismissHint()\n"
+                "      （放在开局拦截分支**之后**：被拦下的开局没有新世界，\n"
+                "        此时收起提示会让玩家连\"为什么开不了局\"都看不到）。"
+                % (rp, line))
+
+
+# 第 25 项夹具：强制退出是否保证主菜单可达（M47）
+SELFTEST_FORCE_EXIT = [
+    # ① M47 修完的真实状态：先 Ensure 再提示
+    ("fe01_先Ensure再提示", False, """
+namespace A
+{
+    public class B
+    {
+        private void ForceExitMinor()
+        {
+            CloseHint();
+            UI.MainMenu.Ensure();
+            UI.MainMenu.Instance.ShowWithNotice("bye");
+            GameBuilder.TeardownWorld();
+        }
+    }
+}
+"""),
+    # ② M47 之前的真实状态：菜单不存在就什么都不说（静默踢人）
+    ("fe02_只在Instance非空时提示", True, """
+namespace A
+{
+    public class B
+    {
+        private void ForceExitMinor()
+        {
+            CloseHint();
+            if (UI.MainMenu.Instance != null)
+                UI.MainMenu.Instance.ShowWithNotice("bye");
+            GameBuilder.TeardownWorld();
+        }
+    }
+}
+"""),
+    # ③ 压根不提示
+    ("fe03_完全不提示", True, """
+namespace A
+{
+    public class B
+    {
+        private void ForceExitMinor()
+        {
+            CloseHint();
+            GameBuilder.TeardownWorld();
+        }
+    }
+}
+"""),
+    # ④ 注释里提了一句不算
+    ("fe04_只在注释里提", True, """
+namespace A
+{
+    public class B
+    {
+        private void ForceExitMinor()
+        {
+            // 由主菜单负责提示：MainMenu.Ensure() + ShowWithNotice
+            GameBuilder.TeardownWorld();
+        }
+    }
+}
+"""),
+]
+
+# 第 26 项夹具：建世界是否收起跨局残留的提示遮罩（M47）
+SELFTEST_BUILD_HINT = [
+    # ① M47 修完的真实状态：拦截分支之后、建世界时收起
+    ("bh01_建世界时收提示", False, """
+namespace A
+{
+    public static class B
+    {
+        public static void Build()
+        {
+            if (!Core.PlaytimeGuard.CanStartRun()) return;
+            _built = true;
+            Core.PlaytimeGuard.GameRunning = true;
+            Core.PlaytimeGuard.Instance?.DismissHint();
+        }
+    }
+}
+"""),
+    # ② M47 之前的真实状态：压根不管那层遮罩
+    ("bh02_建世界不管提示", True, """
+namespace A
+{
+    public static class B
+    {
+        public static void Build()
+        {
+            if (!Core.PlaytimeGuard.CanStartRun()) return;
+            _built = true;
+            Core.PlaytimeGuard.GameRunning = true;
+            UI.GameOverPanel.Ensure();
+        }
+    }
+}
+"""),
+    # ③ 不是建世界入口的 Build()（没有 GameRunning = true）：不管它
+    ("bh03_同名但非建世界入口", False, """
+namespace A
+{
+    public static class B
+    {
+        public static void Build()
+        {
+            _root = Core.UIFactory.CreateCanvas("MainMenuCanvas");
+        }
+    }
+}
+"""),
+    # ④ 注释里提了一句不算
+    ("bh04_只在注释里提", True, """
+namespace A
+{
+    public static class B
+    {
+        public static void Build()
+        {
+            _built = true;
+            Core.PlaytimeGuard.GameRunning = true;
+            // 提示遮罩由 PlaytimeGuard 自行关闭（DismissHint）
+        }
+    }
+}
+"""),
+]
+
+
 def _run_legal_fixtures(fixtures, checks=None):
     """把夹具写成 Resources/Legal 下的 txt 跑第 14 项，返回被报错的夹具名集合。"""
     import shutil
@@ -4379,6 +4601,8 @@ def selftest():
         ("拆世界扫场覆盖检查（第 22 项）", SELFTEST_SW, [check_teardown_sweeps_all_types]),
         ("拆世界保留玩家检查（第 23 项）", SELFTEST_KP, [check_teardown_keeps_players]),
         ("拆世界收面板检查（第 24 项）", SELFTEST_TD_PANEL, [check_teardown_closes_panel]),
+        ("强制退出菜单可达检查（第 25 项）", SELFTEST_FORCE_EXIT, [check_force_exit_shows_menu]),
+        ("建世界收提示检查（第 26 项）", SELFTEST_BUILD_HINT, [check_build_dismisses_hint]),
     ]
 
     all_bad = 0
@@ -4436,6 +4660,8 @@ def main():
     check_teardown_sweeps_all_types()
     check_teardown_keeps_players()
     check_teardown_closes_panel()
+    check_force_exit_shows_menu()
+    check_build_dismisses_hint()
 
     n = len(cs_files())
     print("=" * 68)
