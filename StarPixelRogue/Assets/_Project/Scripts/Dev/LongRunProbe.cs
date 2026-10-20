@@ -97,6 +97,9 @@ namespace StarPixel.Dev
         private string _pnPanelText = "否", _pnFreezeText = "否", _pnResumeText = "否";
         private string _pnGoneText = "否", _pnHudText = "否", _pnWaveText = "否", _pnAdvanceText = "否";
         private string _pnScaleText = "?", _pnWaveLine = "?";
+        // M48：面板弹出那一刻，按钮到底点不点得到（不是 onClick.Invoke 那种绕过 raycast 的点法）
+        private UIHitTest.Hit _pnHit;
+        private bool _pnHitOk;
 
         // —— EXIT（M47：青少年模式强制退出走真实路径）——
         private bool _exF1, _exF2, _exF3, _exF4, _exF5, _exF6, _exF7, _exF8;
@@ -111,6 +114,12 @@ namespace StarPixel.Dev
         private bool _exClicked;
         private bool _exMenuVisible, _exWorldGone, _exRunningFalse, _exSecondBlocked, _exNoErrOk;
         private string _exNotice = "", _exScaleLine = "?", _exSecLine = "?", _exMenuLine = "?";
+        // M48：命中测试。三条各有分工，见 ReportExit 里的判据说明：
+        //   _exHitDead1 第一次死亡（遮罩挂着、面板刚弹）→ 面板在后、叠在遮罩上，按钮应可点
+        //   _exScreenHit 重开后新一局开局 → 屏幕中心不该还盖着上一局那层遮罩（缺陷 B 的后果）
+        //   _exHitDead2 第二次死亡（遮罩已收）→ 按钮应可点
+        private UIHitTest.Hit _exHitDead1, _exHitDead2, _exScreenHit;
+        private bool _exHit1Ok, _exHit2Ok, _exScreenClear;
 
         private struct Sample
         {
@@ -464,7 +473,13 @@ namespace StarPixel.Dev
             _pnPanelCanvas = CountNamed<Canvas>("GameOverCanvas");
             _pnScalePaused = Time.timeScale;
 
-            // 第二步：**点按钮**（不是调 OnRestart——那样就又绕过了按钮这层）
+            // 第二步（M48）：面板弹出来之后、点下去之前，先问一句"这个按钮真的点得到吗"。
+            // 这是整套命中测试的**正向对照**——本场景没有任何遮罩，它必须是"点得到"；
+            // 它要是红了，说明无头环境下的 raycast 不可用，EXIT 那两条也就不必看了。
+            _pnHit = UIHitTest.Probe(FindButton("RestartBtn"));
+            _pnHitOk = _pnHit.Found && _pnHit.Reachable;
+
+            // 第三步：**点按钮**（不是调 OnRestart——那样就又绕过了按钮这层）
             _pnClicked = ClickButton("RestartBtn");
 
             yield return null;
@@ -517,8 +532,8 @@ namespace StarPixel.Dev
                           _pnTearScaleAfter.ToString("F2");
         }
 
-        /// <summary>按名字点一次场景里的 UI 按钮。找不到返回 false（判据会把它打成"未点到"）。</summary>
-        private static bool ClickButton(string name)
+        /// <summary>按名字找场景里的 UI 按钮（只认激活的、在场景里的）。</summary>
+        private static UnityEngine.UI.Button FindButton(string name)
         {
             foreach (var b in Resources.FindObjectsOfTypeAll<UnityEngine.UI.Button>())
             {
@@ -527,10 +542,23 @@ namespace StarPixel.Dev
                 if (!go.scene.IsValid()) continue;
                 if (!go.activeInHierarchy) continue;
                 if (go.name != name) continue;
-                b.onClick.Invoke();
-                return true;
+                return b;
             }
-            return false;
+            return null;
+        }
+
+        /// <summary>
+        /// 按名字点一次场景里的 UI 按钮。找不到返回 false（判据会把它打成"未点到"）。
+        ///
+        /// 注意它**绕过了 raycast**：<c>onClick.Invoke()</c> 是直接调用回调，
+        /// 按钮上面盖着几层遮罩都不影响。要验"玩家点不点得到"得用 <see cref="UIHitTest"/>。
+        /// </summary>
+        private static bool ClickButton(string name)
+        {
+            var b = FindButton(name);
+            if (b == null) return false;
+            b.onClick.Invoke();
+            return true;
         }
 
         private void ReportPanel()
@@ -591,6 +619,11 @@ namespace StarPixel.Dev
             _pnAdvanceText = _pnAdvanceOk ? "是" : ("否（波次 " + _pnWaveReset + " → " + _pnWaveFinal +
                                                     "，宝石 " + _pnGemsAfter + "）");
 
+            // M48：面板弹出时那个按钮必须**真的点得到**（UI 命中测试，不是 onClick.Invoke）。
+            //    前面所有判据都建立在"玩家点了这个按钮"之上，而探针用的 Invoke 是绕过去的；
+            //    这一条负责证明"玩家也点得到"。本场景无遮罩，它是整套命中测试的正向对照。
+            Check("重开按钮可被点到", _pnHitOk);
+
             Check("重开后玩家可控", _pnPlayerOk2);
             _pnNoErrOk = _errors == 0;
             Check("全程零异常", _pnNoErrOk);
@@ -628,6 +661,10 @@ namespace StarPixel.Dev
             Line("重开后 HUD 唯一", _pnHudText);
             Line("重开后波次重置", _pnWaveText);
             Line("重开后世界继续推进", _pnAdvanceText);
+            // 判据值只给"是 / 否（原因）"——驱动脚本按字面判"是"，
+            // "顶层是谁"这类诊断信息另走下面的详情键。
+            Line("重开按钮可被点到", _pnHitOk ? "是" : ("否（" + UIHitTest.Describe(_pnHit) + "）"));
+            Line("命中测试详情", UIHitTest.Describe(_pnHit));
             Line("重开后玩家可控", Yn(_pnPlayerOk2));
             Line("全程零异常", Yn(_pnNoErrOk));
             Line("拆世界后结算画布消失", _pnTearGoneText);
@@ -717,7 +754,17 @@ namespace StarPixel.Dev
             _exHudDead = CountNamed<UI.HUDController>(null);
             _exSecDead = g != null ? g.TodaySeconds : -1f;
 
-            // 玩家点「重新开始」（不是调 OnRestart——那样就绕过了按钮这层）
+            // M48：预警遮罩还挂着，结算面板刚弹出来——这两层谁在上？
+            //   **实测是面板在上**（PlaytimeHint 是 55 分钟时就建好的，面板是死亡时才建，
+            //   overlay 画布同 sortOrder 时后建的在上面，renderOrder 3 > 2）。
+            //   所以这一刻玩家**点得到**重开按钮——M47 §7 第 2 条里那句
+            //   "真实玩家在遮罩下面点不到「重新开始」"是**错的**，本条就是它的证伪记录。
+            //   它同时是后面第 17 条的对照组：同一个遮罩，有面板时挡不住、没面板时挡得住。
+            _exHitDead1 = UIHitTest.Probe(FindButton("RestartBtn"));
+            _exHit1Ok = _exHitDead1.Found && _exHitDead1.Reachable;
+
+            // 玩家点「重新开始」（不是调 OnRestart——那样就绕过了按钮这层，
+            // 也绕过了上面刚验过的"其实点不到"——真实玩家在这里得先处理掉那层提示）
             _exClicked = ClickButton("RestartBtn");
 
             yield return null;
@@ -726,6 +773,14 @@ namespace StarPixel.Dev
             // M47：那层"今日时长已达 55 分钟"的模态遮罩不该跟着进新一局。
             // 它是 CreateModal 在场景根上 new 出来的，不属于被拆的世界——与结算面板同一个形态。
             _exHintAfterRestart = g != null && g.HintShowing;
+            // M48【核心】：新一局已经跑起来了，此刻**屏幕中心**盖着的是谁？
+            //   缺陷 B 真正伤害玩家的形态不是"遮罩对象还在"（M47 验的是这个），
+            //   而是"新一局的操作界面被上一局的提示盖住了"。这一层此前从未被验证：
+            //   遮罩挡不挡得住按钮要看上层有没有更晚建的画布（第一次死亡时就有，面板盖住它），
+            //   而新一局进行中没有任何东西比它更晚——它就是屏幕上最上面那层。
+            //   直接测屏幕中心而不是测某个按钮：HUD 上没有可点元素，测按钮会永远绿。
+            _exScreenHit = UIHitTest.ProbePoint(new Vector2(Screen.width * 0.5f, Screen.height * 0.5f));
+            _exScreenClear = _exScreenHit.TopCanvas != "PlaytimeHint";
             _exF4 = true;
         }
 
@@ -747,6 +802,12 @@ namespace StarPixel.Dev
             yield return null;
             yield return null;
             _exPanelDead2 = CountNamed<Canvas>("GameOverCanvas");
+
+            // M48【核心】：重开之后、遮罩已被收掉的这一局里，同一个按钮必须**点得到**。
+            // 缺陷 B（跨局遮罩残留）的行为后果就在这条上——M47 只验了"遮罩还在"（对象层面），
+            // 没验"因此玩家点不到按钮"（后果层面）。注入摘掉 DismissHint 后本条应红。
+            _exHitDead2 = UIHitTest.Probe(FindButton("RestartBtn"));
+            _exHit2Ok = _exHitDead2.Found && _exHitDead2.Reachable;
 
             var g = Core.PlaytimeGuard.Instance;
             if (g != null)
@@ -847,6 +908,25 @@ namespace StarPixel.Dev
             // 15) 【核心】回主菜单再点「开始游戏」必须被拦下（M19 的绕过手法之一）
             Check("二次开局被拦下", _exBlocked >= 1 && _exSecondBlocked);
 
+            // 16) 【M48】预警遮罩挂着时死亡，结算面板必须**盖在遮罩之上**——玩家点得到重开按钮。
+            //     M47 §7 第 2 条写着"真实玩家在遮罩下面点不到「重新开始」"，实测**并非如此**：
+            //     PlaytimeHint 在 55 分钟时就建好了，面板是死亡那一刻才建的，
+            //     overlay 画布 sortOrder 相同则后建的在上（renderOrder 3 > 2，日志里有据）。
+            //     这条把证伪固化下来，同时充当第 17 条的对照组：
+            //     同一层遮罩，有更晚建的面板时挡不住，没有时就挡得住。
+            Check("结算面板叠在时长遮罩之上", _exHit1Ok);
+
+            // 17) 【M48 · 核心】重开之后，新一局的屏幕中心**不许还盖着上一局那层提示遮罩**。
+            //     这才是缺陷 B 真正伤害玩家的形态：M47 验的是"遮罩对象还在"（对象层面），
+            //     这条验的是"新一局的操作界面被它盖住了"（后果层面）。
+            //     测屏幕中心而非某个按钮——HUD 上没有可点元素，测按钮会永远绿（假绿）。
+            Check("重开后屏幕中心无残留遮罩", _exScreenClear);
+
+            // 18) 【M48】第二次死亡（此时遮罩早已收掉）时，同一个按钮必须点得到。
+            //     与第 16 条同源，两条一起看才有意义：它们证明"可点/不可点"是命中测试测出来的，
+            //     不是恒真的装饰（Q4 注入恒判"被挡住"时，16/18 会一起红）。
+            Check("重开后重开按钮可被点到", _exHit2Ok);
+
             _exNoErrOk = _errors == 0;
             Check("全程零异常", _exNoErrOk);
 
@@ -877,6 +957,12 @@ namespace StarPixel.Dev
             Line("强制退出后世界已拆", (_exWorldGone && _exRunningFalse) ? "是"
                  : ("否（已拆 " + Yn(_exWorldGone) + " / 计时已停 " + Yn(_exRunningFalse) + "）"));
             Line("二次开局被拦下", (_exBlocked >= 1 && _exSecondBlocked) ? "是" : ("否（拦截 " + _exBlocked + " 次）"));
+            Line("结算面板叠在时长遮罩之上", _exHit1Ok ? "是"
+                 : ("否（" + UIHitTest.Describe(_exHitDead1) + "）"));
+            Line("重开后屏幕中心无残留遮罩", _exScreenClear ? "是"
+                 : ("否（屏幕中心盖着 " + _exScreenHit.Blocker + "，画布 " + _exScreenHit.TopCanvas + "）"));
+            Line("重开后重开按钮可被点到", _exHit2Ok ? "是"
+                 : ("否（" + UIHitTest.Describe(_exHitDead2) + "）"));
             Line("全程零异常", Yn(_exNoErrOk));
             // —— 详情（驱动脚本不判，仅供人读）——
             Line("死亡后 HUD", _exHudDead.ToString());
@@ -884,6 +970,11 @@ namespace StarPixel.Dev
             Line("timeScale", _exScaleLine);
             Line("强退后主菜单", _exMenuLine);
             Line("按钮点击", _exClicked ? "成功" : "未找到 RestartBtn");
+            // 命中测试的环境诊断：无头下 Screen 尺寸、参与 raycast 的画布数、按钮屏幕坐标。
+            // 这几项不参与判定，但它们决定了上面两条命中判据**能不能被相信**——
+            // 屏幕 0x0 或射线数为 0 时，"点不到"是环境塌了而不是被遮罩挡住。
+            Line("命中测试环境", "屏幕 " + _exHitDead2.Screen + " / 射线 " + _exHitDead2.Raycasters +
+                                 " / 命中 " + _exHitDead2.Hits + " / 按钮中心 " + _exHitDead2.At);
             Line("首个异常", _firstError);
             // 键名同样要避开 SmokeTest 的收尾报告：本场景故意以"世界已拆"收尾
             Line("EXIT结论", (_errors == 0 && _fail.Count == 0 && _ok == _checked) ? "通过" : "不通过");
