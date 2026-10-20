@@ -28,6 +28,8 @@ namespace StarPixel.Dev
     ///   GROWTH   长局跑满，分 6 段采样：波次确实推进 / 掉落物有界且不加速堆积 /
     ///            根对象不随波次增长 / 托管堆收敛 / 数值不越界 / 全程零异常
     ///   RESTART  长局之后拆世界重开一局：根对象回落、掉落物清零、波次回到 1、全程零异常
+    ///   PANEL    M46：走**玩家真实操作路径**重开——结算面板弹出 → 冻结 → 点「重新开始」按钮
+    ///            → 时间恢复 / 面板消失 / HUD 唯一 / 波次回落 / 玩家可控 / 全程零异常
     ///
     /// 判据的区分力：
     ///   1) "后半程不加速堆积"比"最终值有上限"更狠：只加上限的话，堆到上限就不再涨，
@@ -70,6 +72,26 @@ namespace StarPixel.Dev
         // —— RESTART ——
         private int _rsRootBefore, _rsRootAfter, _rsGemsAfter, _rsWaveAfter;
         private bool _rsRootOk, _rsWaveOk, _rsPlayerOk, _rsNoErrOk;
+
+        // —— PANEL（M46：真实重开路径 —— 结算面板 → 点「重新开始」按钮）——
+        private bool _pnFired;
+        private int _pnWaveBefore = -1;
+        private int _pnPanelCanvas = -1, _pnPanelAfter = -1;
+        private float _pnScaleBefore = -1f, _pnScalePaused = -1f, _pnScaleAfter = -1f;
+        private int _pnHudBefore = -1, _pnHudAfter = -1;
+        private int _pnCanvasBefore = -1, _pnCanvasAfter = -1;
+        private int _pnWaveReset = -1, _pnWaveFinal = -1, _pnGemsAfter = -1;
+        private bool _pnClicked, _pnPlayerOk;
+        private bool _pnMid, _pnFired2;
+        private int _pnTearCanvasBefore = -1, _pnTearCanvasAfter = -1;
+        private float _pnTearScalePaused = -1f, _pnTearScaleAfter = -1f;
+        private bool _pnTearGoneOk, _pnTearThawOk;
+        private string _pnTearGoneText = "否", _pnTearThawText = "否", _pnTearLine = "?";
+        private bool _pnPanelOk, _pnFreezeOk, _pnResumeOk, _pnGoneOk, _pnHudOk;
+        private bool _pnWaveOk, _pnAdvanceOk, _pnPlayerOk2, _pnNoErrOk;
+        private string _pnPanelText = "否", _pnFreezeText = "否", _pnResumeText = "否";
+        private string _pnGoneText = "否", _pnHudText = "否", _pnWaveText = "否", _pnAdvanceText = "否";
+        private string _pnScaleText = "?", _pnWaveLine = "?";
 
         private struct Sample
         {
@@ -131,9 +153,31 @@ namespace StarPixel.Dev
                 _done++;
             }
 
+            // M46：真实重开路径在中途触发——后半程留给新世界跑，才能判"重开后世界真的在动"
+            if (_scene == "PANEL")
+            {
+                if (!_pnFired && _t >= _limit * 0.5f)
+                {
+                    _pnFired = true;
+                    StartCoroutine(PanelFlow());
+                }
+                // 新世界跑过一段后再数"推进"，且必须在第二次拆世界之前
+                if (_pnClicked && !_pnMid && _t >= _limit * 0.8f)
+                {
+                    _pnMid = true;
+                    SampleAdvanced();
+                }
+                if (_pnMid && !_pnFired2 && _t >= _limit * 0.85f)
+                {
+                    _pnFired2 = true;
+                    StartCoroutine(PanelFlowTear());
+                }
+            }
+
             if (_t >= _limit)
             {
                 if (_scene == "RESTART") FinishRestart();
+                else if (_scene == "PANEL") ReportPanel();
                 else Report();
                 enabled = false;
             }
@@ -358,8 +402,241 @@ namespace StarPixel.Dev
         }
 
         // =====================================================================================
+        //  PANEL（M46）：走玩家真实操作路径重开一局
+        //
+        //  既有 RESTART 场景是 `TeardownWorld(); Build();` 两行——它验证的是"拆建这对 API"，
+        //  不是"玩家点下那个按钮会发生什么"。真实路径是三条腿：
+        //     EventBus.RaiseRunEnded → GameOverPanel.ShowRun（建结算画布 + 单机压 timeScale 到 0）
+        //     → 玩家点 RestartBtn → OnRestart（恢复时间 + 收面板 + Teardown + Build）
+        //  中间那一步（"恢复时间 + 收面板"）**从未被任何测试执行过**。
+        //  它坏了的表现是：新世界建得完美无缺，但游戏冻在 timeScale=0，或者结算面板
+        //  盖在新世界上永远不消失——而 RESTART 的 4 条判据一条都不会红。
+        // =====================================================================================
+
+        private System.Collections.IEnumerator PanelFlow()
+        {
+            var em = EnemyManager.Instance;
+            var pc = PlayerController.Instance;
+            _pnWaveBefore = em != null ? em.CurrentWave : -1;
+            _pnScaleBefore = Time.timeScale;
+            _pnHudBefore = CountNamed<UI.HUDController>(null);
+            _pnCanvasBefore = CountNamed<Canvas>("HUDCanvas");
+
+            // 玩家真实路径的第一步：一局结束（HUD 汇总后由游戏逻辑发出）
+            Core.EventBus.RaiseRunEnded(_pnWaveBefore, _game, _kills, pc != null ? pc.level : 1, false);
+
+            // 等两帧：结算面板是同步建的，但 Canvas 的 active 状态要等一帧才稳
+            yield return null;
+            yield return null;
+            _pnPanelCanvas = CountNamed<Canvas>("GameOverCanvas");
+            _pnScalePaused = Time.timeScale;
+
+            // 第二步：**点按钮**（不是调 OnRestart——那样就又绕过了按钮这层）
+            _pnClicked = ClickButton("RestartBtn");
+
+            yield return null;
+            yield return null;
+            // 点完立刻看：面板收了没有、时间恢复了没有（这两条只在重开瞬间成立）
+            _pnPanelAfter = CountNamed<Canvas>("GameOverCanvas");
+            _pnScaleAfter = Time.timeScale;
+            _pnHudAfter = CountNamed<UI.HUDController>(null);
+            _pnCanvasAfter = CountNamed<Canvas>("HUDCanvas");
+            // 波次必须**在重开瞬间**数：后半程还要给新世界留时间跑，
+            // 等收尾再数的话新世界早爬回同一水位，"重置"就永远判不出来。
+            var em2 = EnemyManager.Instance;
+            _pnWaveReset = em2 != null ? em2.CurrentWave : -1;
+        }
+
+        private void SampleAdvanced()
+        {
+            var em = EnemyManager.Instance;
+            var pc = PlayerController.Instance;
+            _pnWaveFinal = em != null ? em.CurrentWave : -1;
+            _pnGemsAfter = CountGems();
+            _pnPlayerOk2 = pc != null && (pc.damageable == null || !pc.damageable.isDead);
+        }
+
+        /// <summary>
+        /// 第二次：**只拆不建**（青少年模式当日时长到点的强制退出就走这条路）。
+        /// 与第一次的区别是它压根不碰按钮——结算面板开着、世界被压在 timeScale=0，
+        /// 然后世界被拆掉。收面板的责任落在 TeardownWorld 身上。
+        /// </summary>
+        private System.Collections.IEnumerator PanelFlowTear()
+        {
+            var em = EnemyManager.Instance;
+            var pc = PlayerController.Instance;
+            Core.EventBus.RaiseRunEnded(em != null ? em.CurrentWave : 1, _game, _kills,
+                                        pc != null ? pc.level : 1, false);
+
+            yield return null;
+            yield return null;
+            _pnTearCanvasBefore = CountNamed<Canvas>("GameOverCanvas");
+            _pnTearScalePaused = Time.timeScale;
+
+            GameBuilder.TeardownWorld();          // 不跟 Build()：模拟强制退出
+
+            yield return null;
+            yield return null;
+            _pnTearCanvasAfter = CountNamed<Canvas>("GameOverCanvas");
+            _pnTearScaleAfter = Time.timeScale;
+            _pnTearLine = "画布 " + _pnTearCanvasBefore + " → " + _pnTearCanvasAfter +
+                          "，timeScale " + _pnTearScalePaused.ToString("F2") + " → " +
+                          _pnTearScaleAfter.ToString("F2");
+        }
+
+        /// <summary>按名字点一次场景里的 UI 按钮。找不到返回 false（判据会把它打成"未点到"）。</summary>
+        private static bool ClickButton(string name)
+        {
+            foreach (var b in Resources.FindObjectsOfTypeAll<UnityEngine.UI.Button>())
+            {
+                if (b == null) continue;
+                var go = b.gameObject;
+                if (!go.scene.IsValid()) continue;
+                if (!go.activeInHierarchy) continue;
+                if (go.name != name) continue;
+                b.onClick.Invoke();
+                return true;
+            }
+            return false;
+        }
+
+        private void ReportPanel()
+        {
+            if (!_pnMid) SampleAdvanced();       // 极端情况下（时长太短）收尾时补一次
+            _pnScaleText = _pnScaleBefore.ToString("F2") + " → " + _pnScalePaused.ToString("F2") +
+                           " → " + _pnScaleAfter.ToString("F2");
+            _pnWaveLine = _pnWaveBefore + " → " + _pnWaveReset + "（重开瞬间）→ " + _pnWaveFinal + "（收尾）";
+
+            // 1) 结算面板真的弹出来了。恒为 0 说明 RunEnded 没被消费，
+            //    下面所有关于"重开"的判据都会平凡成立。
+            _pnPanelOk = _pnPanelCanvas == 1;
+            Check("结算面板已弹出", _pnPanelOk);
+            _pnPanelText = _pnPanelCanvas == 1 ? "是" : ("否（画布数 " + _pnPanelCanvas + "）");
+
+            // 2) 单机结算必须冻结世界。这是"恢复时间"这条判据的前提：
+            //    没冻结过就谈不上恢复，判"恢复"是假绿。
+            _pnFreezeOk = _pnScalePaused <= 0.0001f;
+            Check("结算时世界冻结", _pnFreezeOk);
+            _pnFreezeText = Yn(_pnFreezeOk);
+
+            // 3) 点完重开，时间必须回到基准。卡在 0 就是"新世界建好了但游戏冻死"——
+            //    RESTART 场景永远抓不到（它从不暂停）。
+            //
+            //    与第 9) 条同一个诚实标注：当前实现下这条也**被兜住**——
+            //    LevelUpManager.OnDestroy 会先一步把 SetPaused(false) 打回去，
+            //    于是"点按钮不主动解冻"的注入（Q2 组）实测这条是绿的；
+            //    只有连那份兜底一起摘掉（Q6 组）它才会红。
+            float expect = Core.HitstopManager.BaseScale;
+            _pnResumeOk = _pnScaleAfter > 0.0001f && Mathf.Abs(_pnScaleAfter - expect) < 0.01f;
+            Check("重开后时间恢复", _pnResumeOk);
+            _pnResumeText = _pnResumeOk ? "是" : ("否（" + _pnScaleAfter.ToString("F2") + " 期望 " + expect.ToString("F2") + "）");
+
+            // 4) 结算画布必须随重开一起消失。它不在 _created 里（GameOverPanel.Ensure 没 Track），
+            //    只靠 OnRestart 里的 CloseAndResume 收——漏了就永远盖在新世界上。
+            _pnGoneOk = _pnPanelAfter == 0;
+            Check("重开后结算画布消失", _pnGoneOk);
+            _pnGoneText = _pnGoneOk ? "是" : ("否（残留 " + _pnPanelAfter + "）");
+
+            // 5) HUD 不能变成两份：旧 HUD 随拆世界销毁、新 HUD 随建世界重建，
+            //    任何一环漏了都会双份（双份订阅 → 击杀数翻倍那类）。
+            _pnHudOk = _pnHudAfter == 1 && _pnCanvasAfter == 1;
+            Check("重开后 HUD 唯一", _pnHudOk);
+            _pnHudText = _pnHudOk ? "是" : ("否（HUD " + _pnHudAfter + " / 画布 " + _pnCanvasAfter + "）");
+
+            // 6) 波次在重开那一刻必须回到开局。这一条与"时间恢复"互补：
+            //    timeScale 卡在 0 时波次也会是 1，看不出区别，所以 7）单独盯"有没有继续推进"。
+            _pnWaveOk = _pnWaveBefore >= 2 && _pnWaveReset >= 1 && _pnWaveReset <= 2;
+            Check("重开后波次重置", _pnWaveOk);
+            _pnWaveText = _pnWaveOk ? "是" : ("否（" + _pnWaveBefore + " → " + _pnWaveReset + "）");
+
+            // 7) 新世界必须**真的在跑**。这是"重开后时间恢复"的行为证据——
+            //    timeScale 卡在 0 时前 6 条全部绿（波次停在 1 也算"重置"），只有这条会红。
+            //    判"继续推进"而不是"等于某个值"：波次增速随波次递减，给不出稳定期望值。
+            //    同样被 LevelUpManager 的兜底解冻盖住（Q2 绿、Q6 红），见第 3) 条的标注。
+            _pnAdvanceOk = _pnWaveFinal > _pnWaveReset || _pnGemsAfter > 20;
+            Check("重开后世界继续推进", _pnAdvanceOk);
+            _pnAdvanceText = _pnAdvanceOk ? "是" : ("否（波次 " + _pnWaveReset + " → " + _pnWaveFinal +
+                                                    "，宝石 " + _pnGemsAfter + "）");
+
+            Check("重开后玩家可控", _pnPlayerOk2);
+            _pnNoErrOk = _errors == 0;
+            Check("全程零异常", _pnNoErrOk);
+
+            // 8) 只拆不建也必须收掉结算面板。这一条与 4）**失败面不相交**：
+            //    4）走的是"点按钮"路径（OnRestart 自己收），8）走的是"强制退出"路径
+            //    （没人点按钮，只能靠 TeardownWorld 兜底）。
+            _pnTearGoneOk = _pnTearCanvasBefore == 1 && _pnTearCanvasAfter == 0;
+            Check("拆世界后结算画布消失", _pnTearGoneOk);
+            _pnTearGoneText = _pnTearGoneOk ? "是" : ("否（" + _pnTearCanvasBefore + " → " + _pnTearCanvasAfter + "）");
+
+            // 9) 拆世界顺带解冻：面板把世界压在 timeScale=0，只收画布不解冻的话
+            //    回主菜单那一刻时间还是停的（菜单动画/下一局开局全受影响）。
+            //
+            //    诚实标注：这条判据在**当前实现下没有独立区分力**——M46 区分力注入的
+            //    Q1 组（只摘 TeardownWorld 的收面板调用）实测它**不红**：
+            //    LevelUpManager 也在 _created 里，它先于 HitstopManager 被销毁，
+            //    其 OnDestroy 的兜底 `SetPaused(false)` 会把 timeScale 顶回 BaseScale
+            //    （M4.5 加的"选卡面板打开中被销毁别把时间卡在 0"，比本场景早得多）。
+            //    所以它现在是**被别处兜住的观测项**，不是有牙的断言：
+            //    留着它，是因为哪天那个兜底被删掉时它应该红。
+            _pnTearThawOk = _pnTearScalePaused <= 0.0001f &&
+                            _pnTearScaleAfter > 0.0001f &&
+                            Mathf.Abs(_pnTearScaleAfter - Core.HitstopManager.BaseScale) < 0.01f;
+            Check("拆世界后时间解冻", _pnTearThawOk);
+            _pnTearThawText = _pnTearThawOk ? "是" : ("否（" + _pnTearScaleAfter.ToString("F2") + "）");
+
+            Debug.Log("[SMOKE] ===== 真实重开路径实测结果 =====");
+            Line("场景", _scene);
+            Line("断点通过", _ok + "/" + _checked);
+            Line("结算面板已弹出", _pnPanelText);
+            Line("结算时世界冻结", _pnFreezeText);
+            Line("重开后时间恢复", _pnResumeText);
+            Line("重开后结算画布消失", _pnGoneText);
+            Line("重开后 HUD 唯一", _pnHudText);
+            Line("重开后波次重置", _pnWaveText);
+            Line("重开后世界继续推进", _pnAdvanceText);
+            Line("重开后玩家可控", Yn(_pnPlayerOk2));
+            Line("全程零异常", Yn(_pnNoErrOk));
+            Line("拆世界后结算画布消失", _pnTearGoneText);
+            Line("拆世界后时间解冻", _pnTearThawText);
+            Line("强制退出", _pnTearLine);
+            Line("timeScale", _pnScaleText);
+            Line("结算画布", _pnPanelCanvas + " → " + _pnPanelAfter);
+            Line("HUD", _pnHudBefore + " → " + _pnHudAfter + "（画布 " + _pnCanvasBefore + " → " + _pnCanvasAfter + "）");
+            Line("波次轨迹", _pnWaveLine);
+            Line("重开后宝石", _pnGemsAfter.ToString());
+            Line("按钮点击", _pnClicked ? "成功" : "未找到 RestartBtn");
+            Line("首个异常", _firstError);
+            // 键名必须与 SmokeTest 的那份收尾报告区分开：本场景**故意**以"世界已拆"收尾
+            // （强制退出路径），SmokeTest 随后会按空世界报「波次 0 / 结论 未通过」——
+            // 那是本场景的预期状态，不是回归。用同一个键的话驱动脚本会把两者混在一起。
+            Line("PANEL结论", (_errors == 0 && _fail.Count == 0 && _ok == _checked) ? "通过" : "不通过");
+            foreach (var f in _fail) Line("PANEL失败项", f);
+        }
+
+        // =====================================================================================
         //  计数：不读管理器内部列表，直接扫场景（模板本体不算实体）
         // =====================================================================================
+
+        /// <summary>
+        /// 扫场数组件：只算"真的在场上"的（排除预制体资产与已停用对象）。
+        /// name 为 null 时只看类型。与 NetLongRunProbe 同口径——
+        /// 不去重 activeInHierarchy 的话，被 Destroy 但还没落地的对象会被算进来。
+        /// </summary>
+        private static int CountNamed<T>(string name) where T : Component
+        {
+            int n = 0;
+            foreach (var c in Resources.FindObjectsOfTypeAll<T>())
+            {
+                if (c == null) continue;
+                var go = c.gameObject;
+                if (!go.scene.IsValid()) continue;          // 预制体资产
+                if (!go.activeInHierarchy) continue;        // 已停用/待销毁
+                if (name != null && go.name != name) continue;
+                n++;
+            }
+            return n;
+        }
 
         private static bool IsTemplate(Component c) =>
             c != null && c.gameObject.name.EndsWith("Template");

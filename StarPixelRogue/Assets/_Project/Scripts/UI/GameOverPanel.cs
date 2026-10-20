@@ -94,7 +94,12 @@ namespace StarPixel.UI
             }
         }
 
-        private void CloseAndResume()
+        /// <summary>
+        /// 收起面板并解冻世界。M46 起由 <c>GameBuilder.TeardownWorld</c> 也调用一次
+        /// （见那里注释：结算面板不属于被拆的世界，只靠调用方自觉收是不够的）。
+        /// 幂等：面板已收起时再调一次只是重复一次 SetPaused(false)。
+        /// </summary>
+        public void CloseAndResume()
         {
             // 恢复时间缩放（优先走 HitstopManager，与 GameOver 冻结/顿帧保持唯一写者一致）
             // M41：兜底写死 1f 会在加速档下把基准拽回 1（同 LevelUpManager 的注释）

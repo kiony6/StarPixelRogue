@@ -806,6 +806,23 @@ namespace StarPixel
             // 由 audit_project.py 第 7 项静态检查扫出来。
             Combat.Skill.ChainBolt.DestroyAll();
 
+            // M46：结算面板**不属于这个世界**——它由 GameOverPanel.Ensure() 直接 new 出来，
+            // 从未 Track 进 _created，因此上面这套清理连它的边都碰不到。
+            // 此前只有"点按钮"的三条路径（重开 / 回主菜单 / 离开对局）会自己收面板，
+            // 于是任何**只拆不建**的路径都会把这块 560×420 的面板留在屏幕上：
+            // 青少年模式当日时长到点时的强制退出（PlaytimeGuard.ForceExitMinor）
+            // 就走这条路——玩家死在结算面板上没点按钮，时长一到被踢回主菜单，
+            // 面板原封不动盖在菜单上。
+            // 收面板的语义属于"拆世界"，不是"点按钮"，故移到这里统一兜底。
+            //
+            // 关于"世界会不会被压在 timeScale=0"：不会，但那是**别处兜住的**——
+            // M4.5 给 LevelUpManager.OnDestroy 加过"选卡面板打开中被销毁别把时间卡在 0"，
+            // 而它排在 HitstopManager 之前被销毁，于是拆世界这一动作本身就会顺带解冻
+            // （M46 区分力 Q2/Q3 组实测：摘掉这里的收面板调用，「拆世界后时间解冻」仍是绿的）。
+            // 仍然调 CloseAndResume() 而不是 Hide()：显式解冻比依赖另一个组件的
+            // OnDestroy 顺序可靠——那份兜底哪天被删掉，这里就是唯一还站着的那道。
+            if (UI.GameOverPanel.Instance != null) UI.GameOverPanel.Instance.CloseAndResume();
+
             // 再同步清理单例引用：Object.Destroy 的销毁延迟到帧末，
             // 若不清 Instance，紧随其后的 Build() 会被「EnemyManager.Instance != null」守卫错误拦下
             // （PlayerController 的静态 Instance 同理，详见其 ClearInstance 注释）。

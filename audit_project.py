@@ -402,9 +402,14 @@ WELL_KNOWN_TYPES = {
                     "Mathf", "MonoBehaviour", "ScriptableObject", "Sprite", "SpriteRenderer",
                     "Camera", "Screen", "Application", "Input", "Debug", "Resources",
                     "Texture2D", "AudioClip", "RectTransform", "SerializeField",
-                    "RequireComponent", "Space", "KeyCode", "TouchPhase", "Component"],
+                    "RequireComponent", "Space", "KeyCode", "TouchPhase", "Component",
+                    # M46：Canvas 是 UnityEngine 的类型（UnityEngine.Canvas），此前被归到
+                    # UnityEngine.UI，于是任何只用 Canvas 的脚本都会被误报"缺 using
+                    # UnityEngine.UI"——而它本来就用不着。CanvasScaler / GraphicRaycaster
+                    # 才是真的在 UnityEngine.UI 里。
+                    "Canvas"],
     "UnityEngine.UI": ["Text", "Image", "Button", "Slider", "Toggle", "InputField",
-                       "Canvas", "CanvasScaler", "GraphicRaycaster"],
+                       "CanvasScaler", "GraphicRaycaster"],
     "UnityEngine.Networking": ["UnityWebRequest", "UploadHandlerRaw", "DownloadHandlerBuffer"],
     "System": ["Action", "Func", "Guid", "Exception", "StringComparison", "DateTime",
                "StringSplitOptions", "Convert"],
@@ -4180,6 +4185,125 @@ namespace A
 ]
 
 
+def check_teardown_closes_panel():
+    """
+    拆世界时必须收起结算面板（M46）。
+
+    <c>GameOverPanel</c> 由 <c>Ensure()</c> 直接 <c>new GameObject(...)</c> 建出来，
+    **从未 Track 进 <c>_created</c>** —— 于是上面整套清理（销毁 _created、清单例、清池）
+    连它的边都碰不到。它自己那块 560×420 的画布只可能被三条"点按钮"的路径收起：
+    重开 / 回主菜单 / 离开对局，三条都在 <c>OnRestart</c> 类方法里调 <c>CloseAndResume()</c>。
+
+    于是任何**只拆不建**的路径都会把面板留在屏幕上。最典型的一条真的存在：
+    青少年模式当日时长到点时的强制退出（<c>PlaytimeGuard.ForceExitMinor</c>）——
+    玩家死在结算面板上没点按钮，时长一到被踢回主菜单，面板原封不动盖在菜单上。
+
+    关于"世界还被压在 <c>timeScale = 0</c>"：M46 实测把它证伪了。
+    M4.5 给 <c>LevelUpManager.OnDestroy</c> 加过"选卡面板打开中被销毁别把时间卡在 0"
+    的兜底，而它先于 <c>HitstopManager</c> 被销毁，于是<strong>拆世界这一动作本身
+    就会顺带解冻</strong>——区分力注入的 Q2/Q3 组里，只有"压根没冻结过"的注入能让
+    「拆世界后时间解冻」变红，"没主动解冻"的注入下它一直是绿的。
+    这里仍要求 <c>CloseAndResume()</c> 而不是只 <c>Hide()</c>：
+    显式解冻比依赖另一个组件的 <c>OnDestroy</c> 顺序可靠，
+    那份兜底哪天被删掉，这里就是唯一还站着的那道。
+
+    这一项拦的就是"拆世界不管面板"。它不崩溃、不刷异常，短局冒烟也全绿——
+    只有真的死一次、再等到强制退出才看得见。
+
+    判据：<c>TeardownWorld()</c> 方法体内必须对 <c>GameOverPanel</c> 调用
+    <c>CloseAndResume()</c> 或 <c>Hide()</c>（注释里提到不算）。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)
+        if 'TeardownWorld' not in raw:
+            continue
+        clean = strip_noise(raw)
+        for m in TEARDOWN_SIG_RE.finditer(clean):
+            brace = clean.find('{', m.end())
+            if brace < 0:
+                continue
+            body = _brace_body(clean, brace)
+            if 'GameOverPanel' in body and ('CloseAndResume' in body or '.Hide()' in body):
+                continue
+            line = clean[:m.start()].count('\n') + 1
+            err("拆世界没有收起结算面板: %s 第 %d 行 TeardownWorld()\n"
+                "      GameOverPanel 由 Ensure() 直接 new 出来，从未 Track 进 _created——\n"
+                "      它那块画布只可能被\"点按钮\"的三条路径收起（重开 / 回主菜单 / 离开对局）。\n"
+                "      任何只拆不建的路径都会把它留在屏幕上：\n"
+                "        · 青少年模式时长到点的强制退出：面板盖在刚弹出的主菜单上；\n"
+                "        · 那一刻世界还被面板压在 timeScale = 0。\n"
+                "      少了这一步不会崩溃、不会刷异常，只有真的死一次才看得见。\n"
+                "      修法：在 TeardownWorld() 里调 GameOverPanel.Instance.CloseAndResume()\n"
+                "      （顺带解冻；只 Hide() 不解冻）。"
+                % (rp, line))
+
+
+# 第 24 项夹具：拆世界是否收起结算面板（M46）
+SELFTEST_TD_PANEL = [
+    # ① M46 修完的真实状态：销毁 _created 之前先收面板（含解冻）
+    ("tp01_收面板且解冻", False, """
+namespace A
+{
+    public static class B
+    {
+        public static void TeardownWorld()
+        {
+            NetWorld.DespawnAllWorldObjects();
+            if (UI.GameOverPanel.Instance != null) UI.GameOverPanel.Instance.CloseAndResume();
+            foreach (var o in _created) Object.Destroy(o);
+        }
+    }
+}
+"""),
+    # ② 只 Hide() 不解冻：画布收了，但世界还冻着（M46 的「拆世界后时间解冻」会红）
+    ("tp02_只Hide不解冻", False, """
+namespace A
+{
+    public static class B
+    {
+        public static void TeardownWorld()
+        {
+            UI.GameOverPanel.Instance.Hide();
+        }
+    }
+}
+"""),
+    # ③ M46 之前的真实状态：压根不管面板（强制退出后画布盖在主菜单上）
+    ("tp03_完全不管面板", True, """
+namespace A
+{
+    public static class B
+    {
+        public static void TeardownWorld()
+        {
+            NetWorld.DespawnAllWorldObjects();
+            Core.PoolManager.Instance?.DestroyAll();
+            foreach (var o in _created) Object.Destroy(o);
+        }
+    }
+}
+"""),
+    # ④ 注释里提了一句不算
+    ("tp04_只在注释里提", True, """
+namespace A
+{
+    public static class B
+    {
+        public static void TeardownWorld()
+        {
+            // 结算面板由 GameOverPanel.Hide() 收起（调用方负责）
+            Core.PoolManager.Instance?.DestroyAll();
+        }
+    }
+}
+"""),
+]
+
+
 def _run_legal_fixtures(fixtures, checks=None):
     """把夹具写成 Resources/Legal 下的 txt 跑第 14 项，返回被报错的夹具名集合。"""
     import shutil
@@ -4254,6 +4378,7 @@ def selftest():
         ("拆世界反生成检查（第 21 项）", SELFTEST_TD, [check_teardown_despawns_net]),
         ("拆世界扫场覆盖检查（第 22 项）", SELFTEST_SW, [check_teardown_sweeps_all_types]),
         ("拆世界保留玩家检查（第 23 项）", SELFTEST_KP, [check_teardown_keeps_players]),
+        ("拆世界收面板检查（第 24 项）", SELFTEST_TD_PANEL, [check_teardown_closes_panel]),
     ]
 
     all_bad = 0
@@ -4310,6 +4435,7 @@ def main():
     check_teardown_despawns_net()
     check_teardown_sweeps_all_types()
     check_teardown_keeps_players()
+    check_teardown_closes_panel()
 
     n = len(cs_files())
     print("=" * 68)
