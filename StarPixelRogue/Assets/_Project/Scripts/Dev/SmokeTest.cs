@@ -57,6 +57,10 @@ namespace StarPixel.Dev
         private int _ackInvalidated; // 因批次被淘汰而作废的
         private int _ackTimedOut;    // 等回执等到超时的
         private int _localApplyTotal;// 本机**实际**应用过几次（含未在确认路径上的应用）
+        // M39：收场通知——四种收场都必须走到玩家眼前
+        private int _ntTotal;        // 发生过几次收场
+        private int _ntShown;        // 真的上屏了几条
+        private int _ntSuppressed;   // 有通知但没出口的（必须为 0）
         private int _extInvalidated; // 面板侧收到作废通知的次数
         private int _hostEvicted;    // 房主侧：被上限淘汰的批次
 
@@ -352,6 +356,11 @@ namespace StarPixel.Dev
                     _ackInvalidated = self.AckInvalidatedCount;
                     _ackTimedOut = self.AckTimedOutCount;
                 }
+                // M39：四种收场（确认/拒绝/作废/超时）都必须有玩家看得见的出口。
+                // 通知是全局的（属于玩家，不属于某个 NetPlayer），故不依赖 self。
+                _ntTotal = StarPixel.Combat.UpgradeNotice.Total;
+                _ntShown = StarPixel.Combat.UpgradeNotice.ShownCount;
+                _ntSuppressed = StarPixel.Combat.UpgradeNotice.SuppressedCount;
             }
 
             // M14：观战者是否仍持有一个属于自己的（IsOwner）玩家对象。
@@ -559,6 +568,10 @@ namespace StarPixel.Dev
                 Debug.Log("[SMOKE] 本地作废    " + _ackInvalidated);
                 Debug.Log("[SMOKE] 待确认残留  " + _ackPending);
                 Debug.Log("[SMOKE] 回执超时    " + _ackTimedOut);
+                // M39：收场通知——静默的收场等于没发生，一条都不许被吞
+                Debug.Log("[SMOKE] 收场总数    " + _ntTotal);
+                Debug.Log("[SMOKE] 通知上屏    " + _ntShown);
+                Debug.Log("[SMOKE] 通知被吞    " + _ntSuppressed);
             }
             Debug.Log("[SMOKE] 会话角色    " + (_spectator ? "观战"
                 : StarPixel.Net.NetSession.IsHost ? "房主"

@@ -366,7 +366,8 @@ def main():
         # M37：升级推卡收支。房主推几批 ↔ 客户端收到几批，中间的差额就是被吞掉的强化
         ("推卡批次", host_data.get("房主推卡批次", "?"), client_data.get("推卡收到", "?")),
         ("推卡上屏", host_data.get("推卡上屏", "?"), client_data.get("推卡上屏", "?")),
-        ("推卡入队", host_data.get("推卡入队", "?"), client_data.get("推卡入队", "?")),
+        ("推卡入队（累计）", host_data.get("推卡入队", "?"), client_data.get("推卡入队", "?")),
+        ("队列残余（当前）", host_data.get("队列残余", "?"), client_data.get("队列残余", "?")),
         ("推卡丢弃", host_data.get("推卡丢弃", "?"), client_data.get("推卡丢弃", "?")),
         ("批次淘汰", host_data.get("批次淘汰", "?"), client_data.get("批次淘汰", "?")),
         ("升级选卡", host_data.get("升级选卡", "?"), client_data.get("升级选卡", "?")),
@@ -375,6 +376,9 @@ def main():
         ("房主已应用", host_data.get("房主已应用", "?"), "-"),
         ("本地已应用", "-", client_data.get("本地已应用", "?")),
         ("本地强化次数", "-", client_data.get("本地强化次数", "?")),
+        ("收场总数", "-", client_data.get("收场总数", "?")),
+        ("通知上屏", "-", client_data.get("通知上屏", "?")),
+        ("通知被吞", "-", client_data.get("通知被吞", "?")),
         ("房主已拒绝", host_data.get("房主已拒绝", "?"), "-"),
         ("本地被拒", "-", client_data.get("本地被拒", "?")),
         ("待确认残留", "-", client_data.get("待确认残留", "?")),
@@ -540,9 +544,14 @@ def main():
             "M37：客户端丢弃了 %d 组推卡——面板占用期间推来的卡被扔掉，"
             "玩家这次升级永久拿不到强化，房主也永远收不到选择回传" % c_drop)
 
-    if c_recv >= 0 and c_pres >= 0 and c_queue >= 0 and c_recv != c_pres + c_queue:
+    # 用**队列残余**而不是累计入队：入过队的那批最终也会上屏，用累计值会把它算两遍。
+    # （M37 原判据用的就是累计入队，一直绿只是因为那时联机场景队列没积压、入队恒为 0；
+    #  客户端一旦真的卡住两张，等式立刻不成立——那是判据盲区，不是产品回归。）
+    c_pending_queue = as_int(client_data, "队列残余", -1)
+    if (c_recv >= 0 and c_pres >= 0 and c_pending_queue >= 0
+            and c_recv != c_pres + c_pending_queue):
         problems.append(
-            "M37：客户端推卡收支不平：收到 %d ≠ 上屏 %d + 入队 %d——差额就是被吞掉的强化"
+            "M37：客户端推卡收支不平：收到 %d ≠ 上屏 %d + 队列残余 %d——差额就是被吞掉的强化"
             % (c_recv, c_pres, c_queue))
 
     if h_evict > 0:
@@ -608,6 +617,44 @@ def main():
             problems.append(
                 "M38：客户端自述被拒 %d 次，房主只拒绝过 %d 次——有选择被客户端单方面判死"
                 % (c_rejected, h_rejected))
+
+    # —— M39：收场必须看得见 ——
+    #
+    # 为什么 M38 那几条之外还要单独这一组：M38 保证的是「每一次应用都来自确认」，
+    # 即**数据正确**；但玩家看到的是另一回事——确认/拒绝/作废/超时这四种收场
+    # 在修复前全都只进日志。M37「宁可少发一次」、M38「宁可等确认」都是在主动
+    # 牺牲成功率换正确性，牺牲得对，可代价必须让玩家知道：否则他只会认为游戏
+    # 吞了他的升级，而且无从报告（他连发生了什么都不知道）。**静默的收场等于没发生。**
+    c_nt_total = as_int(client_data, "收场总数", -1)
+    c_nt_shown = as_int(client_data, "通知上屏", -1)
+    c_nt_sup = as_int(client_data, "通知被吞", -1)
+    c_picked = as_int(client_data, "升级选卡", -1)
+
+    if aligned and c_nt_total >= 0:
+        if c_nt_sup > 0:
+            problems.append(
+                "M39：有 %d 条收场通知没能上屏（共 %d 条收场、只上屏 %d 条）——"
+                "玩家点了卡却什么都没看到：生效了不知道生效，没生效也不知道为什么。"
+                "HUD 出口缺失时通知只会进日志，等于这次收场对玩家不存在"
+                % (c_nt_sup, c_nt_total, c_nt_shown))
+        if c_nt_shown >= 0 and c_nt_shown != c_nt_total:
+            problems.append(
+                "M39：收场 %d 条、上屏 %d 条——两者必须相等，"
+                "少一条就说明有一次收场没走到玩家眼前" % (c_nt_total, c_nt_shown))
+        # 守恒：四类收场各出一条，加起来必须等于总数
+        parts = 0
+        for k in ("本地已应用", "本地被拒", "本地作废", "回执超时"):
+            v = as_int(client_data, k, -1)
+            if v > 0:
+                parts += v
+        if parts != c_nt_total:
+            problems.append(
+                "M39：收场通知 %d 条，但四类收场之和只有 %d（确认/拒绝/作废/超时）——"
+                "有收场根本没进通知链路，玩家看不到它发生过" % (c_nt_total, parts))
+        if c_picked > 0 and c_nt_total == 0:
+            problems.append(
+                "M39：客户端选了 %d 次卡，却没有产生任何一条收场通知——"
+                "通知链路整体空转，选卡的成败对玩家全是静默的" % c_picked)
 
     # —— M11 断线重连专项判定 ——
     # 三层证据缺一不可：客户端自述重连成功 + 进度没回退 + 房主侧真的观测到「2→1→2」。

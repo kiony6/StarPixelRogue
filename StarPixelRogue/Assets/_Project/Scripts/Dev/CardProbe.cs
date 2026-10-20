@@ -88,6 +88,12 @@ namespace StarPixel.Dev
         private bool _rsQueueOk, _rsPanelClosedOk, _rsLocalOk, _rsNoErrOk;
         private int _rsPending;
 
+        // —— NOTICE（M39）：四种收场都必须有玩家看得见的出口 ——
+        private bool _ntHudOk, _ntConserveOk, _ntKindOk, _ntSuppressOk;
+        private bool _ntLangOk, _ntTitleOk, _ntTimeoutOk;
+        private int _ntTotal, _ntShown, _ntSuppressed, _ntSuppressedNoHud;
+        private string _ntZh = "?", _ntEn = "?";
+
         // —— GATE（M38）：待确认表纯逻辑 ——
         private bool _gtConfirmOk, _gtTwiceOk, _gtUnknownOk, _gtMismatchOk, _gtRejectOk,
                      _gtTimeoutOk, _gtInvalidateOk;
@@ -177,6 +183,7 @@ namespace StarPixel.Dev
                 case "BATCH":   body = Batch();   break;
                 case "GATE":    body = Gate();    break;   // M38：纯逻辑，不搭世界
                 case "INVAL":   body = Inval();   break;   // M38：批次作废撤销
+                case "NOTICE":  body = Notice();  break;   // M39：收场必须看得见
                 case "RESTORE": body = Restore(); break;
                 default:        body = Base();    break;
             }
@@ -219,6 +226,15 @@ namespace StarPixel.Dev
         private static IEnumerator Quiet(int frames = 3)
         {
             for (int i = 0; i < frames; i++) yield return null;
+        }
+
+        /// <summary>M39：串里有没有汉字——英文态的提示里出现一个汉字就算本地化漏了。</summary>
+        private static bool HasCjk(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            foreach (char c in s)
+                if (c >= '\u4e00' && c <= '\u9fff') return true;
+            return false;
         }
 
         /// <summary>
@@ -704,6 +720,114 @@ namespace StarPixel.Dev
         }
 
         // =====================================================================================
+        // =====================================================================================
+        // NOTICE：收场通知（M39，需要 HUD 出口，故搭世界）
+        //
+        // 钉的是「静默的收场等于没发生」：确认 / 拒绝 / 作废 / 超时这四种收场
+        // 都必须产生一条**玩家看得见**的提示，一条都不许被吞。
+        // M37「宁可少发一次」、M38「宁可等确认」都是在主动牺牲成功率换正确性，
+        // 牺牲得对，但代价必须让玩家知道——否则他只会认为游戏吞了他的升级。
+        // =====================================================================================
+        private IEnumerator Notice()
+        {
+            GameBuilder.Build();
+            yield return Quiet();
+            yield return WaitReal(0.3f);
+
+            UpgradeNotice.Reset();
+            Core.Localization.SetLanguage(Core.Localization.LangZh);
+
+            // 1) 地基：出口必须真的注册上了，否则下面所有「已上屏」都是假的
+            _ntHudOk = UpgradeNotice.Deliver != null;
+            Judge(_ntHudOk,
+                  "收场通知没有上屏出口（HUD 未注册 Deliver）——四种收场只能进日志，"
+                  + "玩家一个字也看不到，本场景其余判据也随之失去意义");
+
+            // 2) 四种收场各一次 → 四条、全部上屏、零被吞
+            UpgradeNotice.Raise(UpgradeNoticeReason.Applied, "测试强化");
+            UpgradeNotice.Raise(UpgradeNoticeReason.Rejected);
+            UpgradeNotice.Raise(UpgradeNoticeReason.Invalidated);
+            UpgradeNotice.Raise(UpgradeNoticeReason.TimedOut);
+            _ntTotal = UpgradeNotice.Total;
+            _ntShown = UpgradeNotice.ShownCount;
+            _ntSuppressed = UpgradeNotice.SuppressedCount;
+            _ntConserveOk = _ntTotal == 4 && _ntShown == 4 && _ntSuppressed == 0;
+            Judge(_ntConserveOk,
+                  "收场与提示对不上（收场=" + _ntTotal + "、上屏=" + _ntShown
+                  + "、被吞=" + _ntSuppressed + "，应为 4/4/0）——有收场没走到玩家眼前，"
+                  + "玩家点了卡却什么都没发生，也不知道为什么");
+
+            // 3) 分类计数：四种各记各的，不能混成一坨"总数"
+            _ntKindOk = UpgradeNotice.CountOf(UpgradeNoticeReason.Applied) == 1
+                        && UpgradeNotice.CountOf(UpgradeNoticeReason.Rejected) == 1
+                        && UpgradeNotice.CountOf(UpgradeNoticeReason.Invalidated) == 1
+                        && UpgradeNotice.CountOf(UpgradeNoticeReason.TimedOut) == 1;
+            Judge(_ntKindOk,
+                  "分类计数不对（确认=" + UpgradeNotice.CountOf(UpgradeNoticeReason.Applied)
+                  + "、拒绝=" + UpgradeNotice.CountOf(UpgradeNoticeReason.Rejected)
+                  + "、作废=" + UpgradeNotice.CountOf(UpgradeNoticeReason.Invalidated)
+                  + "、超时=" + UpgradeNotice.CountOf(UpgradeNoticeReason.TimedOut) + "）——"
+                  + "只知道总数就分不清「少发」是拒了还是超时了");
+
+            // 4) 摘掉出口 → 必须记为「被吞」。这一条是判据自检：
+            //    如果这里还是 0，说明 SuppressedCount 是摆设，第 2 条的绿也是假的。
+            var saved = UpgradeNotice.Deliver;
+            UpgradeNotice.Deliver = null;
+            UpgradeNotice.Raise(UpgradeNoticeReason.Rejected);
+            _ntSuppressedNoHud = UpgradeNotice.SuppressedCount;
+            UpgradeNotice.Deliver = saved;
+            _ntSuppressOk = _ntSuppressedNoHud == 1;
+            Judge(_ntSuppressOk,
+                  "出口缺失时没有被记为「被吞」（Suppressed=" + _ntSuppressedNoHud + "，应 1）——"
+                  + "SuppressedCount 是摆设的话，第 2 条「零被吞」根本证明不了任何事");
+
+            // 5) 本地化：中文态有汉字，切英文后重画必须是英文且**不新增收场计数**
+            _ntZh = UpgradeNotice.LastText;
+            int totalBefore = UpgradeNotice.Total;
+            Core.Localization.SetLanguage(Core.Localization.LangEn);
+            bool repainted = UpgradeNotice.Repaint();
+            _ntEn = UpgradeNotice.LastText;
+            // 英文文案必须**真的来自 en 表**：既不能还是中文，也不能是缺键时回退出来的键名
+            // （M33 教训：T() 找不到键会原样返回键名，只查"有没有汉字"会被它蒙过去）。
+            string keyOfLast = UpgradeNotice.LocKeyOf(UpgradeNotice.LastReason);
+            _ntLangOk = repainted && !string.IsNullOrEmpty(_ntEn) && !HasCjk(_ntEn)
+                        && HasCjk(_ntZh) && _ntEn != _ntZh && _ntEn != keyOfLast
+                        && UpgradeNotice.Total == totalBefore;
+            Judge(_ntLangOk,
+                  "切语言后通知没有按新语言重画（中文=" + _ntZh + "、英文=" + _ntEn
+                  + "、收场数 " + totalBefore + "→" + UpgradeNotice.Total + "）——"
+                  + "要么英文玩家看到中文提示（等于没说），要么重画被当成新收场把对账撑破");
+            Core.Localization.SetLanguage(Core.Localization.LangZh);
+
+            // 6) TitleOfKind：房主只回 kind，标题必须按**客户端自己的语言**现算
+            //    （直接用房主生成的 title 会在"房主中文 + 客户端英文"的房间里串味）
+            string tStat = UpgradeCatalog.TitleOfKind(0, null);
+            string tSkill = UpgradeCatalog.TitleOfKind(102, null);
+            string tWeapon = UpgradeCatalog.TitleOfKind(202, null);
+            _ntTitleOk = !string.IsNullOrEmpty(tStat) && !string.IsNullOrEmpty(tSkill)
+                         && !string.IsNullOrEmpty(tWeapon) && tStat != tSkill;
+            Judge(_ntTitleOk,
+                  "按 kind 取不出标题（属性=" + tStat + "、技能=" + tSkill + "、武器=" + tWeapon + "）——"
+                  + "拿不到名字的话提示只能说「已获得」，玩家不知道自己拿到了什么");
+
+            // 7) 超时常数必须可配（M38 遗留：15s 是拍的，没压测过）。
+            //    用短超时压：到了就该清、没到就不许清。
+            var g = new UpgradeApplyGate();
+            g.Submit(1, 0, 0f);
+            int over = g.PurgeExpired(0.5f, 0.25f);      // 0.5 > 0.25 → 该超时
+            g.Submit(2, 0, 0f);
+            int under = g.PurgeExpired(0.1f, 0.25f);      // 0.1 < 0.25 → 不许超时
+            _ntTimeoutOk = over == 1 && under == 0 && g.TimedOutCount == 1
+                           && g.PendingCount == 1;
+            Judge(_ntTimeoutOk,
+                  "短超时压测不对（超时=" + over + "、未到=" + under + "、残余="
+                  + g.PendingCount + "）——超时常数不可配或判定反了，"
+                  + "要么房主还没回就被判死，要么永远清不掉");
+
+            yield return Quiet();
+        }
+
+        // =====================================================================================
         // RESTORE：收尾与反向——队列要清零，本地路径不能被修过头堵死
         // =====================================================================================
         private IEnumerator Restore()
@@ -781,6 +905,7 @@ namespace StarPixel.Dev
                        : _scene == "BATCH" ? 7
                        : _scene == "GATE" ? 7
                        : _scene == "INVAL" ? 6
+                       : _scene == "NOTICE" ? 7
                        : _scene == "RESTORE" ? 4 : 0;
 
             bool pass = _errors == 0 && _fail.Count == 0 && _checked == expect && _ok == expect;
@@ -859,6 +984,18 @@ namespace StarPixel.Dev
                     Line("作废计数", _ivInvalidated.ToString());
                     Line("队列残余", _ivPending.ToString());
                     Line("替换后面板", _ivAfter);
+                    break;
+                case "NOTICE":
+                    Line("出口已注册", Yn(_ntHudOk));
+                    Line("收场/上屏/被吞", _ntTotal + "/" + _ntShown + "/" + _ntSuppressed);
+                    Line("收支守恒", Yn(_ntConserveOk));
+                    Line("四种分类计数", Yn(_ntKindOk));
+                    Line("无出口时记为被吞", Yn(_ntSuppressOk));
+                    Line("无出口时被吞计数", _ntSuppressedNoHud.ToString());
+                    Line("切语言重画", Yn(_ntLangOk));
+                    Line("中/英提示", _ntZh + " → " + _ntEn);
+                    Line("按 kind 取标题", Yn(_ntTitleOk));
+                    Line("短超时可压测", Yn(_ntTimeoutOk));
                     break;
                 case "RESTORE":
                     Line("队列残余", _rsPending.ToString());

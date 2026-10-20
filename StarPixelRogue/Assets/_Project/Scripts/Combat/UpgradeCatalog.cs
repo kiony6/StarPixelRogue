@@ -227,6 +227,45 @@ namespace StarPixel.Combat
             else ApplyStatCore(kind, p);      // 走内核，避免同一笔被计两次
         }
 
+        /// <summary>
+        /// M39：按 kind **现算**这张卡的本地化标题（给收场提示用）。
+        ///
+        /// 为什么不让房主把 title 一起发过来：房主生成的 title 是**房主的语言**。
+        /// 在"房主中文 + 客户端英文"的房间里直接传，玩家会看到一条中文提示——
+        /// 房间里的两个人语言不同是很常见的。所以回执只带 kind，标题按**客户端自己**的语言现算。
+        ///
+        /// 纯逻辑（不依赖网络），探针可直接断言三档分流都对。
+        /// </summary>
+        public static string TitleOfKind(int kind, PlayerController p = null)
+        {
+            if (kind >= 200)
+            {
+                int id = kind - 200;
+                // 拿得到玩家手上的这把武器 → 与 BuildOffers 完全一致的写法（含下一级）
+                if (p != null && p.Weapons != null)
+                {
+                    foreach (var w in p.Weapons)
+                    {
+                        if (w == null || w.def == null || w.def.id != id) continue;
+                        int next = Mathf.Min(w.level + 1, SkillDef.MaxLevel);
+                        return Core.Localization.T("upgrade.level", w.def.DisplayName, next);
+                    }
+                }
+                var d = CreateById(id);
+                if (d != null) return Core.Localization.T("upgrade.unlock", d.DisplayName);
+                return Core.Localization.T("upgrade.generic");
+            }
+            if (kind >= 100)
+            {
+                var def = CreateById(kind - 100);
+                if (def != null) return Core.Localization.T("upgrade.unlock", def.DisplayName);
+                return Core.Localization.T("upgrade.generic");
+            }
+            if (kind >= 0 && kind < StatOfferCount)
+                return Core.Localization.T("upgrade.stat." + kind);
+            return Core.Localization.T("upgrade.generic");
+        }
+
         /// <summary>按序号应用属性强化（与 <see cref="StatOffer"/> 一一对应）。</summary>
         public static void ApplyStat(int index, PlayerController p)
         {

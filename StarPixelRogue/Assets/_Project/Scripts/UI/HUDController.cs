@@ -52,6 +52,9 @@ namespace StarPixel.UI
             Core.EventBus.OnZoneChanged += OnZoneChanged;
             Core.EventBus.OnComboActivated += OnComboActivated;   // M7
             Core.Localization.LanguageChanged += RefreshLanguage; // M33：切语言要重画非每帧文本
+            // M39：注册升级收场通知的上屏出口（静态委托，OnDestroy 必须撤——否则
+            // 本局 HUD 销毁后它会继续把文案写进一个已销毁的 Text 上，M29 教训）。
+            Combat.UpgradeNotice.Deliver = ShowUpgradeNotice;
             RefreshWeapons();
         }
 
@@ -74,6 +77,9 @@ namespace StarPixel.UI
             // 不退订的话旧实例会一直挂着（M29 教训：死订阅不只是泄漏，
             // 还会让已销毁对象的回调抛异常、打断整条委托链）。
             Core.Localization.LanguageChanged -= RefreshLanguage;
+            // M39：只撤自己那一份（别的实例可能已经注册了）
+            if (Combat.UpgradeNotice.Deliver == ShowUpgradeNotice)
+                Combat.UpgradeNotice.Deliver = null;
         }
 
         private void OnEnemyKilled(int _) { _kills++; }
@@ -125,9 +131,37 @@ namespace StarPixel.UI
             if (zoneText && _zone > 0) zoneText.text = Core.Localization.T("hud.zone", _zone);
             // M34：模式标识没有对应事件，只能在这里补；ModeLabel() 内部已走本地化表。
             if (modeText) modeText.text = Net.NetSession.ModeLabel();
-            // M34：清掉可能正挂着的旧语言组合技提示（并停掉淡出计时，免得改完立刻被清）
-            if (comboToast) { comboToast.text = ""; _comboTimer = 0f; }
+            // M34：清掉可能正挂着的旧语言组合技提示（并停掉淡出计时，免得改完立刻被清）。
+            // M39：升级收场通知**不能**一起清掉——它承载的是「这一笔到底成没成」，
+            // 清掉等于把唯一一次告知机会也抹了。改为按新语言重画（Repaint 不新增计数）。
+            if (comboToast)
+            {
+                if (!Combat.UpgradeNotice.Repaint())
+                {
+                    comboToast.text = "";
+                    _comboTimer = 0f;
+                }
+            }
             RefreshWeapons();      // 武器名走 SkillDef.DisplayName（内含 locKey），需重建
+        }
+
+        /// <summary>
+        /// M39：升级收场的**玩家可见出口**（复用 comboToast 通道，2.5s 淡出）。
+        /// 返回 false 表示这条没上屏——UpgradeNotice 会把它记进 SuppressedCount，探针据此报警。
+        ///
+        /// 成功用暖金色、三类失败用警示红：玩家一眼能分出「拿到了」和「没拿到」。
+        /// 这一点很重要——M37「宁可少发一次」、M38「宁可等确认」都是在**主动牺牲成功率**
+        /// 换正确性，代价必须让玩家看见，否则他只会认为游戏吞了他的升级，而且无从报告。
+        /// </summary>
+        private bool ShowUpgradeNotice(string text)
+        {
+            if (comboToast == null) return false;
+            comboToast.text = text;
+            bool ok = Combat.UpgradeNotice.LastReason == Combat.UpgradeNoticeReason.Applied;
+            comboToast.color = ok ? new Color(1f, 0.85f, 0.3f, 1f)    // 成功：暖金
+                                  : new Color(1f, 0.45f, 0.35f, 1f);   // 失败：警示红
+            _comboTimer = 2.5f;
+            return true;
         }
 
         /// <summary>M7：组合技激活提示（金色高亮 2.5s 后淡出）。</summary>

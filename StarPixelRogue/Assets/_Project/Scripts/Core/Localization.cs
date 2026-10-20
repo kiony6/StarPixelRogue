@@ -256,6 +256,13 @@ namespace StarPixel.Core
                 ["upgrade.stat.desc.4"] = "直射/散射武器",
                 ["upgrade.stat.5"] = "拾取范围 +30%",
                 ["upgrade.stat.6"] = "范围 +15%",
+                // M39 续五：升级收场通知——四种收场（确认/拒绝/作废/超时）都必须让玩家看得见，
+                // 静默的收场等于没发生（详见 Combat/UpgradeNotice.cs）
+                ["upgrade.notice.applied"] = "已获得：{0}",
+                ["upgrade.notice.rejected"] = "这次升级未生效（房主未通过），请继续游戏",
+                ["upgrade.notice.invalidated"] = "这张升级卡已失效，已为你撤销",
+                ["upgrade.notice.timedout"] = "升级确认超时，本次强化未生效",
+                ["upgrade.generic"] = "强化",
                 // M18 续四：防沉迷/健康提示（合规相关：英文玩家看不懂 = 提示等于没弹）
                 ["playtime.warn"] = "今日游戏时间即将达到上限，请注意休息。",
                 ["playtime.health_title"] = "健康游戏提示",
@@ -470,6 +477,11 @@ namespace StarPixel.Core
                 ["upgrade.stat.desc.4"] = "Direct / scatter weapons",
                 ["upgrade.stat.5"] = "Pickup Range +30%",
                 ["upgrade.stat.6"] = "Area +15%",
+                ["upgrade.notice.applied"] = "Acquired: {0}",
+                ["upgrade.notice.rejected"] = "This upgrade did not take effect (rejected by host)",
+                ["upgrade.notice.invalidated"] = "This upgrade card expired and has been withdrawn",
+                ["upgrade.notice.timedout"] = "Upgrade confirmation timed out; it did not take effect",
+                ["upgrade.generic"] = "Upgrade",
                 ["playtime.warn"] = "You are close to today's play time limit. Please take a break.",
                 ["playtime.health_title"] = "Healthy Gaming Reminder",
                 ["playtime.health"] = "You have played for 45 minutes. Gaming in moderation benefits the mind; addiction harms the body.",

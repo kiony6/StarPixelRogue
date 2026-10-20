@@ -2818,6 +2818,134 @@ namespace A
 """),
 ]
 
+# 第 17 项夹具：收场必须有玩家可见出口（M39）
+# 全部带 [TargetRpc]——第 17 项只在含 RPC 的文件里查（没 RPC 就没有双端收场这回事）
+SELFTEST_NF = [
+    # ① 修复前的原样：拒绝只写了一行日志，玩家什么都看不到
+    ("nf01_拒绝只写日志", True, """
+namespace A
+{
+    public class P
+    {
+        [TargetRpc]
+        private void RejectUpgradeTargetRpc(NetworkConnection conn, int ackId)
+        {
+            if (!_applyGate.Reject(ackId)) return;
+            Debug.Log("选卡被房主拒绝");
+        }
+    }
+}
+"""),
+    # ② 有通知出口 → 放行
+    ("nf02_拒绝后通知玩家", False, """
+namespace A
+{
+    public class P
+    {
+        [TargetRpc]
+        private void RejectUpgradeTargetRpc(NetworkConnection conn, int ackId)
+        {
+            if (!_applyGate.Reject(ackId)) return;
+            UpgradeNotice.Raise(UpgradeNoticeReason.Rejected);
+        }
+    }
+}
+"""),
+    # ③ 通知写在**别的方法**里 → 这一笔收场仍然没有出口
+    ("nf03_通知在别的方法", True, """
+namespace A
+{
+    public class P
+    {
+        [TargetRpc]
+        private void RejectUpgradeTargetRpc(NetworkConnection conn, int ackId)
+        {
+            if (!_applyGate.Reject(ackId)) return;
+        }
+
+        private void SomewhereElse()
+        {
+            UpgradeNotice.Raise(UpgradeNoticeReason.Rejected);
+        }
+    }
+}
+"""),
+    # ④ 显式豁免且理由非空 → 放行并记录
+    ("nf04_豁免有理由", False, """
+namespace A
+{
+    public class P
+    {
+        [TargetRpc]
+        private void InvalidateBatchTargetRpc(NetworkConnection conn, int batchId)
+        {
+            // @nofeedback: 该批次尚未上屏，玩家无从感知，无需提示
+            _applyGate.Invalidate(batchId);
+        }
+    }
+}
+"""),
+    # ⑤ 豁免但理由为空 → 不放行（空豁免等于没有豁免）
+    ("nf05_豁免空理由", True, """
+namespace A
+{
+    public class P
+    {
+        [TargetRpc]
+        private void InvalidateBatchTargetRpc(NetworkConnection conn, int batchId)
+        {
+            // @nofeedback:
+            _applyGate.Invalidate(batchId);
+        }
+    }
+}
+"""),
+    # ⑥ 文件里没有 RPC → 不在检查范围内
+    ("nf06_无RPC不在范围", False, """
+namespace A
+{
+    public class P
+    {
+        private void Purge(int id)
+        {
+            _gate.Reject(id);
+        }
+    }
+}
+"""),
+    # ⑦ 超时清理裸调用（修复前最静默的一种：连日志都没有）
+    ("nf07_超时裸清理", True, """
+namespace A
+{
+    public class P
+    {
+        [ServerRpc]
+        private void TickServerRpc()
+        {
+            if (_applyGate.PendingCount > 0)
+                _applyGate.PurgeExpired(Time.unscaledTime);
+        }
+    }
+}
+"""),
+    # ⑧ 作废后只 return
+    ("nf08_作废后只return", True, """
+namespace A
+{
+    public class P
+    {
+        [TargetRpc]
+        private void InvalidateBatchTargetRpc(NetworkConnection conn, int batchId)
+        {
+            int n = _applyGate.Invalidate(batchId);
+            if (n > 0) return;
+        }
+    }
+}
+"""),
+]
+
+
 # 第 15 项夹具：推卡批次一致性（M37）
 # 正例/反例都只造源码文本——本项查的正是"多次推入 vs 一份状态"这种
 # 编译得过、跑起来也对、只有并排比对才看得出的写法。
@@ -2978,6 +3106,14 @@ LOCAL_APPLY_RE = re.compile(r'(?:UpgradeCatalog\s*\.\s*)?Apply(?:Kind|Stat)\s*\(
 # **只是记了一笔账**的写法也被当成守卫放行——自检里没暴露，是 M38 的 R1 注入把它打出来的：
 # 先斩后奏恰恰是"记了账、也发了请求，但不等回执就先加成了"。
 CONFIRM_GUARD_RE = re.compile(r'(?i)(confirm|ackid)')
+
+# M39：收场调用——拒绝 / 作废 / 超时。这些分支的终点以前只有一行 Debug.Log。
+# 只认 `名字(` 的形式，所以 RejectUpgradeTargetRpc( / InvalidateBatchTargetRpc(
+# 这类**声明与转发调用**不会被误伤（它们后面跟的是别的标识符，不是左括号）。
+NOTICE_ENDING_RE = re.compile(r'(?i)\b(?:Reject|Invalidate|PurgeExpired)\s*\(')
+# M39：玩家可见的通知出口
+NOTICE_EXIT_RE = re.compile(
+    r'(?i)(UpgradeNotice\s*\.\s*Raise|ShowUpgradeNotice|ShowNotice|Notice\s*\.\s*Raise)')
 # 联机相关文件：有 ServerRpc 或 TargetRpc 声明的，才存在"本地镜像 vs 房主权威"的问题
 RPC_DECL_RE = re.compile(r'\[\s*(?:ServerRpc|TargetRpc)\s*\]')
 
@@ -3049,6 +3185,75 @@ def check_local_apply_guarded():
                 % (rp, i + 1, ln.strip()[:70], lines[s].strip()[:60]))
 
 
+def check_notice_on_endings():
+    """
+    四种收场必须有玩家看得见的出口（M39）。
+
+    M38 让确认 / 拒绝 / 作废 / 超时**都有出口、都有计数**了——但那四个出口的
+    终点是 `Debug.Log` 和静态计数，玩家一个字也看不到。从玩家视角看是：
+
+        · 被拒：点了卡，面板关了，**什么都没发生**，也不知道为什么；
+        · 作废：面板**自己消失了**，没有任何解释；
+        · 超时：连日志都没有，彻底静默；
+        · 成功：拿到了什么**也没说**（移速 / 生命上限变了，玩家未必察觉）。
+
+    这不是"体验优化"，是**缺陷**：M37 说"宁可少发一次强化"、M38 说"宁可等确认"，
+    两条都是在**主动牺牲成功率**换正确性。牺牲得对，但代价必须让玩家知道——
+    否则玩家只会认为游戏吞了他的升级，而且**无从报告**（他连发生了什么都不知道）。
+    **静默的收场等于没发生。**
+
+    判据：含 <c>[ServerRpc]</c>/<c>[TargetRpc]</c> 的文件里，出现收场调用
+    （<c>Reject(</c> / <c>Invalidate(</c> / <c>PurgeExpired(</c>）的方法体内，
+    必须同时出现通知出口（<c>UpgradeNotice.Raise</c> / <c>ShowUpgradeNotice</c>
+    / <c>ShowNotice</c>）。按方法配对而不是按文件——通知写在别的方法里不算（夹具 nf03）。
+
+    可用 `// @nofeedback: 理由` 显式豁免，且**空理由无效**（夹具 nf05）。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)
+        lines = strip_noise(raw).split('\n')
+        raw_lines = raw.split('\n')
+        if not any(RPC_DECL_RE.search(ln) for ln in lines):
+            continue                      # 没有 RPC 的文件不存在"双端收场"这回事
+        spans = method_spans(lines)
+
+        for i, ln in enumerate(lines):
+            if not NOTICE_ENDING_RE.search(ln):
+                continue
+            s, e = _span_of(spans, i)
+            if s is None:
+                continue
+            # 同一方法体内有没有通知出口。用整个方法体而不是"调用点之前"：
+            # 与第 16 项相反，这里不在乎先后，只在乎这一笔收场最终有没有出声。
+            body = "\n".join(lines[s:e + 1])
+            if NOTICE_EXIT_RE.search(body):
+                continue
+
+            ok = False
+            for j in range(max(0, i - 3), min(len(raw_lines), i + 2)):
+                if ('@nofeedback:' in raw_lines[j]
+                        and raw_lines[j].split('@nofeedback:', 1)[1].strip()):
+                    ok = True
+                    break
+            if ok:
+                info("收场免通知: %s 第 %d 行（人工确认）" % (rp, i + 1))
+                continue
+
+            err("收场没有玩家可见出口: %s 第 %d 行 %s —— 方法 %s\n"
+                "      这一笔收场（拒绝 / 作废 / 超时）只记了账或只写了一行日志，\n"
+                "      玩家一个字都看不到：点了卡，面板关了，什么都没发生，也不知道为什么。\n"
+                "      M37「宁可少发一次」、M38「宁可等确认」都是主动牺牲成功率换正确性，\n"
+                "      牺牲得对，可代价得让玩家知道——否则他只会认为游戏吞了他的升级，\n"
+                "      而且无从报告（他连发生了什么都不知道）。静默的收场等于没发生。\n"
+                "      修法：UpgradeNotice.Raise(对应原因) 推给 HUD 出口；\n"
+                "      确属不必告知玩家的收场则写 // @nofeedback: 理由。"
+                % (rp, i + 1, ln.strip()[:70], lines[s].strip()[:60]))
+
+
 def _run_legal_fixtures(fixtures, checks=None):
     """把夹具写成 Resources/Legal 下的 txt 跑第 14 项，返回被报错的夹具名集合。"""
     import shutil
@@ -3116,6 +3321,7 @@ def selftest():
         ("法务文本双语检查（第 14 项）", SELFTEST_LEGAL, None),
         ("推卡批次一致性检查（第 15 项）", SELFTEST_OF, [check_offer_batch_consistency]),
         ("本地镜像确认检查（第 16 项）", SELFTEST_LA, [check_local_apply_guarded]),
+        ("收场可见出口检查（第 17 项）", SELFTEST_NF, [check_notice_on_endings]),
     ]
 
     all_bad = 0
@@ -3165,6 +3371,7 @@ def main():
     check_legal_texts_localized()
     check_offer_batch_consistency()
     check_local_apply_guarded()
+    check_notice_on_endings()
 
     n = len(cs_files())
     print("=" * 68)

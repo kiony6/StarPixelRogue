@@ -289,7 +289,13 @@ namespace StarPixel.Net
                 // M38：等回执等到超时的选择不能一直悬着（房主不回 / 回执丢了）。
                 // 按"被拒"处理——宁可少一次强化，也不能让客户端自己说了算。
                 if (_applyGate.PendingCount > 0)
-                    _applyGate.PurgeExpired(Time.unscaledTime);
+                {
+                    int n = _applyGate.PurgeExpired(Time.unscaledTime);
+                    // M39：超时原本连日志都没有，是四种收场里最静默的一种。
+                    // 每一笔超时都要单独出声（n 可能大于 1）。
+                    for (int i = 0; i < n; i++)
+                        UpgradeNotice.Raise(UpgradeNoticeReason.TimedOut);
+                }
 
                 // M11：握手重发兜底（详见 _handshakeDone 注释）。
                 // 重连场景下 OnStartClient 里那条 ServerRpc 会被丢弃，没有这里就永远匹配不上进度快照。
@@ -440,6 +446,10 @@ namespace StarPixel.Net
             if (_ctrl == null) return;
             UpgradeCatalog.ApplyKind(kind, _ctrl);
             _localApplied++;
+            // M39：成功也要说一声。面板一关，玩家未必察觉移速/生命上限变了——
+            // 而"拿到了什么"正是他判断该不该继续叠 build 的依据。
+            // 标题按**客户端自己的语言**现算（TitleOfKind），不能直接用房主生成的 title。
+            UpgradeNotice.Raise(UpgradeNoticeReason.Applied, UpgradeCatalog.TitleOfKind(kind, _ctrl));
         }
 
         /// <summary>M38：房主拒绝——客户端此前**没有**应用，这里只记账 + 留痕。</summary>
@@ -447,6 +457,9 @@ namespace StarPixel.Net
         private void RejectUpgradeTargetRpc(NetworkConnection conn, int ackId, int batchId, int index)
         {
             if (!_applyGate.Reject(ackId)) return;
+            // M39：以前只有这一行日志——玩家点了卡、面板关了、**什么都没发生**，
+            // 也不知道为什么。从他的视角看就是"游戏吞了我的升级"。必须有可见出口。
+            UpgradeNotice.Raise(UpgradeNoticeReason.Rejected);
             Debug.Log("[M38] 选卡被房主拒绝 batch=" + batchId + " index=" + index
                       + "（批次已过期或已结算，本次不发放强化）");
         }
@@ -458,8 +471,12 @@ namespace StarPixel.Net
         [TargetRpc]
         private void InvalidateBatchTargetRpc(NetworkConnection conn, int batchId)
         {
-            _applyGate.Invalidate(batchId);
-            LevelUpManager.Instance?.InvalidateExternal(batchId);
+            int n = _applyGate.Invalidate(batchId);
+            bool pulled = LevelUpManager.Instance != null
+                          && LevelUpManager.Instance.InvalidateExternal(batchId);
+            // M39：面板还开着（玩家还没选）也照样提示——否则他看到的只是"面板自己消失了"。
+            // 撤掉一张卡而不解释，和吞掉一次升级在玩家眼里没有区别。
+            if (n > 0 || pulled) UpgradeNotice.Raise(UpgradeNoticeReason.Invalidated);
         }
 
         /// <summary>M6.2：客户端上报角色选择，房主权威应用（属性/起始武器）。</summary>
