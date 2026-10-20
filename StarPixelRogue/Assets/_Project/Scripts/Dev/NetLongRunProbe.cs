@@ -74,6 +74,25 @@ namespace StarPixel.Dev
         private bool _rsPlayerOk;
         private string _rsWaveText = "否", _rsPickupText = "否", _rsStateText = "否", _rsEnemyText = "否";
         private string _rsLeakGemText = "否", _rsLeakStateText = "否";
+
+        // —— M44 弹丸 ——
+        //
+        // 弹丸是拆世界时唯一"谁都不持有它"的一类实体：没有账本、没有注册表，
+        // 只能靠按类型扫场才找得到（M43 漏掉的正是它）。
+        // 而它是否真的被清掉，靠自然对局观测不到——重开那一刻场上有几个在飞的弹丸
+        // 完全取决于运气（弹丸寿命只有 2.5s 游戏内，6x 下不到半秒真实时间）。
+        // 于是在重开前主动放一批**长寿命哨兵弹丸**当作"上一局还在飞的那些"：
+        // 它们用回旋镖弹道 + 极慢速度，寿命按 range/speed 折算约 41 秒游戏内，
+        // 足够跨越重开的整个过程，也让判据在任何一局里都可断言。
+        // 哨兵数量必须**明显多于**新世界在采样窗口里自然产出的那一批（实测十几到三十几个），
+        // 否则"房主清了、客户端没收到广播"这种残留会被自然波动盖住——
+        // 首版放 24 个时，客户端残留 24 与新世界的 12 只差一轮采样的抖动，判据全程绿灯。
+        private const int SentinelProjectiles = 48;
+        private bool _rsSeeded;
+        private int _rsProjBefore = -1, _rsProjLeak = -1, _rsProjAfter = -1;
+        private string _rsLeakProjText = "否", _rsProjCleanText = "否";
+        private bool _rsLeakProjOk, _rsProjCleanOk;
+
         private bool _rsWaveOk, _rsPickupOk, _rsStateOk, _rsEnemyOk, _rsLeakGemOk, _rsLeakStateOk;
 
         private const int SEGMENTS = 6;
@@ -196,6 +215,14 @@ namespace StarPixel.Dev
             // 重开晚了一两帧（启动抖动/网络延迟），"重开前"采到的就已经是新世界了——
             // 于是"重开前波次 1"这种平凡数据会让判据退化成"不适用"，白测一轮。
             // 故在 tail 前 1 秒多采一次、取最大值，让"重开前"代表这一局的**峰值**。
+            // M44：哨兵弹丸要在"重开前基线"之前放，否则基线采到的是没有弹丸的旧世界，
+            // 判据会因为"重开前弹丸 = 0"退化成不适用，白测一轮。
+            if (_isHost && !_rsSeeded && _t >= tail - 1.2f)
+            {
+                _rsSeeded = true;
+                SeedProjectiles();
+            }
+
             if (!_rsStarted && _t >= tail - 1f && !_rsPre)
             {
                 _rsPre = true;
@@ -227,6 +254,7 @@ namespace StarPixel.Dev
                 if (_rsEnemyLeak > 0) Debug.Log("[SMOKE] 拆完残留明细  " + EnemyLeakDetail());
                 _rsGemsLeak = GemCountNow(out _rsHealthLeak);
                 _rsStateLeak = WorldStateCount();
+                _rsProjLeak = ProjectileCount();   // M44
                 GameBuilder.Build();           // 立刻重建：不给中间帧，免得把"没清"误判成"还没清"
                 _rsBuilt = true;
                 _rsBuiltAt = _t;
@@ -278,7 +306,32 @@ namespace StarPixel.Dev
             int st = WorldStateCount();
             if (st > _rsStateBefore) _rsStateBefore = st;
 
+            int pr = ProjectileCount();
+            if (pr > _rsProjBefore) _rsProjBefore = pr;   // M44
+
             _rsRootBefore = RootCount();
+        }
+
+        /// <summary>
+        /// M44：在重开前放一批"仍在飞的弹丸"。
+        ///
+        /// 为什么不靠自然对局：弹丸寿命只有 2.5 秒游戏内，6x 加速下不到半秒真实时间，
+        /// 重开那一刻场上有几个完全看运气——判据会随机退化成"不适用"。
+        /// 用回旋镖弹道（behavior=1）配极慢速度：寿命 = range/speed×2 + 1.5 ≈ 41 秒游戏内，
+        /// 横跨整个重开过程；伤害给 0，它不会打死任何东西，只作为"该被清掉的实体"存在。
+        /// </summary>
+        private void SeedProjectiles()
+        {
+            var lp = NetPlayerRegistry.Local;
+            Vector3 c = lp != null ? lp.transform.position : Vector3.zero;
+            for (int i = 0; i < SentinelProjectiles; i++)
+            {
+                float a = i * (Mathf.PI * 2f / SentinelProjectiles);
+                var dir = new Vector2(Mathf.Cos(a), Mathf.Sin(a));
+                NetWorld.SpawnProjectileEx(c + new Vector3(dir.x, dir.y, 0f) * 2f,
+                    dir, 0f, 0.3f, 6f, 1, false);
+            }
+            Debug.Log("[SMOKE] 已放置哨兵弹丸 " + SentinelProjectiles + " 个（模拟重开瞬间仍在飞的弹丸）");
         }
 
         private void ReportRestart()
@@ -291,6 +344,7 @@ namespace StarPixel.Dev
             _rsEnemyAfter = EnemyCount();
             _rsRootAfter = RootCount();
             _rsStateAfter = WorldStateCount();
+            _rsProjAfter = ProjectileCount();
 
             var lp = NetPlayerRegistry.Local;
             _rsPlayerOk = lp != null && (lp.Damageable == null || !lp.Damageable.isDead);
@@ -393,6 +447,50 @@ namespace StarPixel.Dev
             }
             Check("拆完立刻无残留世界状态", _rsLeakStateOk);
 
+            // 4.5) M44：拆完立刻无残留弹丸。
+            //
+            //     与上面三条同属"拆完那一帧"，但值得单独说一句为什么它必须是一条**独立**判据：
+            //     弹丸的成因和那三类不同——它没有账本也没有注册表，唯一能找到它的途径
+            //     就是按类型扫场。合成一条的话，将来有人摘掉弹丸那行，报出来的键
+            //     和"敌人没清干净"是同一个，谁也不知道到底漏了哪一类。
+            //
+            //     前提同样是"重开前确实有弹丸"：哨兵保证了这一点，若某局哨兵生成失败
+            //     （网络生成静默失败），判"不适用"而不是"通过"。
+            if (!_isHost || _rsProjBefore < 1)
+            {
+                _rsLeakProjOk = true;
+                _rsLeakProjText = "不适用";
+            }
+            else
+            {
+                _rsLeakProjOk = _rsProjLeak == 0;
+                _rsLeakProjText = Yn(_rsLeakProjOk);
+            }
+            Check("拆完立刻无残留弹丸", _rsLeakProjOk);
+
+            // 4.6) M44：重开后弹丸清零——**客户端专属**。
+            //
+            //     它与上一条守的不是同一个面：上一条问"房主有没有清"，这一条问
+            //     "客户端有没有收到广播"。房主清得再干净，只要走的是本地 Destroy
+            //     而不是房主权威 Despawn，客户端那份就一个都不会消失——
+            //     而房主侧的残留判据在那种写法下反而是绿的（它确实清了）。
+            //
+            //     为什么房主侧"不适用"：房主 6x 重建后 1.6 秒已经是游戏内十秒，
+            //     新世界自己就打出了几十发弹丸，拿"重开前的三分之一"去卡它只会得到
+            //     "世界在正常运转"的假红。客户端是 1x，它看到的新产出只有十几个，
+            //     而残留的哨兵是整整一批——两个量级差得开，才判得动。
+            if (_isHost || _rsProjBefore < 1)
+            {
+                _rsProjCleanOk = true;
+                _rsProjCleanText = "不适用";
+            }
+            else
+            {
+                _rsProjCleanOk = _rsProjAfter <= Mathf.Max(12, _rsProjBefore / 3);
+                _rsProjCleanText = Yn(_rsProjCleanOk);
+            }
+            Check("重开后弹丸清零", _rsProjCleanOk);
+
             Check("重开后玩家可控", _rsPlayerOk);
 
             // 5) 客户端：收到重开广播。房主侧"不适用"——它就是广播的发出方。
@@ -417,16 +515,21 @@ namespace StarPixel.Dev
             Line("拆完立刻无残留敌人", _rsEnemyText);
             Line("拆完立刻无残留掉落物", _rsLeakGemText);
             Line("拆完立刻无残留世界状态", _rsLeakStateText);
+            Line("拆完立刻无残留弹丸", _rsLeakProjText);
+            Line("重开后弹丸清零", _rsProjCleanText);
             Line("重开后玩家可控", Yn(_rsPlayerOk));
             Line("收到重开广播", _isHost ? "不适用" : Yn(_rsSeen));
             Line("全程零异常", Yn(_errors == 0));
             Line("重开前波次", _rsWaveBefore.ToString());
             Line("重开前宝石", _rsGemsBefore + " 宝石 / " + _rsHealthBefore + " 回血球");
             Line("重开前敌人", _rsEnemyBefore.ToString());
+            Line("重开前弹丸", _rsProjBefore.ToString());
             Line("重开后波次", _rsWaveAfter.ToString());
             Line("重开后宝石", _rsGemsAfter + " 宝石 / " + _rsHealthAfter + " 回血球");
             Line("重开后敌人", _rsEnemyAfter.ToString());
-            Line("拆完残留", _rsEnemyLeak + " 敌人 / " + _rsGemsLeak + " 宝石 / " + _rsStateLeak + " 状态");
+            Line("重开后弹丸", _rsProjAfter.ToString());
+            Line("拆完残留", _rsEnemyLeak + " 敌人 / " + _rsGemsLeak + " 宝石 / " + _rsStateLeak +
+                            " 状态 / " + _rsProjLeak + " 弹丸");
             Line("世界状态数", _rsStateBefore + " → " + _rsStateAfter);
             Line("根对象", _rsRootBefore + " → " + _rsRootAfter);
             Line("托管堆MB", (GC.GetTotalMemory(false) / 1048576f).ToString("F1"));
@@ -574,7 +677,13 @@ namespace StarPixel.Dev
             //    判"不适用"——判"通过"会掩盖问题，判"失败"会误报。
             int lastGems = last.gems;
             int prevGems = _samples.Count >= 2 ? _samples[_samples.Count - 2].gems : lastGems;
-            bool saturated = lastGems >= cap * 0.8f;
+            // M44：两段都必须**贴死**上限（≥95%）才断言，不能只看末段。
+            //
+            // 为什么：宝石数不是钉在上限不动的——玩家吸取快时它会从 240 掉到 190 再慢慢爬回来，
+            // 贴顶区内的这种摆动是健康世界的正常呼吸。旧写法只要求末段 ≥80%，
+            // 于是把"196 → 239"这一段的正常爬坡判成了"无上限堆积"（M44 全量回归时撞到）。
+            // 判据要问的是"够到顶之后还在不在涨"，前提是**两段都已经够到顶**。
+            bool saturated = lastGems >= cap * 0.95f && prevGems >= cap * 0.95f;
             if (_finalWave < 12 || !saturated)
             {
                 _growOk = true;                       // 不适用
@@ -710,6 +819,24 @@ namespace StarPixel.Dev
                 if (!e.gameObject.scene.IsValid()) continue;
                 if (IsTemplate(e)) continue;
                 if (!e.gameObject.activeInHierarchy) continue;   // 已反生成（回池停用）不算场上
+                n++;
+            }
+            return n;
+        }
+
+        /// <summary>
+        /// M44：场上网络弹丸数（含探针放的哨兵）。同样是场景扫描 + 三重过滤，
+        /// 不读任何账本——弹丸恰恰是**没有账本**的那类实体，这也是它被漏掉的原因。
+        /// </summary>
+        private static int ProjectileCount()
+        {
+            int n = 0;
+            foreach (var p in Resources.FindObjectsOfTypeAll<NetProjectile>())
+            {
+                if (p == null) continue;
+                if (!p.gameObject.scene.IsValid()) continue;
+                if (IsTemplate(p)) continue;
+                if (!p.gameObject.activeInHierarchy) continue;   // 已反生成（回池停用）不算在飞
                 n++;
             }
             return n;

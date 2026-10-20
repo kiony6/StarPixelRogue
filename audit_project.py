@@ -3995,6 +3995,106 @@ namespace A
 ]
 
 
+# ============================================================================
+# 第 22 项：拆世界扫场必须覆盖每一类网络实体（M44）
+# ============================================================================
+# 第 21 项只保证"调用了 DespawnAllWorldObjects"，管不到**里面清了几类**。
+# M43 修完时里面只有三类——弹丸被完整漏掉，而第 21 项照样放行。
+DESPAWNALL_SIG_RE = re.compile(r'\bstatic\s+void\s+DespawnAllWorldObjects\s*\(\s*\)')
+SWEEP_CALL_RE = re.compile(r'SweepDespawn\s*<\s*([A-Za-z_]\w*)\s*>')
+
+# 必须被扫到的世界实体类型。每加一类网络化实体，这里同步加一项。
+WORLD_ENTITY_TYPES = ("NetPickup", "NetEnemy", "NetWorldState", "NetProjectile")
+
+
+def check_teardown_sweeps_all_types():
+    """
+    拆世界的扫场必须覆盖**每一类**网络世界实体（M44）。
+
+    第 21 项只拦"漏掉 DespawnAllWorldObjects 那一行"，拦不住"里面少清了一类"——
+    M43 修完时里面恰好漏了 <c>NetProjectile</c>，第 21 项绿着，缺陷留了一整个版本。
+
+    弹丸是四类里最容易被漏掉的一类：它没有账本（不像掉落物）、没有注册表
+    （不像敌人）、也没有静态 Instance（不像世界状态），唯一能找到它的途径
+    就是按类型扫场。漏掉它的后果是重开一局后，上一局仍在飞的弹丸留在新世界里
+    继续结算伤害，客户端那份还会变成僵尸——而且全程零异常、所有短局判据全绿。
+
+    判据：定义 <c>DespawnAllWorldObjects()</c> 的方法体内，
+    <c>SweepDespawn&lt;T&gt;</c> 的 T 必须覆盖上述四类（注释里写的不算）。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)
+        if 'DespawnAllWorldObjects' not in raw:
+            continue
+        clean = strip_noise(raw)
+        for m in DESPAWNALL_SIG_RE.finditer(clean):
+            brace = clean.find('{', m.end())
+            if brace < 0:
+                continue
+            body = _brace_body(clean, brace)
+            swept = set(SWEEP_CALL_RE.findall(body))
+            missing = [t for t in WORLD_ENTITY_TYPES if t not in swept]
+            if not missing:
+                continue
+            line = clean[:m.start()].count('\n') + 1
+            err("拆世界扫场漏了网络实体类型: %s 第 %d 行 DespawnAllWorldObjects() 缺少 %s\n"
+                "      拆世界的语义是「场上一个不留」，而每类实体的查找途径都不一样：\n"
+                "        · NetPickup    —— NetWorld 的账本 + 扫场；\n"
+                "        · NetEnemy     —— NetEnemyRegistry + 扫场（注册表不是事实，当帧刚生成的不在里面）；\n"
+                "        · NetWorldState—— 静态 Instance + 扫场；\n"
+                "        · NetProjectile—— **只有扫场**（没有账本、没有注册表、没有 Instance）。\n"
+                "      少扫一类不会崩溃、不会刷异常，只是那一类会整批漏到新世界。\n"
+                "      修法：补上 n += SweepDespawn<%s>();。"
+                % (rp, line, " / ".join(missing), missing[0]))
+
+
+# 第 22 项夹具：扫场是否覆盖每一类（M44）
+def _sweep_code(sweeps):
+    calls = "\n".join("            n += SweepDespawn<%s>();" % t for t in sweeps)
+    return """
+namespace A
+{
+    public static class B
+    {
+        public static void DespawnAllWorldObjects()
+        {
+            int n = 0;
+%s
+        }
+    }
+}
+""" % calls
+
+
+SELFTEST_SW = [
+    ("sw01_四类齐全", False, _sweep_code(WORLD_ENTITY_TYPES)),
+    # ② M43 修完时的真实状态：三类齐全，弹丸被漏掉——第 21 项绿着放行，缺陷留了一版
+    ("sw02_漏弹丸", True, _sweep_code(("NetPickup", "NetEnemy", "NetWorldState"))),
+    ("sw03_漏敌人", True, _sweep_code(("NetPickup", "NetWorldState", "NetProjectile"))),
+    # ④ 注释里写了但没调：注释不算实现
+    ("sw04_弹丸只在注释里", True, """
+namespace A
+{
+    public static class B
+    {
+        public static void DespawnAllWorldObjects()
+        {
+            int n = 0;
+            n += SweepDespawn<NetPickup>();
+            n += SweepDespawn<NetEnemy>();
+            n += SweepDespawn<NetWorldState>();
+            // n += SweepDespawn<NetProjectile>();
+        }
+    }
+}
+"""),
+]
+
+
 def _run_legal_fixtures(fixtures, checks=None):
     """把夹具写成 Resources/Legal 下的 txt 跑第 14 项，返回被报错的夹具名集合。"""
     import shutil
@@ -4067,6 +4167,7 @@ def selftest():
         ("时间缩放唯一写者检查（第 19 项）", SELFTEST_TS, [check_timescale_single_writer]),
         ("联机实体本地销毁检查（第 20 项）", SELFTEST_ND, [check_net_entity_local_destroy]),
         ("拆世界反生成检查（第 21 项）", SELFTEST_TD, [check_teardown_despawns_net]),
+        ("拆世界扫场覆盖检查（第 22 项）", SELFTEST_SW, [check_teardown_sweeps_all_types]),
     ]
 
     all_bad = 0
@@ -4121,6 +4222,7 @@ def main():
     check_timescale_single_writer()
     check_net_entity_local_destroy()
     check_teardown_despawns_net()
+    check_teardown_sweeps_all_types()
 
     n = len(cs_files())
     print("=" * 68)

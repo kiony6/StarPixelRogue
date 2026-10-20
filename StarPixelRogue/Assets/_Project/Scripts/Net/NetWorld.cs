@@ -151,7 +151,8 @@ namespace StarPixel.Net
         /// 而联机实体根本不在那些容器里：
         ///   · 敌人注册在 <see cref="NetEnemyRegistry"/>，不在 ActiveEnemies；
         ///   · 掉落物注册在本类的 Gems/Healths，不在 PickupManager；
-        ///   · 世界状态对象由 <see cref="SpawnWorldState"/> 生成，谁都没有持有它。
+        ///   · 世界状态对象由 <see cref="SpawnWorldState"/> 生成，谁都没有持有它；
+        ///   · 在飞的弹丸（<see cref="NetProjectile"/>）连注册表都没有（M44 补上）。
         /// 结果：重开一局后，上一局的宝石原封不动躺在脚下（而且捡不起来——账本已经清零），
         /// 旧敌人继续追着新玩家跑，旧的 NetWorldState 还活着并和新生成的那个抢 Instance
         /// （波次在两份之间跳）。客户端更糟：房主若本地 Object.Destroy 而不反生成，
@@ -176,6 +177,11 @@ namespace StarPixel.Net
             n += SweepDespawn<NetPickup>();
             n += SweepDespawn<NetEnemy>();
             n += SweepDespawn<NetWorldState>();
+            // M44：弹丸也必须扫。它是 M43 唯一漏掉的一类网络实体——
+            // 没有账本、没有注册表，谁都不持有它，只能靠"按类型扫场"才找得到。
+            // 漏掉它的后果：重开一局后，上一局仍在飞的弹丸会留在新世界里继续结算伤害
+            // （最长 2.5s 自毁，Boss 的径向弹幕更长），客户端那份还会变成僵尸。
+            n += SweepDespawn<NetProjectile>();
 
             NetEnemyRegistry.DespawnAll();   // 清掉注册表里已失效 / 未激活的引用
             Gems.Clear();
