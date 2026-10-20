@@ -31,6 +31,22 @@ namespace StarPixel.Net
             _value.Value = kind == NetPickupKind.Xp ? xp : heal;
         }
 
+        /// <summary>
+        /// M42：种类只读出口。<c>_kind</c> 是 private SyncVar，不给出口的话无头探针只能靠
+        /// 预制体名猜"场上这些到底是宝石还是回血球"——猜错就会把回血球算进宝石的判据里。
+        /// </summary>
+        public NetPickupKind Kind => _kind.Value;
+
+        /// <summary>
+        /// M42：从账本反登记。拾取（Despawn）/ 超限回收（Despawn）/ 拆世界（Destroy）
+        /// 三条销毁路径都必然经过这里，是账本"有出"的唯一保证——只进不出的账本正是
+        /// M41 在单机侧修掉、联机侧本轮才补上的那个缺陷。
+        /// </summary>
+        void OnDestroy()
+        {
+            NetWorld.UnregisterPickup(this);
+        }
+
         public override void OnStartClient()
         {
             base.OnStartClient();

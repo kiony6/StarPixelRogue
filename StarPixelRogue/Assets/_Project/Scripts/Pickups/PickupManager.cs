@@ -21,20 +21,14 @@ namespace StarPixel.Pickups
         private const float CollectDist = 0.4f;
         private const float MagnetSpeed = 12f;
 
-        /// <summary>
-        /// M41：场上掉落物上限（两类各自计）。
-        ///
-        /// 为什么必须有：账本此前**只进不出**——只有玩家走到身上（CollectDist 内）才会被移除，
-        /// 既没有寿命也没有上限。短局里玩家跑得过来（45s 掉 30 个、捡走 28 个），看不出异常；
-        /// 但波次推高后每波上百只怪、玩家根本捡不完：实测 30 分钟游戏时间堆到
-        /// 887 个宝石 + 148 个回血球，而 <see cref="Update"/> 每帧都要把整张表遍历一遍算距离，
-        /// 于是**越玩越卡**——所有短局判据却依旧全绿，因为 45 秒里它根本来不及堆。
-        ///
-        /// 为什么回收"离玩家最远"的而不是"最早的"：玩家够得着的要留住，
-        /// 够不着的那个本来也捡不到，牺牲它对实际收益影响最小。
-        /// </summary>
-        private const int MaxGems = 240;
-        private const int MaxHealth = 80;
+        // M42：上限值与"回收谁"的判据统一下沉到 <see cref="PickupTrim"/>，
+        // 与联机路径（NetWorld）共用同一套常量与算法——原先两份各自实现，
+        // 联机那份压根没写（见 NetWorld.SpawnGem 的注释）。
+        private const int MaxGems = PickupTrim.MaxGems;
+        private const int MaxHealth = PickupTrim.MaxHealth;
+
+        /// <summary>M42：传给 <see cref="PickupTrim"/> 的玩家位置表（复用同一实例，避免每次回收都分配）。</summary>
+        private readonly List<Vector2> _trimPlayers = new List<Vector2>(1);
 
         public void Configure(GameObject gemTemplate, GameObject healthTemplate, PlayerController player)
         {
@@ -55,10 +49,10 @@ namespace StarPixel.Pickups
             TrimGems();
         }
 
-        /// <summary>M41：超出上限时回收离玩家最远的一个（详见 <see cref="MaxGems"/> 注释）。</summary>
+        /// <summary>M41：超出上限时回收离玩家最远的一个（判据详见 <see cref="PickupTrim"/>）。</summary>
         private void TrimGems()
         {
-            if (_gems.Count <= MaxGems) return;
+            if (!PickupTrim.Over(_gems.Count, MaxGems)) return;
             int worst = Farthest(_gems);
             if (worst < 0) return;
             var g = _gems[worst];
@@ -69,7 +63,7 @@ namespace StarPixel.Pickups
         /// <summary>M41：超出上限时回收离玩家最远的一个。</summary>
         private void TrimHealth()
         {
-            if (_healths.Count <= MaxHealth) return;
+            if (!PickupTrim.Over(_healths.Count, MaxHealth)) return;
             int worst = Farthest(_healths);
             if (worst < 0) return;
             var h = _healths[worst];
@@ -77,20 +71,12 @@ namespace StarPixel.Pickups
             if (h != null) h.Collect();
         }
 
-        /// <summary>账本里离玩家最远的那一项；全为空时返回 -1（空项由 Update 自行清理）。</summary>
+        /// <summary>M42：账本里离玩家最远的那一项（-1 = 全为空项；空项由 Update 自行清理）。</summary>
         private int Farthest<T>(List<T> list) where T : Component
         {
-            Vector2 p = _player != null ? (Vector2)_player.transform.position : Vector2.zero;
-            int worst = -1;
-            float worstD = -1f;
-            for (int i = 0; i < list.Count; i++)
-            {
-                var c = list[i];
-                if (c == null) continue;
-                float d = Vector2.Distance((Vector2)c.transform.position, p);
-                if (d > worstD) { worstD = d; worst = i; }
-            }
-            return worst;
+            _trimPlayers.Clear();
+            if (_player != null) _trimPlayers.Add(_player.transform.position);
+            return PickupTrim.FarthestIndex(list, _trimPlayers);
         }
 
         public void DropHealth(Vector3 pos, float amount)

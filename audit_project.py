@@ -3629,6 +3629,11 @@ def check_no_text_over_net():
 # 无关，不拦——否则每个 SetPaused 的兜底分支都要挂豁免，真正的违规反而被淹掉。
 RAW_SCALE_RE = re.compile(r'\bTime\.timeScale\s*=\s*(?:1f|[1-9][0-9]*(?:\.[0-9]+)?f?|0\.[1-9][0-9]*f?)\b')
 
+# 第 20 项：联机实体里的本地销毁调用。
+# `(?<![\w])` 是为了排除 `void OnDestroy()` 这类**方法声明**——
+# 它前面是标识符字符（On），而 `Destroy(` / `Object.Destroy(` 前面是空白或点。
+ND_DESTROY_RE = re.compile(r'(?<![\w])Destroy\s*\(')
+
 
 def check_timescale_single_writer():
     """
@@ -3683,6 +3688,175 @@ def check_timescale_single_writer():
                 "      修法：走 HitstopManager（SetPaused / ApplyNow），兜底分支写 BaseScale；\n"
                 "      确属有意为之则写 // @rawscale: 理由。"
                 % (rp, i + 1, ln.strip()[:70]))
+
+
+def check_net_entity_local_destroy():
+    """
+    联机实体（<c>NetworkBehaviour</c>）不得本地 <c>Destroy</c>（M42）。
+
+    联机世界里一个对象的生与死是**房主权威**行为：生成走 <c>NetSpawner.Spawn</c>、
+    回收走 <c>NetSpawner.Despawn</c>，后者会广播反生成，所有端的副本同步消失。
+    谁要是图省事写一句 <c>Object.Destroy(gameObject)</c>，后果分两种，都很难查：
+
+      · 房主侧本地销毁 —— 客户端收不到任何反生成广播，它那份副本变成**僵尸**：
+        位置不再更新却永远留在场上，越积越多。双端计数从此分叉，
+        而房主自己看一切正常（"我明明清掉了"）。
+      · 客户端侧本地销毁 —— 客户端少算，房主不知道；表现是"有些掉落物在我屏幕上
+        莫名其妙就没了"，且重连后又会回来。
+
+    两种都不是崩溃，都是"看起来有点怪但不影响继续玩"——正是最容易活到线上那类缺陷。
+    M42 的联机长局探针里，这两种分别是区分力注入 R4 的两个方向；
+    而双端交叉核对若只查"客户端偏多"，第二种会一路绿灯地溜过去。
+
+    判据：含 <c>: NetworkBehaviour</c> 的脚本里不得出现 <c>Destroy(</c> 调用
+    （<c>void OnDestroy()</c> 是方法声明，不算）。可用 `// @netdestroy: 理由` 豁免，
+    且**空理由无效**。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)
+        if ': NetworkBehaviour' not in raw:
+            continue
+        lines = strip_noise(raw).split('\n')
+        raw_lines = raw.split('\n')
+
+        for i, ln in enumerate(lines):
+            if not ND_DESTROY_RE.search(ln):
+                continue
+            # 与第 19 项同一口径：豁免注释通常挂在方法/语句上方，窗口上 4 下 1
+            exempt = False
+            for x in range(max(0, i - 4), min(len(raw_lines), i + 2)):
+                if ('@netdestroy:' in raw_lines[x]
+                        and raw_lines[x].split('@netdestroy:', 1)[1].strip()):
+                    exempt = True
+                    break
+            if exempt:
+                info("联机实体本地销毁豁免: %s 第 %d 行（人工确认）" % (rp, i + 1))
+                continue
+            err("联机实体里出现了本地 Destroy: %s 第 %d 行 %s\n"
+                "      联机对象的生死是房主权威行为：回收必须走 NetSpawner.Despawn，\n"
+                "      它才会广播反生成、让所有端的副本一起消失。\n"
+                "      本地 Destroy 的两个后果都不会崩溃，只会“看起来有点怪”：\n"
+                "        · 房主侧销毁 → 客户端收不到广播，副本变僵尸、越积越多（双端计数分叉）；\n"
+                "        · 客户端侧销毁 → 客户端少算，房主毫无察觉（掉落物在客户端莫名消失）。\n"
+                "      修法：改走 NetSpawner.Despawn（房主权威）；确属有意为之则写 // @netdestroy: 理由。"
+                % (rp, i + 1, ln.strip()[:70]))
+
+
+# 第 20 项夹具：联机实体的本地销毁（M42）
+# 正例/反例都只造源码文本——本项查的是"能编译、能跑、只有双端并排比对才看得出的分叉"。
+SELFTEST_ND = [
+    # ① 走房主权威反生成，放行
+    ("nd01_走Despawn", False, """
+namespace A
+{
+    public class P : NetworkBehaviour
+    {
+        private void Recycle()
+        {
+            NetSpawner.Despawn(gameObject);
+        }
+    }
+}
+"""),
+    # ② 不是联机实体（没有 NetworkBehaviour），本地销毁是它的本职，放行
+    ("nd02_非联机实体", False, """
+namespace A
+{
+    public class P
+    {
+        private void Clear()
+        {
+            if (_root != null) Destroy(_root);
+        }
+    }
+}
+"""),
+    # ③ OnDestroy 是方法**声明**不是调用：正则必须放行，否则这一项会满屏误报
+    ("nd03_OnDestroy声明", False, """
+namespace A
+{
+    public class P : NetworkBehaviour
+    {
+        void OnDestroy()
+        {
+            Registry.Unregister(this);
+        }
+    }
+}
+"""),
+    # ④ 房主侧图省事直接销毁：客户端收不到反生成，副本变僵尸（R4 的方向一）
+    ("nd04_房主本地销毁", True, """
+namespace A
+{
+    public class P : NetworkBehaviour
+    {
+        private void Recycle()
+        {
+            Object.Destroy(gameObject);
+        }
+    }
+}
+"""),
+    # ⑤ 客户端侧自行销毁：客户端少算而房主毫无察觉（R4 的方向二）
+    ("nd05_客户端本地销毁", True, """
+namespace A
+{
+    public class P : NetworkBehaviour
+    {
+        private void Update()
+        {
+            if (!IsServerInitialized) Destroy(gameObject);
+        }
+    }
+}
+"""),
+    # ⑥ 只销毁一个子物体也照样要拦：判据盯的是"这类文件里有没有本地销毁"这个习惯，
+    #    一旦开了口子，下一次就是 gameObject 本身
+    ("nd06_销毁子物体", True, """
+namespace A
+{
+    public class P : NetworkBehaviour
+    {
+        private void Reset()
+        {
+            Destroy(_overlay);
+        }
+    }
+}
+"""),
+    # ⑦ 显式豁免且理由非空：人工确认过，放行
+    ("nd07_有理由豁免", False, """
+namespace A
+{
+    public class P : NetworkBehaviour
+    {
+        private void Clear()
+        {
+            // @netdestroy: 纯本地 UI 挂件，不参与同步
+            Destroy(_overlay);
+        }
+    }
+}
+"""),
+    # ⑧ 豁免标记写了但没写理由：等于没说，照样报错（与前几项同一口径）
+    ("nd08_空理由豁免", True, """
+namespace A
+{
+    public class P : NetworkBehaviour
+    {
+        private void Clear()
+        {
+            // @netdestroy:
+            Destroy(_overlay);
+        }
+    }
+}
+"""),
+]
 
 
 def _run_legal_fixtures(fixtures, checks=None):
@@ -3755,6 +3929,7 @@ def selftest():
         ("收场可见出口检查（第 17 项）", SELFTEST_NF, [check_notice_on_endings]),
         ("跨端文案检查（第 18 项）", SELFTEST_XT, [check_no_text_over_net]),
         ("时间缩放唯一写者检查（第 19 项）", SELFTEST_TS, [check_timescale_single_writer]),
+        ("联机实体本地销毁检查（第 20 项）", SELFTEST_ND, [check_net_entity_local_destroy]),
     ]
 
     all_bad = 0
@@ -3807,6 +3982,7 @@ def main():
     check_notice_on_endings()
     check_no_text_over_net()
     check_timescale_single_writer()
+    check_net_entity_local_destroy()
 
     n = len(cs_files())
     print("=" * 68)

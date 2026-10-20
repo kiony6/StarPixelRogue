@@ -395,6 +395,11 @@ namespace StarPixel
             float dropAt = spectator ? 0f
                 : (host ? ArgFloat("-netHostDropAt", 0f) : ArgFloat("-netDropAt", 0f));
 
+            // M42 联机长局：保活阈值提高到每帧满血。联机冒烟原本只补到 60%，
+            // 而 30 分钟量级里总有被 Boss 一击打穿的瞬间——一旦阵亡，
+            // 弹结算面板会把 timeScale 压到 0，世界冻住、本轮直接失去意义。
+            if (HasArg("-smokeImmortal")) StarPixel.Dev.SmokeTest.Immortal = true;
+
             bool built = false;
 
             // M18：连接就绪看门狗。此前客户端在服务端缺失时 backend.Ready 永不触发，
@@ -418,6 +423,30 @@ namespace StarPixel
                 built = true;
                 if (watchdog != null) Object.Destroy(watchdog.gameObject);
                 Build();                                       // 联机世界（房主权威）
+
+                // M42 联机长局压测：两端都挂探针——房主侧断言"权威世界有界"，
+                // 客户端侧采样"自己同步到的视图"，两端计数由驱动脚本交叉核对。
+                // 探针先建：它要尽早订阅日志以统计运行期异常（与 LongRunProbe 同一理由）。
+                // 整块受 FISHNET_ENABLED 保护：探针引用 NetPickup 等联机专属类型，
+                // 未装插件时必须编译掉（与 NetWorld 的账本同一隔离方式）。
+#if FISHNET_ENABLED
+                if (HasArg("-longrunProbe"))
+                {
+                    // 观察时长比 SmokeTest 短 1s：收尾必须由探针先做，
+                    // 否则 SmokeTest 一到点就 Application.Quit，探针的报告一行都出不来。
+                    StarPixel.Dev.NetLongRunProbe.Start(Mathf.Max(6f, SmokeSeconds() - 1f));
+                }
+#endif
+
+                // M42：加速**只加在房主侧**。世界由房主权威模拟，客户端保持 1x 跟随
+                // NetworkTransform——若客户端也开到 6x，它自己的本地模拟会和
+                // 服务端权威位置互相拉扯（M4.5 修磁吸时踩过同一类坑）。
+                if (host)
+                {
+                    float sp = SmokeSpeed();
+                    if (sp != 1f) Core.HitstopManager.SetBaseScale(sp);
+                }
+
                 StarPixel.Dev.SmokeTest.StartNet(SmokeSeconds(), dropAt);
             };
 
@@ -752,6 +781,11 @@ namespace StarPixel
             // ResetAll 处理"还在场上的"，DestroyAll 处理"已经归还到池里的"，两者缺一不可。
             Core.PoolManager.Instance?.DestroyAll();
             PickupManager.Instance?.ResetAll();
+            // M42：联机掉落物账本是**静态**的（NetWorld 不随世界销毁），不清就会跨局残留
+            // 一堆悬空引用，下一局的上限判定全建立在别人的残账上。
+#if FISHNET_ENABLED
+            Net.NetWorld.ResetPickups();
+#endif
             EnemyManager.Instance?.ResetAll();
             // M26：临时特效（前摇警示圈 / Nova 爆发环）同样是 new GameObject 建在场景根上的，
             // 不属于任何管理器 —— 漏掉这一行，上一局的圈会整批出现在新世界的开局画面里。
