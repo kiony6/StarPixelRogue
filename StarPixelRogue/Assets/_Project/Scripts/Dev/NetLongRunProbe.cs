@@ -93,6 +93,24 @@ namespace StarPixel.Dev
         private string _rsLeakProjText = "否", _rsProjCleanText = "否";
         private bool _rsLeakProjOk, _rsProjCleanOk;
 
+        // —— M45 玩家 ——
+        //
+        // 4 人局之前没人测过，而"拆世界"是全项目唯一一次**批量反生成**的动作：
+        // DespawnAllWorldObjects() 按类型扫场，清掉它列出的每一类。
+        // 玩家**不在**那个列表里是对的——玩家跨局存活，拆世界不该动它。
+        // 但这条边界目前没有任何判据在守：只要有人"顺手补全"把 NetPlayer 也加进扫场，
+        // 重开一局就会把所有人踢出去，而且**现有 11 条判据一条都不会红**
+        // （它们只数敌人 / 掉落物 / 世界状态 / 弹丸）。
+        //
+        // 2 人局下这个缺陷同样会发生，但 4 人局才暴露得彻底：掉 1 个人时另外 3 个还在打，
+        // 世界照样推进，日志里连一条异常都没有。
+        //
+        // 口径同样是扫场（不读 NetPlayerRegistry.Count）：M43 的教训是注册表不是事实，
+        // 玩家注册表在跨端更不可信——客户端的注册表里可能只有自己。
+        private int _rsPlayerBefore = -1, _rsPlayerLeak = -1, _rsPlayerAfter = -1;
+        private string _rsPlayerIntactText = "否", _rsPlayerKeepText = "否";
+        private bool _rsPlayerIntactOk, _rsPlayerKeepOk;
+
         private bool _rsWaveOk, _rsPickupOk, _rsStateOk, _rsEnemyOk, _rsLeakGemOk, _rsLeakStateOk;
 
         private const int SEGMENTS = 6;
@@ -255,6 +273,7 @@ namespace StarPixel.Dev
                 _rsGemsLeak = GemCountNow(out _rsHealthLeak);
                 _rsStateLeak = WorldStateCount();
                 _rsProjLeak = ProjectileCount();   // M44
+                _rsPlayerLeak = PlayerCount();     // M45：这一刻玩家必须一个不少
                 GameBuilder.Build();           // 立刻重建：不给中间帧，免得把"没清"误判成"还没清"
                 _rsBuilt = true;
                 _rsBuiltAt = _t;
@@ -309,6 +328,9 @@ namespace StarPixel.Dev
             int pr = ProjectileCount();
             if (pr > _rsProjBefore) _rsProjBefore = pr;   // M44
 
+            int pl = PlayerCount();
+            if (pl > _rsPlayerBefore) _rsPlayerBefore = pl;   // M45
+
             _rsRootBefore = RootCount();
         }
 
@@ -345,6 +367,7 @@ namespace StarPixel.Dev
             _rsRootAfter = RootCount();
             _rsStateAfter = WorldStateCount();
             _rsProjAfter = ProjectileCount();
+            _rsPlayerAfter = PlayerCount();
 
             var lp = NetPlayerRegistry.Local;
             _rsPlayerOk = lp != null && (lp.Damageable == null || !lp.Damageable.isDead);
@@ -411,7 +434,16 @@ namespace StarPixel.Dev
             //    三条拆开而不是合成一条：三种残留的成因不同（敌人注册表 / 掉落物账本 /
             //    无人持有的世界状态对象），合成一条的话注入任何一处都报同一个键，
             //    失败面会粘成一坨，也就失去了"每条判据各守一个面"的意义。
-            if (!_isHost || _rsEnemyBefore < 8)
+            //    M45：前提从"重开前至少 8 个敌人"放宽到"至少 1 个"。
+            //
+            //    8 这个数字是 M43 定的，当时的观察窗口是波次 40 上下（场上 8~16 个）。
+            //    本轮跑到**波次 209** 时房主侧只剩 7 个敌人——波次越高清怪越快，
+            //    重开那一刻场上反而越干净，于是这条判据在最该测的长局里退化了：
+            //    "拆完残留 = 0"是**真的**断言，还是"压根没东西可残留"？看不出来。
+            //
+            //    "残留 == 0"这个断言在"重开前有 1 个"时就成立且有区分力
+            //    （Q3 注入证明：摘掉敌人扫场后它照样红）。改成 ≥1，与弹丸那条同口径。
+            if (!_isHost || _rsEnemyBefore < 1)
             {
                 _rsEnemyOk = true;
                 _rsEnemyText = "不适用";
@@ -491,6 +523,45 @@ namespace StarPixel.Dev
             }
             Check("重开后弹丸清零", _rsProjCleanOk);
 
+            // 6) M45：拆完玩家一个都不能少（房主专属）。
+            //
+            //    这是"拆世界"这件事的**反向判据**：前面五条都在问"该清的清没清"，
+            //    这一条问的是"不该清的有没有被顺手清掉"。玩家跨局存活，
+            //    DespawnAllWorldObjects() 的类型列表里没有 NetPlayer 是**故意的**；
+            //    而这条边界此前没有任何判据在守，顺手补进去就会把全房人踢出去。
+            //
+            //    为什么必须是房主：只有房主在"拆完、尚未重建"的那一帧点过数（_rsPlayerLeak），
+            //    那一刻玩家若被误清，随后 Build() 会立刻把人重新建出来（甚至建出重复的），
+            //    1.6 秒后再数就已经看不出发生过什么了。
+            if (!_isHost || _rsPlayerBefore < 1)
+            {
+                _rsPlayerIntactOk = true;
+                _rsPlayerIntactText = "不适用";
+            }
+            else
+            {
+                _rsPlayerIntactOk = _rsPlayerLeak >= _rsPlayerBefore;
+                _rsPlayerIntactText = Yn(_rsPlayerIntactOk);
+            }
+            Check("拆完玩家未被误清", _rsPlayerIntactOk);
+
+            // 7) M45：重开后玩家数不减少（两端都判）。
+            //
+            //    与上一条是两个面：上一条守"拆的动作"，这一条守"拆完到重建之后"的整段。
+            //    客户端也必须判——它的玩家副本若因某种原因没跟着重建，
+            //    房主侧那条照样是绿的（房主的世界里人好好的），只有客户端自己看得见。
+            if (_rsPlayerBefore < 1)
+            {
+                _rsPlayerKeepOk = true;
+                _rsPlayerKeepText = "不适用";
+            }
+            else
+            {
+                _rsPlayerKeepOk = _rsPlayerAfter >= _rsPlayerBefore;
+                _rsPlayerKeepText = Yn(_rsPlayerKeepOk);
+            }
+            Check("重开后玩家齐全", _rsPlayerKeepOk);
+
             Check("重开后玩家可控", _rsPlayerOk);
 
             // 5) 客户端：收到重开广播。房主侧"不适用"——它就是广播的发出方。
@@ -517,6 +588,8 @@ namespace StarPixel.Dev
             Line("拆完立刻无残留世界状态", _rsLeakStateText);
             Line("拆完立刻无残留弹丸", _rsLeakProjText);
             Line("重开后弹丸清零", _rsProjCleanText);
+            Line("拆完玩家未被误清", _rsPlayerIntactText);
+            Line("重开后玩家齐全", _rsPlayerKeepText);
             Line("重开后玩家可控", Yn(_rsPlayerOk));
             Line("收到重开广播", _isHost ? "不适用" : Yn(_rsSeen));
             Line("全程零异常", Yn(_errors == 0));
@@ -524,12 +597,18 @@ namespace StarPixel.Dev
             Line("重开前宝石", _rsGemsBefore + " 宝石 / " + _rsHealthBefore + " 回血球");
             Line("重开前敌人", _rsEnemyBefore.ToString());
             Line("重开前弹丸", _rsProjBefore.ToString());
+            Line("重开前玩家", _rsPlayerBefore.ToString());
             Line("重开后波次", _rsWaveAfter.ToString());
             Line("重开后宝石", _rsGemsAfter + " 宝石 / " + _rsHealthAfter + " 回血球");
             Line("重开后敌人", _rsEnemyAfter.ToString());
             Line("重开后弹丸", _rsProjAfter.ToString());
+            Line("重开后玩家", _rsPlayerAfter.ToString());
             Line("拆完残留", _rsEnemyLeak + " 敌人 / " + _rsGemsLeak + " 宝石 / " + _rsStateLeak +
                             " 状态 / " + _rsProjLeak + " 弹丸");
+            Line("拆完玩家", _rsPlayerLeak + " / 重开前 " + _rsPlayerBefore);
+            // 注册表 vs 扫场：M43 的教训是"注册表不是事实"，玩家注册表在客户端
+            // 尤其不可信（可能只登记了自己）。两个数都打出来，扫场数才是判据口径。
+            Line("玩家注册表", NetPlayerRegistry.Count + "（扫场 " + _rsPlayerAfter + "）");
             Line("世界状态数", _rsStateBefore + " → " + _rsStateAfter);
             Line("根对象", _rsRootBefore + " → " + _rsRootAfter);
             Line("托管堆MB", (GC.GetTotalMemory(false) / 1048576f).ToString("F1"));
@@ -757,6 +836,10 @@ namespace StarPixel.Dev
             Line("GC次数", "gen0=" + last.gc0 + " gen1=" + last.gc1 + " gen2=" + last.gc2);
             Line("平均帧率", last.fps.ToString("F0"));
             Line("快照重建/帧数", NetWorld.PlayerSnapshotBuilds + " / " + _frames);
+            // M45：多人局里"每端看到几个人"是唯一的成色证据——4 人局每端都该是 4。
+            // 少一个说明有人没连上或被踢了，而其余判据（掉落物有界 / 波次推进）
+            // 在少人的世界里照样全绿，是典型的假通过。
+            Line("场上玩家", PlayerCount() + "（注册表 " + NetPlayerRegistry.Count + "）");
             Line("首个异常", _firstError);
             Line("结论", (_errors == 0 && _fail.Count == 0 && _ok == _checked) ? "通过" : "不通过");
             foreach (var f in _fail) Line("失败项", f);
@@ -837,6 +920,27 @@ namespace StarPixel.Dev
                 if (!p.gameObject.scene.IsValid()) continue;
                 if (IsTemplate(p)) continue;
                 if (!p.gameObject.activeInHierarchy) continue;   // 已反生成（回池停用）不算在飞
+                n++;
+            }
+            return n;
+        }
+
+        /// <summary>
+        /// M45：场上网络玩家数（扫场口径，不读 NetPlayerRegistry.Count）。
+        ///
+        /// 与其余四类同一套三重过滤。玩家跨局存活，所以这个数在重开前后**必须不变**——
+        /// 它既是"拆世界有没有误清玩家"的判据，也是多人局是否真的凑齐人的证据
+        /// （4 人局里每端都该看到 4 个，少一个就是有人没连上或被踢了）。
+        /// </summary>
+        private static int PlayerCount()
+        {
+            int n = 0;
+            foreach (var p in Resources.FindObjectsOfTypeAll<NetPlayer>())
+            {
+                if (p == null) continue;
+                if (!p.gameObject.scene.IsValid()) continue;
+                if (IsTemplate(p)) continue;
+                if (!p.gameObject.activeInHierarchy) continue;   // 已反生成（回池停用）不算在场
                 n++;
             }
             return n;

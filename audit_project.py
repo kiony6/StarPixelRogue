@@ -4095,6 +4095,91 @@ namespace A
 ]
 
 
+# ============================================================================
+# 第 23 项：拆世界扫场不得把玩家一起清掉（M45）
+# ============================================================================
+# 第 22 项管的是"少清了谁"，这一项管反方向：**多清了谁**。
+#
+# 玩家的生命周期与世界相反——世界每局重建，玩家跨局存活（重开一局人还在场上，
+# 只是等级/装备回到初始值）。DespawnAllWorldObjects() 的类型列表里没有 NetPlayer
+# 是**故意的**，但这条边界此前没有任何东西在守：只要有人"顺手补全"把 NetPlayer
+# 也加进扫场，重开一局就会把全房人踢出房间。
+#
+# 2 人局下这个缺陷一样会发生，但 4 人局才暴露得彻底：掉 1 个人时另外 3 个照打，
+# 世界照样推进、波次照样涨，日志里连一条异常都没有——M45 之前的 11 条重开局判据
+# 只数敌人 / 掉落物 / 世界状态 / 弹丸，没有一条会红。
+CROSS_ROOM_TYPES = ("NetPlayer",)
+
+
+def check_teardown_keeps_players():
+    """
+    拆世界的扫场<b>不得</b>包含网络玩家（M45）。
+
+    与第 22 项是一对：22 项保证该清的四类都清了，这一项保证**不该清的没被顺手清掉**。
+    玩家跨局存活——重开一局时人还在场上，只是回到初始状态；把它反生成掉等于把人踢出房间。
+
+    这种写法看起来完全合理（"世界都要拆了，玩家不也是世界里的吗"），
+    而且在 2 人局里同样不会崩溃、不会刷异常，只会让重开后少一个人。
+    4 人局下更隐蔽：少一个玩家时另外三个还在打，唯一能发现它的是"人数"这个判据。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)
+        if 'DespawnAllWorldObjects' not in raw:
+            continue
+        clean = strip_noise(raw)
+        for m in DESPAWNALL_SIG_RE.finditer(clean):
+            brace = clean.find('{', m.end())
+            if brace < 0:
+                continue
+            body = _brace_body(clean, brace)
+            swept = set(SWEEP_CALL_RE.findall(body))
+            bad = [t for t in CROSS_ROOM_TYPES if t in swept]
+            if not bad:
+                continue
+            line = clean[:m.start()].count('\n') + 1
+            err("拆世界扫场把玩家也清了: %s 第 %d 行 DespawnAllWorldObjects() 里有 %s\n"
+                "      玩家**跨局存活**——重开一局时人还在场上，只是等级/装备回到初始值；\n"
+                "      世界每局重建，玩家不重建。把它反生成掉等于把全房人踢出房间。\n"
+                "      这种写法看起来合理（\"世界都拆了，玩家不也在世界里吗\"），也不会崩溃、\n"
+                "      不会刷异常——只会让重开后少一个人。4 人局里少一个时另外三个照打，\n"
+                "      波次照样涨，只有\"人数\"这条判据看得见。\n"
+                "      修法：删掉这一行（第 22 项要求的只有那四类）。"
+                % (rp, line, " / ".join("SweepDespawn<%s>()" % t for t in bad)))
+
+
+# 第 23 项夹具（M45）
+SELFTEST_KP = [
+    # ① 当前正确状态：只有四类，没有玩家——放行
+    ("kp01_只清四类", False, _sweep_code(WORLD_ENTITY_TYPES)),
+    # ② M45 要抓的写法：顺手把玩家补进扫场
+    ("kp02_连玩家一起清", True, _sweep_code(WORLD_ENTITY_TYPES + CROSS_ROOM_TYPES)),
+    # ③ 只清玩家（极端写法，同样要报）
+    ("kp03_只清玩家", True, _sweep_code(CROSS_ROOM_TYPES)),
+    # ④ 注释里提了玩家但没真调——不算
+    ("kp04_玩家只在注释里", False, """
+namespace A
+{
+    public static class B
+    {
+        public static void DespawnAllWorldObjects()
+        {
+            int n = 0;
+            n += SweepDespawn<NetPickup>();
+            n += SweepDespawn<NetEnemy>();
+            n += SweepDespawn<NetWorldState>();
+            n += SweepDespawn<NetProjectile>();
+            // 玩家跨局存活，不能扫：n += SweepDespawn<NetPlayer>();
+        }
+    }
+}
+"""),
+]
+
+
 def _run_legal_fixtures(fixtures, checks=None):
     """把夹具写成 Resources/Legal 下的 txt 跑第 14 项，返回被报错的夹具名集合。"""
     import shutil
@@ -4168,6 +4253,7 @@ def selftest():
         ("联机实体本地销毁检查（第 20 项）", SELFTEST_ND, [check_net_entity_local_destroy]),
         ("拆世界反生成检查（第 21 项）", SELFTEST_TD, [check_teardown_despawns_net]),
         ("拆世界扫场覆盖检查（第 22 项）", SELFTEST_SW, [check_teardown_sweeps_all_types]),
+        ("拆世界保留玩家检查（第 23 项）", SELFTEST_KP, [check_teardown_keeps_players]),
     ]
 
     all_bad = 0
@@ -4223,6 +4309,7 @@ def main():
     check_net_entity_local_destroy()
     check_teardown_despawns_net()
     check_teardown_sweeps_all_types()
+    check_teardown_keeps_players()
 
     n = len(cs_files())
     print("=" * 68)
