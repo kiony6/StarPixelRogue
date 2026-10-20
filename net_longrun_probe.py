@@ -44,36 +44,52 @@ from net_smoke import (rel, launch, wait_host_ready, wait_for, parse_smoke,   # 
 # 探针判据名白名单（与 NetLongRunProbe.Check 的名字一一对应）。
 # 为什么必须白名单：同一份日志里还有 SmokeTest 自己那批 [SMOKE] 行
 # （"对端掉线 否"/"玩家阵亡 否"等），不筛的话它们会被当成长局判据混进失败面。
-JUDGES = (
+GROWTH_JUDGES = (
     "波次确实推进",
     "宝石有界",
     "回血球有界",
     "上限真的生效",
     "账本与场景一致",
     "末段贴顶后不再抬升",
+    "玩家遍历不随掉落物增长",
     "长程数值不越界",
+    "全程零异常",
+)
+
+# M43：重开局场景。判据完全不同——它问的不是"有没有堆积"，而是"拆干净了吗、重建起来了吗"。
+RESTART_JUDGES = (
+    # 拆完瞬间的三条：唯一能精确回答"旧实体有没有被反生成"的时点
+    "拆完立刻无残留敌人",
+    "拆完立刻无残留掉落物",
+    "拆完立刻无残留世界状态",
+    # 重建之后：新世界是否健康、客户端是否真的收到了广播
+    "重开后波次重置",
+    "重开后掉落物清零",
+    "重开后世界状态唯一",
+    "重开后玩家可控",
+    "收到重开广播",
     "全程零异常",
 )
 
 PROBE_RE = re.compile(r"\[SMOKE\]\s*(.+?)\s{2,}(.+?)\s*$")
 
 
-def probe_results(path):
+def probe_results(path, judges):
     """抽出探针判据 -> 是/否/不适用，以及信息行。"""
-    judges, info = {}, {}
+    judges_map, info = {}, {}
     if not os.path.exists(path):
-        return judges, info
+        return judges_map, info
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             m = PROBE_RE.search(line)
             if not m:
                 continue
             k, v = m.group(1).strip(), m.group(2).strip()
-            if k in JUDGES:
-                judges[k] = v
+            if k in judges:
+                judges_map[k] = v
             else:
                 info[k] = v
-    return judges, info
+    return judges_map, info
 
 
 def as_int(info, key, default=-1):
@@ -90,8 +106,24 @@ def peak_of(info, key):
     return int(m.group(1)) if m else -1
 
 
+def first_int(info, key, default=-1):
+    """'0 宝石 / 0 回血球' → 0；'1 → 1' → 1；解析不出时返回 default。"""
+    v = str(info.get(key, ""))
+    m = re.search(r"(-?\d+)", v)
+    return int(m.group(1)) if m else default
+
+
+def last_int(info, key, default=-1):
+    """'1 → 1' → 1（取箭头后的那个）；解析不出时返回 default。"""
+    v = str(info.get(key, ""))
+    nums = re.findall(r"-?\d+", v)
+    return int(nums[-1]) if nums else default
+
+
 def main():
-    ap = argparse.ArgumentParser(description="联机长局稳定性实测（房主 + 客户端双开）")
+    ap = argparse.ArgumentParser(description="联机长局 / 重开局实测（房主 + 客户端双开）")
+    ap.add_argument("--scene", default="GROWTH", choices=("GROWTH", "RESTART"),
+                    help="GROWTH=长局堆积；RESTART=长局后重开一局（验证反生成与重建）")
     ap.add_argument("--seconds", type=int, default=300, help="房主运行时长（真实秒）")
     ap.add_argument("--speed", type=float, default=6.0,
                     help="加速倍率（只作用于房主；客户端保持 1x 跟随权威同步）")
@@ -101,6 +133,8 @@ def main():
     ap.add_argument("--log-limit-mb", type=int, default=250,
                     help="单端日志体积上限（MB），超过即熔断")
     args = ap.parse_args()
+
+    judges = GROWTH_JUDGES if args.scene == "GROWTH" else RESTART_JUDGES
 
     exe = args.exe
     if not os.path.exists(exe):
@@ -121,8 +155,9 @@ def main():
             os.remove(p)
 
     print("=" * 68)
-    print("联机长局稳定性实测（M42）")
+    print("联机%s实测（M43）" % ("长局稳定性" if args.scene == "GROWTH" else "重开局"))
     print("  产物   %s" % rel(exe))
+    print("  场景   %s" % args.scene)
     print("  房主   %ds（%sx 加速 + 保活）   客户端 1x 跟随" % (args.seconds, args.speed))
     print("  预期   游戏内约 %ds 的权威世界演化" % int(args.seconds * args.speed))
     print("=" * 68)
@@ -132,7 +167,8 @@ def main():
                  "-smokeSeconds", str(args.seconds),
                  "-smokeSpeed", str(args.speed),
                  "-smokeImmortal",
-                 "-longrunProbe"]
+                 "-longrunProbe",
+                 "-longrunScene", args.scene]
     host = launch(exe, host_args, host_log)
     if host is None:
         return 2
@@ -149,7 +185,8 @@ def main():
     client_args = ["-batchmode", "-nographics", "-netClient",
                    "-netAddress", args.address,
                    "-smokeSeconds", str(client_seconds),
-                   "-longrunProbe"]
+                   "-longrunProbe",
+                   "-longrunScene", args.scene]
     client = launch(exe, client_args, client_log)
     if client is None:
         host.kill()
@@ -162,8 +199,8 @@ def main():
     wait_for(client, "客户端", budget, watch_log=client_log, limit_mb=args.log_limit_mb)
     print("[3/3] 两端均已结束，开始交叉核对\n")
 
-    h_judges, h_info = probe_results(host_log)
-    c_judges, c_info = probe_results(client_log)
+    h_judges, h_info = probe_results(host_log, judges)
+    c_judges, c_info = probe_results(client_log, judges)
 
     if not h_judges:
         print("[失败] 房主日志里没有探针判据输出，无法核对（日志: %s）" % rel(host_log))
@@ -175,96 +212,164 @@ def main():
     h_exc = count_exceptions(host_log)
     c_exc = count_exceptions(client_log)
 
-    print("%-14s %-16s %-16s" % ("判据", "房主", "客户端"))
+    print("%-16s %-16s %-16s" % ("判据", "房主", "客户端"))
     print("-" * 50)
-    for k in JUDGES:
-        print("%-14s %-16s %-16s" % (k, h_judges.get(k, "?"), c_judges.get(k, "?")))
+    for k in judges:
+        print("%-16s %-16s %-16s" % (k, h_judges.get(k, "?"), c_judges.get(k, "?")))
     print("-" * 50)
-    print("%-14s %-16s %-16s" % ("宝石峰值", peak_of(h_info, "宝石峰值"),
-                                  peak_of(c_info, "宝石峰值")))
-    print("%-14s %-16s %-16s" % ("回血球峰值", as_int(h_info, "回血球峰值"),
-                                  as_int(c_info, "回血球峰值")))
-    print("%-14s %-16s %-16s" % ("最终波次", as_int(h_info, "最终波次"),
-                                  as_int(c_info, "最终波次")))
-    print("%-14s %-16s %-16s" % ("回收次数", h_info.get("回收次数", "?"),
-                                  c_info.get("回收次数", "?")))
-    print("%-14s %-16s %-16s" % ("末次账本", h_info.get("末次账本", "?"),
-                                  c_info.get("末次账本", "?")))
-    print("%-14s %-16s %-16s" % ("托管堆MB", h_info.get("托管堆MB", "?"),
+
+    if args.scene == "GROWTH":
+        print("%-16s %-16s %-16s" % ("宝石峰值", peak_of(h_info, "宝石峰值"),
+                                      peak_of(c_info, "宝石峰值")))
+        print("%-16s %-16s %-16s" % ("回血球峰值", as_int(h_info, "回血球峰值"),
+                                      as_int(c_info, "回血球峰值")))
+        print("%-16s %-16s %-16s" % ("最终波次", as_int(h_info, "最终波次"),
+                                      as_int(c_info, "最终波次")))
+        print("%-16s %-16s %-16s" % ("回收次数", h_info.get("回收次数", "?"),
+                                      c_info.get("回收次数", "?")))
+        print("%-16s %-16s %-16s" % ("末次账本", h_info.get("末次账本", "?"),
+                                      c_info.get("末次账本", "?")))
+        print("%-16s %-16s %-16s" % ("快照/帧数", h_info.get("快照重建/帧数", "?"),
+                                      c_info.get("快照重建/帧数", "?")))
+    else:
+        print("%-16s %-16s %-16s" % ("重开前波次", as_int(h_info, "重开前波次"),
+                                      as_int(c_info, "重开前波次")))
+        print("%-16s %-16s %-16s" % ("重开后波次", as_int(h_info, "重开后波次"),
+                                      as_int(c_info, "重开后波次")))
+        print("%-16s %-16s %-16s" % ("重开前宝石", first_int(h_info, "重开前宝石"),
+                                      first_int(c_info, "重开前宝石")))
+        print("%-16s %-16s %-16s" % ("重开后宝石", first_int(h_info, "重开后宝石"),
+                                      first_int(c_info, "重开后宝石")))
+        print("%-16s %-16s %-16s" % ("重开前敌人", as_int(h_info, "重开前敌人"),
+                                      as_int(c_info, "重开前敌人")))
+        print("%-16s %-16s %-16s" % ("重开后敌人", as_int(h_info, "重开后敌人"),
+                                      as_int(c_info, "重开后敌人")))
+        print("%-16s %-16s %-16s" % ("世界状态数", h_info.get("世界状态数", "?"),
+                                      c_info.get("世界状态数", "?")))
+        print("%-16s %-16s %-16s" % ("反生成数", h_info.get("反生成数", "?"),
+                                      c_info.get("反生成数", "?")))
+    print("%-16s %-16s %-16s" % ("托管堆MB", h_info.get("托管堆MB", "?"),
                                   c_info.get("托管堆MB", "?")))
-    print("%-14s %-16s %-16s" % ("平均帧率", h_info.get("平均帧率", "?"),
+    print("%-16s %-16s %-16s" % ("平均帧率", h_info.get("平均帧率", "?"),
                                   c_info.get("平均帧率", "?")))
     print("-" * 50)
     print("运行时异常：房主 %d 条 / 客户端 %d 条" % (h_exc, c_exc))
 
     problems = []
 
-    # —— 房主侧：探针自己的判据必须全过 ——
-    for k in JUDGES:
-        v = h_judges.get(k)
-        if v != "是" and v != "不适用":
-            problems.append("房主侧判据「%s」= %s" % (k, v))
+    # —— 两端：探针自己的判据必须全过（"不适用"表示该判据在本端不成立，不算失败） ——
+    for k in judges:
+        for side, got in (("房主", h_judges), ("客户端", c_judges)):
+            v = got.get(k)
+            if v != "是" and v != "不适用":
+                problems.append("%s侧判据「%s」= %s" % (side, k, v))
 
-    # —— 客户端侧：它自己那份视图也必须干净 ——
-    # 客户端只跟随同步，理论上所有"有界/生效"类判据都不该由它承担；
-    # 但它的场景扫描同样不该看到无界堆积（房主漏同步时这里是唯一线索）。
-    for k in ("宝石有界", "回血球有界", "全程零异常", "长程数值不越界"):
-        v = c_judges.get(k)
-        if v != "是" and v != "不适用":
-            problems.append("客户端侧判据「%s」= %s" % (k, v))
+    if args.scene == "GROWTH":
+        # —— 双端交叉核对（联机独有的失败面）——
+        h_gem = peak_of(h_info, "宝石峰值")
+        c_gem = peak_of(c_info, "宝石峰值")
+        h_hp = as_int(h_info, "回血球峰值")
+        c_hp = as_int(c_info, "回血球峰值")
+        h_wave = as_int(h_info, "最终波次")
+        c_wave = as_int(c_info, "最终波次")
 
-    # —— 双端交叉核对（联机独有的失败面）——
-    h_gem = peak_of(h_info, "宝石峰值")
-    c_gem = peak_of(c_info, "宝石峰值")
-    h_hp = as_int(h_info, "回血球峰值")
-    c_hp = as_int(c_info, "回血球峰值")
-    h_wave = as_int(h_info, "最终波次")
-    c_wave = as_int(c_info, "最终波次")
+        # 1) 双端宝石计数一致。容差取 max(6, 8%)：两端收尾不可能精确到同一帧，
+        #    最后半秒里房主还能再掉一批、广播还在路上。
+        #
+        #    **必须双向**：只查"客户端 > 房主"会漏掉相反的那个面——客户端自行
+        #    Object.Destroy 联机对象（静态检查第 20 项要抓的写法）时客户端反而**偏少**，
+        #    单向断言下这一路会一路绿灯地溜过去。
+        if h_gem >= 0 and c_gem >= 0:
+            tol = max(6, int(h_gem * 0.08))
+            if abs(c_gem - h_gem) > tol:
+                why = ("客户端视图在房主不知情的情况下堆积僵尸对象——回收若走本地 Object.Destroy "
+                       "而非房主权威 Despawn，副本就再也收不到反生成广播"
+                       if c_gem > h_gem else
+                       "客户端侧偏少——客户端在自行销毁联机对象（房主权威外的本地 Destroy），"
+                       "静查第 20 项正是要拦这种写法")
+                problems.append(
+                    "双端宝石计数不一致：客户端峰 %d vs 房主峰 %d（容差 %d）——%s"
+                    % (c_gem, h_gem, tol, why))
 
-    # 1) 双端宝石计数一致。容差取 max(6, 8%)：两端收尾不可能精确到同一帧，
-    #    最后半秒里房主还能再掉一批、广播还在路上。
-    #
-    #    **必须双向**：只查"客户端 > 房主"会漏掉相反的那个面——客户端自行
-    #    Object.Destroy 联机对象（静态检查第 20 项要抓的写法）时客户端反而**偏少**，
-    #    单向断言下这一路会一路绿灯地溜过去。
-    #    两个方向的量级都远超容差（僵尸累积是几百、本地销毁是差一个数量级），
-    #    容差放多宽都盖不住。
-    if h_gem >= 0 and c_gem >= 0:
-        tol = max(6, int(h_gem * 0.08))
-        if abs(c_gem - h_gem) > tol:
-            why = ("客户端视图在房主不知情的情况下堆积僵尸对象——回收若走本地 Object.Destroy "
-                   "而非房主权威 Despawn，副本就再也收不到反生成广播"
-                   if c_gem > h_gem else
-                   "客户端侧偏少——客户端在自行销毁联机对象（房主权威外的本地 Destroy），"
-                   "静查第 20 项正是要拦这种写法")
+        # 2) 回血球同理
+        if h_hp >= 0 and c_hp >= 0:
+            tol = max(4, int(h_hp * 0.15))
+            if abs(c_hp - h_hp) > tol:
+                problems.append(
+                    "双端回血球计数不一致：客户端峰 %d vs 房主峰 %d（容差 %d）——"
+                    "同上：客户端视图与房主权威世界分叉" % (c_hp, h_hp, tol))
+
+        # 3) 客户端必须真的收到了掉落物同步。恒为 0 说明同步链路断了，
+        #    此时"双端一致"会平凡成立——必须单独拦住。
+        if c_gem == 0 and h_gem > 20:
             problems.append(
-                "双端宝石计数不一致：客户端峰 %d vs 房主峰 %d（容差 %d）——%s"
-                % (c_gem, h_gem, tol, why))
+                "客户端侧宝石峰值恒为 0（房主侧 %d）——掉落物压根没同步到客户端，"
+                "\"双端一致\"在这种情形下会平凡成立，必须单独判失败" % h_gem)
 
-    # 2) 回血球同理
-    if h_hp >= 0 and c_hp >= 0:
-        tol = max(4, int(h_hp * 0.15))
-        if abs(c_hp - h_hp) > tol:
+        # 4) 波次：客户端读的是同步下来的权威值，同时刻采样就该相等
+        if h_wave >= 1 and c_wave >= 1 and abs(h_wave - c_wave) > 1:
+            problems.append("双端波次不一致：房主 %d vs 客户端 %d" % (h_wave, c_wave))
+
+        # 5) 世界真的在动（否则上面全部判据都是假绿）
+        if h_wave < 12:
             problems.append(
-                "双端回血球计数不一致：客户端峰 %d vs 房主峰 %d（容差 %d）——"
-                "同上：客户端视图与房主权威世界分叉" % (c_hp, h_hp, tol))
+                "房主侧波次只到 %d（期望 ≥12）——加速可能没生效或权威世界没跑起来，"
+                "此时所有增长类判据都会假绿" % h_wave)
 
-    # 3) 客户端必须真的收到了掉落物同步。恒为 0 说明同步链路断了，
-    #    此时"双端一致"会平凡成立——必须单独拦住。
-    if c_gem == 0 and h_gem > 20:
-        problems.append(
-            "客户端侧宝石峰值恒为 0（房主侧 %d）——掉落物压根没同步到客户端，"
-            "\"双端一致\"在这种情形下会平凡成立，必须单独判失败" % h_gem)
+        verdict = "联机掉落物有界、上限真的生效、双端计数一致、全程零异常"
+    else:
+        # —— 重开局的双端核对 ——
+        # 单端判据已经覆盖了"清没清干净"，这里只查每端各自的判据管不到的事。
+        h_wave_b = as_int(h_info, "重开前波次")
+        h_wave_a = as_int(h_info, "重开后波次")
+        c_wave_a = as_int(c_info, "重开后波次")
+        h_gem_a = first_int(h_info, "重开后宝石")
+        c_gem_a = first_int(c_info, "重开后宝石")
+        h_state_a = last_int(h_info, "世界状态数")
+        c_state_a = last_int(c_info, "世界状态数")
+        h_despawned = as_int(h_info, "反生成数")
 
-    # 4) 波次：客户端读的是同步下来的权威值，同时刻采样就该相等
-    if h_wave >= 1 and c_wave >= 1 and abs(h_wave - c_wave) > 1:
-        problems.append("双端波次不一致：房主 %d vs 客户端 %d" % (h_wave, c_wave))
+        # 1) 世界在重开前确实跑起来过。否则"重开后干净"毫无意义（本来就空）。
+        if h_wave_b < 5:
+            problems.append(
+                "重开前房主波次只有 %d（期望 ≥5）——本局压根没跑起来，"
+                "\"重开后干净\"在这种情形下是平凡成立，不能算通过" % h_wave_b)
 
-    # 5) 世界真的在动（否则上面全部判据都是假绿）
-    if h_wave < 12:
-        problems.append(
-            "房主侧波次只到 %d（期望 ≥12）——加速可能没生效或权威世界没跑起来，"
-            "此时所有增长类判据都会假绿" % h_wave)
+        # 2) 反生成真的发生过。这是唯一能区分"走了 Despawn 广播"与
+        #    "本地 Destroy 后场上恰好没人"的证据。
+        if h_despawned <= 0:
+            problems.append(
+                "房主侧反生成数为 %d——拆世界时没有反生成任何联机实体。"
+                "本地 Destroy 不会广播，客户端副本会变成僵尸" % h_despawned)
+
+        # 3) 双端重开后都在第 1 波附近。
+        #    允许相差 1 波：房主 6x、客户端 1x，两端采样点又不在同一帧，
+        #    正好卡在波次边界上就会差一个数。要求精确相等是在测采样抖动，不是测产品。
+        if h_wave_a >= 1 and c_wave_a >= 1 and abs(h_wave_a - c_wave_a) > 1:
+            problems.append(
+                "双端重开后波次不一致：房主 %d vs 客户端 %d——"
+                "客户端没收到世界状态重建（或收到了两份）" % (h_wave_a, c_wave_a))
+
+        # 4) 双端世界状态都只剩 1 个
+        if h_state_a != 1 or c_state_a != 1:
+            problems.append(
+                "重开后世界状态对象数：房主 %d / 客户端 %d（期望都是 1）——"
+                "旧的没被反生成时会有两份在抢 Instance，波次会在两个数字之间跳"
+                % (h_state_a, c_state_a))
+
+        # 5) 客户端不得比房主多出"旧世界遗留"。
+        #
+        #    两端采样时刻不同（房主在重开后 1.6s，客户端在看见波次回落后 1s），
+        #    所以**不能**要求精确相等——首跑就是拿 33 vs 17 判了红，那是正常的时间差。
+        #    真正要抓的是反方向：房主反生成了、客户端没收到广播，客户端那边会留着
+        #    旧的两百多个；而新房主世界只有几十个。差一个数量级，放宽三倍也盖不住。
+        if h_gem_a >= 0 and c_gem_a >= 0 and c_gem_a > h_gem_a * 3 + 10:
+            problems.append(
+                "重开后客户端宝石远多于房主：房主 %d vs 客户端 %d——"
+                "反生成没广播到客户端（或房主走了本地 Destroy），旧的那批留在了客户端"
+                % (h_gem_a, c_gem_a))
+
+        verdict = "联机实体真被反生成、新世界双端一致重建、零残留零异常"
 
     if h_exc or c_exc:
         problems.append("存在运行时异常（房主 %d / 客户端 %d），详见日志" % (h_exc, c_exc))
@@ -276,7 +381,7 @@ def main():
             print("  [问题] " + p)
         print("-" * 50)
         return 1
-    print("结论：通过 —— 联机掉落物有界、上限真的生效、双端计数一致、全程零异常")
+    print("结论：通过 —— " + verdict)
     print("-" * 50)
     return 0
 

@@ -59,6 +59,67 @@ namespace StarPixel.Net
         private static int _gemsTrimmed;
         private static int _healthsTrimmed;
 
+        // —— 存活玩家快照（M43）——
+        //
+        // 为什么要有：M42 修的是"账本只进不出"，但每次生成/回收掉落物都要调一次
+        // NetPlayerRegistry.ForEachAlive()（全注册表遍历），而 NetPickup.Update() 更是
+        // **每个**掉落物每帧遍历一次——房主侧的成本是 N × 玩家数 次距离计算，
+        // 且 N 条 Update 各自独立跑，谁也不知道别人刚刚算过同一件事。
+        //
+        // 改成"每帧只重建一次、所有掉落物共用"：每帧 1 次注册表遍历，N 次距离计算仍然保留
+        // （玩家只有 1～2 个，那是必要的最近目标判定，不是浪费），但遍历次数从 N+回收次数
+        // 降到 1。抽样计数器 <see cref="PlayerSnapshotBuilds"/> 供探针判"没有退回去"。
+        private static readonly List<NetPlayer> LivePlayers = new List<NetPlayer>(4);
+        private static int _snapshotFrame = -1;
+        private static int _snapshotBuilds;
+        private static int _despawnedOnReset;
+
+        /// <summary>M43：累计重建玩家快照的次数（每帧最多 1 次）。判据"玩家遍历不随掉落物增长"读它。</summary>
+        public static int PlayerSnapshotBuilds => _snapshotBuilds;
+
+        /// <summary>M43：上一次拆世界反生成了多少个对象（诊断用，不作判据）。</summary>
+        public static int DespawnedOnReset => _despawnedOnReset;
+
+        /// <summary>M43：把存活玩家重建成每帧一份的快照；同一帧内重复调用直接返回。</summary>
+        private static void RefreshPlayers()
+        {
+            int frame = Time.frameCount;
+            if (_snapshotFrame == frame) return;
+            _snapshotFrame = frame;
+            _snapshotBuilds++;
+            LivePlayers.Clear();
+            NetPlayerRegistry.ForEachAlive(p => { if (p != null) LivePlayers.Add(p); });
+        }
+
+        /// <summary>
+        /// M43：离当前位置最近的存活玩家 + 真实距离。替代逐掉落物调用
+        /// <see cref="NetPlayerRegistry.NearestAlive"/>（每次都要遍历整个注册表）。
+        /// </summary>
+        public static NetPlayer NearestPlayer(Vector2 pos, out float dist)
+        {
+            RefreshPlayers();
+            NetPlayer best = null;
+            float bestSq = float.MaxValue;
+            for (int i = 0; i < LivePlayers.Count; i++)
+            {
+                var p = LivePlayers[i];
+                if (p == null) continue;
+                float d = ((Vector2)p.transform.position - pos).sqrMagnitude;
+                if (d < bestSq) { bestSq = d; best = p; }
+            }
+            dist = best == null ? float.MaxValue : Mathf.Sqrt(bestSq);
+            return best;
+        }
+
+        /// <summary>M43：把快照里的玩家位置填进回收用的列表（与 NearestPlayer 共用同一次遍历）。</summary>
+        private static void FillTrimPlayers()
+        {
+            RefreshPlayers();
+            TrimPlayers.Clear();
+            for (int i = 0; i < LivePlayers.Count; i++)
+                if (LivePlayers[i] != null) TrimPlayers.Add(LivePlayers[i].transform.position);
+        }
+
         /// <summary>M42：场上网络宝石数（账本口径，供探针诊断）。判据走场景扫描，不读这个。</summary>
         public static int GemCount { get { Purge(Gems); return Gems.Count; } }
 
@@ -78,6 +139,72 @@ namespace StarPixel.Net
             Healths.Clear();
             _gemsTrimmed = 0;
             _healthsTrimmed = 0;
+            LivePlayers.Clear();
+            _snapshotFrame = -1;
+        }
+
+        /// <summary>
+        /// M43：拆世界时把所有**网络生成**的实体交还房主权威——反生成会广播给每个客户端。
+        ///
+        /// 为什么必须有这一步：<c>GameBuilder.TeardownWorld()</c> 此前只清单机那套
+        /// （PoolManager 池实例 / EnemyManager.ActiveEnemies / PickupManager 账本），
+        /// 而联机实体根本不在那些容器里：
+        ///   · 敌人注册在 <see cref="NetEnemyRegistry"/>，不在 ActiveEnemies；
+        ///   · 掉落物注册在本类的 Gems/Healths，不在 PickupManager；
+        ///   · 世界状态对象由 <see cref="SpawnWorldState"/> 生成，谁都没有持有它。
+        /// 结果：重开一局后，上一局的宝石原封不动躺在脚下（而且捡不起来——账本已经清零），
+        /// 旧敌人继续追着新玩家跑，旧的 NetWorldState 还活着并和新生成的那个抢 Instance
+        /// （波次在两份之间跳）。客户端更糟：房主若本地 Object.Destroy 而不反生成，
+        /// 客户端副本会变成僵尸，永远留在场上。
+        ///
+        /// 只在房主侧执行：客户端不主动反生成任何东西，它等广播。
+        /// </summary>
+        public static void DespawnAllWorldObjects()
+        {
+            // IsAuthority 在 Offline 下也为真（Mode != Client），故必须同时要求联网，
+            // 否则单机拆世界会走进一条本不存在的联机清理路径。
+            if (!NetSession.IsNetworked || !NetSession.IsAuthority) return;
+
+            // 按**类型扫场**，而不是只信注册表 / 账本。
+            //
+            // 为什么不能只清"登记过的"：敌人是在 NetEnemy.OnStartClient 里注册的，
+            // 而 Fish-Net 对"当帧刚生成、客户端回调还没走完"的对象不会立刻登记。
+            // 实测：拆完隔一帧仍有 4 个 NetEnemy 活着，而 NetEnemyRegistry 已经是 0。
+            // 拆世界的语义是"场上一个不留"——必须以场景为准，
+            // 注册表与账本只是索引，不是事实。
+            int n = 0;
+            n += SweepDespawn<NetPickup>();
+            n += SweepDespawn<NetEnemy>();
+            n += SweepDespawn<NetWorldState>();
+
+            NetEnemyRegistry.DespawnAll();   // 清掉注册表里已失效 / 未激活的引用
+            Gems.Clear();
+            Healths.Clear();
+            // 反生成不一定同步回调 OnStopClient（房主侧尤其），这里显式清掉：
+            // 不清的话下一次 Build 会撞上"Instance != null"的旧引用，新世界状态永远不被采纳。
+            NetWorldState.Instance = null;
+
+            _despawnedOnReset = n;
+        }
+
+        /// <summary>
+        /// 把场上所有该类型的联机实体交还房主权威（反生成会广播给每个客户端）。
+        /// 跳过预制体资产（场景无效）与已回收的停用对象（Fish-Net 的 Despawn 默认回池，
+        /// 回收后对象仍在场景里、只是被停用）。
+        /// </summary>
+        private static int SweepDespawn<T>() where T : Component
+        {
+            int n = 0;
+            foreach (var c in Resources.FindObjectsOfTypeAll<T>())
+            {
+                if (c == null) continue;
+                var go = c.gameObject;
+                if (!go.scene.IsValid()) continue;
+                if (!go.activeInHierarchy) continue;
+                NetSpawner.Despawn(go);
+                n++;
+            }
+            return n;
         }
 
         /// <summary>M42：由 NetPickup.OnDestroy 调用——拾取/回收/拆世界三条销毁路径都归一到这里。</summary>
@@ -101,8 +228,7 @@ namespace StarPixel.Net
         {
             Purge(Gems);
             if (!PickupTrim.Over(Gems.Count, PickupTrim.MaxGems)) return;
-            TrimPlayers.Clear();
-            NetPlayerRegistry.ForEachAlive(p => { if (p != null) TrimPlayers.Add(p.transform.position); });
+            FillTrimPlayers();   // M43：与磁吸共用"每帧一次"的玩家快照，不再每次生成都遍历注册表
             int worst = PickupTrim.FarthestIndex(Gems, TrimPlayers);
             if (worst < 0) return;
             var g = Gems[worst];
@@ -116,8 +242,7 @@ namespace StarPixel.Net
         {
             Purge(Healths);
             if (!PickupTrim.Over(Healths.Count, PickupTrim.MaxHealth)) return;
-            TrimPlayers.Clear();
-            NetPlayerRegistry.ForEachAlive(p => { if (p != null) TrimPlayers.Add(p.transform.position); });
+            FillTrimPlayers();   // M43：与磁吸共用"每帧一次"的玩家快照，不再每次生成都遍历注册表
             int worst = PickupTrim.FarthestIndex(Healths, TrimPlayers);
             if (worst < 0) return;
             var h = Healths[worst];

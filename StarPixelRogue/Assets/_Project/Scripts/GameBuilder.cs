@@ -434,7 +434,9 @@ namespace StarPixel
                 {
                     // 观察时长比 SmokeTest 短 1s：收尾必须由探针先做，
                     // 否则 SmokeTest 一到点就 Application.Quit，探针的报告一行都出不来。
-                    StarPixel.Dev.NetLongRunProbe.Start(Mathf.Max(6f, SmokeSeconds() - 1f));
+                    // M43：场景名透传（GROWTH / RESTART），RESTART 用于验证联机重开局。
+                    string scene = ArgValue("-longrunScene", "GROWTH");
+                    StarPixel.Dev.NetLongRunProbe.Start(Mathf.Max(6f, SmokeSeconds() - 1f), scene);
                 }
 #endif
 
@@ -774,6 +776,16 @@ namespace StarPixel
         /// <summary>拆除当前世界（联机断线/返回主菜单/重开一局时调用），使随后可再次 Build。</summary>
         public static void TeardownWorld()
         {
+            // M43：联机实体必须先走**房主权威反生成**，再谈其他清理。
+            //
+            // 这是 M42 §9 留下的盲区：拆世界只清了单机那套容器，而联机实体都不在里面——
+            // 敌人注册在 NetEnemyRegistry、掉落物注册在 NetWorld 的账本、世界状态对象
+            // 谁都没持有。结果是重开一局后旧宝石躺在脚下、旧敌人继续追新玩家、
+            // 两份 NetWorldState 抢 Instance（波次来回跳），客户端还会收到一堆僵尸副本。
+            // 反生成会广播给所有端，所以这一步必须早于任何本地销毁。
+#if FISHNET_ENABLED
+            Net.NetWorld.DespawnAllWorldObjects();
+#endif
             // M24：先把**池化出来的实体**清干净，再销毁管理器本体。
             // 宝石 / 回血球 / 敌人都是 PoolManager 从模板克隆出来的实例，挂在场景根节点，
             // 既不在 _created 里、也不是任何管理器的子物体 —— 只 Destroy 管理器的话，

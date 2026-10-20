@@ -42,6 +42,7 @@ namespace StarPixel.Dev
     public class NetLongRunProbe : MonoBehaviour
     {
         private float _limit = 300f;
+        private string _scene = "GROWTH";
         private float _t;        // 真实经过时间（未缩放）
         private float _game;     // 本端游戏内经过时间（受本端 timeScale 影响）
         private int _frames;
@@ -49,6 +50,31 @@ namespace StarPixel.Dev
         private int _kills;
         private string _firstError = "无";
         private bool _isHost;
+
+        /// <summary>
+        /// M43：重开要提前这么多秒动手。收尾必须早于 SmokeTest（它在 _limit+1 就 Quit），
+        /// 而重开之后还要等新世界真正建起来、广播走完才数得准——两头都要留出余量。
+        /// </summary>
+        private const float RestartTail = 4f;
+
+        // —— RESTART 状态 ——
+        private bool _rsStarted, _rsSeen, _rsSampled, _rsPre;
+        private bool _rsTornDown, _rsBuilt;
+        private float _rsBuiltAt;
+        private float _rsSeenAt;
+        private int _rsWaveBefore = -1, _rsWaveAfter = -1;
+        private int _rsGemsBefore = -1, _rsHealthBefore, _rsGemsAfter, _rsHealthAfter;
+        // 拆完世界、尚未重建的那一瞬间的残留数（房主专属）。
+        // 这是唯一能精确回答"旧实体到底有没有被反生成"的时刻：一旦新世界建起来，
+        // 旧敌人会在 1～2 秒内被玩家打死，与"被反生成"再无区别。
+        private int _rsEnemyLeak = -1, _rsGemsLeak = -1, _rsHealthLeak, _rsStateLeak = -1;
+        private int _rsEnemyBefore = -1, _rsEnemyAfter;
+        private int _rsStateBefore = -1, _rsStateAfter = -1;
+        private int _rsRootBefore, _rsRootAfter;
+        private bool _rsPlayerOk;
+        private string _rsWaveText = "否", _rsPickupText = "否", _rsStateText = "否", _rsEnemyText = "否";
+        private string _rsLeakGemText = "否", _rsLeakStateText = "否";
+        private bool _rsWaveOk, _rsPickupOk, _rsStateOk, _rsEnemyOk, _rsLeakGemOk, _rsLeakStateOk;
 
         private const int SEGMENTS = 6;
         private readonly List<Sample> _samples = new List<Sample>();
@@ -64,10 +90,11 @@ namespace StarPixel.Dev
         private float _gemEarly, _gemLate;
         private long _heapEarly, _heapLate;
         private int _ledgerGems, _ledgerHealths;   // 末次采样的账本口径（诊断）
-        private bool _waveOk, _gemBoundOk, _healthOk, _growOk, _trimOk, _ledgerOk, _valueOk;
+        private bool _waveOk, _gemBoundOk, _healthOk, _growOk, _trimOk, _ledgerOk, _valueOk, _snapOk;
         private string _growText = "否";
         private string _trimText = "否";
         private string _ledgerText = "否";
+        private string _snapText = "否";
         private int _naCount;
         private int _gemTrimmed, _healthTrimmed;
 
@@ -81,13 +108,14 @@ namespace StarPixel.Dev
         }
 
         /// <summary>由 GameBuilder 在连接就绪后调用。观察时长比 SmokeTest 短 1s，确保由本探针收尾。</summary>
-        public static void Start(float seconds)
+        public static void Start(float seconds, string scene)
         {
             var go = new GameObject("NetLongRunProbe");
             var p = go.AddComponent<NetLongRunProbe>();
             p._limit = Mathf.Max(10f, seconds);
+            p._scene = string.IsNullOrEmpty(scene) ? "GROWTH" : scene;
             p._isHost = NetSession.IsHost;
-            Debug.Log("[SMOKE] 联机长局实测启动  角色=" + (p._isHost ? "房主" : "客户端") +
+            Debug.Log("[SMOKE] 联机长局实测启动  场景=" + p._scene + " 角色=" + (p._isHost ? "房主" : "客户端") +
                       " 真实时长=" + p._limit.ToString("F0") + "s");
         }
 
@@ -120,6 +148,12 @@ namespace StarPixel.Dev
             _game += Time.deltaTime;
             _frames++;
 
+            if (_scene == "RESTART")
+            {
+                TickRestart();
+                return;
+            }
+
             float seg = _limit / SEGMENTS;
             while (_done < SEGMENTS && _t >= (_done + 1) * seg)
             {
@@ -132,6 +166,275 @@ namespace StarPixel.Dev
                 Report();
                 enabled = false;
             }
+        }
+
+        // =====================================================================================
+        //  RESTART：长局之后重开一局，联机实体必须真的被反生成、新世界必须真的建起来
+        // =====================================================================================
+
+        /// <summary>
+        /// 为什么这条必须单独测：
+        ///   M42 给联机掉落物加了账本与上限，也写了 <c>NetWorld.ResetPickups()</c>，
+        ///   但**从来没有验证过**它会不会被真正走到。而拆世界的入口
+        ///   <c>GameBuilder.TeardownWorld()</c> 此前只清单机那套容器
+        ///   （PoolManager 池实例 / EnemyManager.ActiveEnemies / PickupManager 账本），
+        ///   联机实体一个都不在里面——敌人注册在 NetEnemyRegistry、掉落物注册在 NetWorld 账本、
+        ///   世界状态对象无人持有。于是重开一局后：
+        ///     · 旧宝石原封不动躺在脚下（还捡不起来，账本已清零）；
+        ///     · 旧敌人继续追着新玩家跑；
+        ///     · 两份 NetWorldState 抢 Instance，波次在两份之间来回跳；
+        ///     · 客户端更糟：房主若本地 Destroy，客户端副本变僵尸并永久留在场上。
+        ///
+        /// 两端都跑：房主侧断言权威世界被清干净，客户端侧断言**它真的收到了反生成广播**
+        /// ——后者是唯一能证明"走的是 Despawn 而不是本地 Destroy"的证据。
+        /// </summary>
+        private void TickRestart()
+        {
+            float tail = Mathf.Max(2f, _limit - RestartTail);
+
+            // 客户端拿不到"房主即将重开"的信号，只能靠自己的时钟。若它的 tail 比房主的
+            // 重开晚了一两帧（启动抖动/网络延迟），"重开前"采到的就已经是新世界了——
+            // 于是"重开前波次 1"这种平凡数据会让判据退化成"不适用"，白测一轮。
+            // 故在 tail 前 1 秒多采一次、取最大值，让"重开前"代表这一局的**峰值**。
+            if (!_rsStarted && _t >= tail - 1f && !_rsPre)
+            {
+                _rsPre = true;
+                RecordBefore();
+            }
+
+            if (!_rsStarted && _t >= tail)
+            {
+                _rsStarted = true;
+                RecordBefore();
+                if (_isHost)
+                {
+                    GameBuilder.TeardownWorld();   // 内部先走房主权威反生成（M43）
+                    _rsTornDown = true;
+                }
+            }
+            if (!_rsStarted) return;
+
+            // 房主：拆完**下一帧**再点数，然后才重建。
+            //
+            // 为什么不在同一帧数：Fish-Net 的反生成不是全部即时生效的，
+            // 当帧刚生成、网络初始化还没落定的那几个对象，Despawn 当场无效。
+            // 首跑就撞上了——反生成数 317，但同帧仍数到 4 个敌人，判据报"有残留"。
+            // 隔一帧后：旧世界已拆、新世界还没建，中间没有任何东西会生成，
+            // 这一刻的数就是"真的有没有清干净"，不需要任何容差。
+            if (_isHost && _rsTornDown && !_rsBuilt)
+            {
+                _rsEnemyLeak = EnemyCount();
+                if (_rsEnemyLeak > 0) Debug.Log("[SMOKE] 拆完残留明细  " + EnemyLeakDetail());
+                _rsGemsLeak = GemCountNow(out _rsHealthLeak);
+                _rsStateLeak = WorldStateCount();
+                GameBuilder.Build();           // 立刻重建：不给中间帧，免得把"没清"误判成"还没清"
+                _rsBuilt = true;
+                _rsBuiltAt = _t;
+            }
+
+            // 客户端：等"波次真的掉下来"再采样。它自己没有能力拆/建世界，
+            // 观测到的每一个变化都只能来自房主广播——这条判据才叫有区分力。
+            if (!_isHost && !_rsSeen)
+            {
+                int w = Wave();
+                if (w >= 1 && w <= 2) { _rsSeen = true; _rsSeenAt = _t; }
+            }
+
+            if (!_isHost && _rsSeen && _t >= _rsSeenAt + 1.0f)
+            {
+                ReportRestart();
+                enabled = false;
+                return;
+            }
+
+            if (_isHost && _rsBuilt && _t >= _rsBuiltAt + 1.6f)
+            {
+                ReportRestart();
+                enabled = false;
+                return;
+            }
+
+            // 兜底：绝不能晚于 SmokeTest（它在 _limit+1 直接 Quit）
+            if (_t >= _limit)
+            {
+                ReportRestart();
+                enabled = false;
+            }
+        }
+
+        /// <summary>重开前基线：多次采样取最大，避免客户端比房主晚一两帧就采到新世界。</summary>
+        private void RecordBefore()
+        {
+            int w = Wave();
+            if (w > _rsWaveBefore) _rsWaveBefore = w;
+
+            int hp;
+            int g = GemCountNow(out hp);
+            if (g > _rsGemsBefore) { _rsGemsBefore = g; _rsHealthBefore = hp; }
+
+            int e = EnemyCount();
+            if (e > _rsEnemyBefore) _rsEnemyBefore = e;
+
+            int st = WorldStateCount();
+            if (st > _rsStateBefore) _rsStateBefore = st;
+
+            _rsRootBefore = RootCount();
+        }
+
+        private void ReportRestart()
+        {
+            if (_rsSampled) return;
+            _rsSampled = true;
+
+            _rsWaveAfter = Wave();
+            _rsGemsAfter = GemCountNow(out _rsHealthAfter);
+            _rsEnemyAfter = EnemyCount();
+            _rsRootAfter = RootCount();
+            _rsStateAfter = WorldStateCount();
+
+            var lp = NetPlayerRegistry.Local;
+            _rsPlayerOk = lp != null && (lp.Damageable == null || !lp.Damageable.isDead);
+
+            // 1) 波次重置。前提是"重开前世界确实推进过"——否则本局压根没跑起来，
+            //    重开后是 1 也说明不了任何事，只能判"不适用"。
+            if (_rsWaveBefore < 5)
+            {
+                _rsWaveOk = true;
+                _rsWaveText = "不适用";
+            }
+            else
+            {
+                _rsWaveOk = _rsWaveAfter >= 1 && _rsWaveAfter <= 2;
+                _rsWaveText = Yn(_rsWaveOk);
+            }
+            Check("重开后波次重置", _rsWaveOk);
+
+            // 2) 掉落物清零。
+            //
+            //    这与 M41 那条被删掉的假判据**不是**同一件事：单机宝石是池实例，
+            //    PoolManager.DestroyAll() 无论怎么改清理路径都会把它们销毁；而联机宝石
+            //    是网络生成的独立对象，池管理器管不到——不反生成就一定会留在场上。
+            //
+            //    但不能用绝对阈值：6x 加速下重开后 1.6s 已是游戏内约 10 秒，
+            //    新世界打到第 2 波、掉了几十个宝石，那都是**新产出**（首跑就把
+            //    阈值写死成 6，结果 33 判红——报的是"世界在正常运转"，不是"没清干净"）。
+            //    要问的是"旧的那批还在不在"：旧账是几百个，只剩不到三分之一才叫清干净。
+            if (_rsGemsBefore < 20)
+            {
+                _rsPickupOk = true;
+                _rsPickupText = "不适用";
+            }
+            else
+            {
+                _rsPickupOk = _rsGemsAfter <= Mathf.Max(20, _rsGemsBefore / 3)
+                              && _rsHealthAfter <= Mathf.Max(8, _rsHealthBefore / 3);
+                _rsPickupText = Yn(_rsPickupOk);
+            }
+            Check("重开后掉落物清零", _rsPickupOk);
+
+            // 3) 世界状态唯一。旧的那个没被反生成时这里是 2——
+            //    两份都在写 Wave，HUD 的波次会在两个数字之间跳。
+            if (_rsStateBefore < 1)
+            {
+                _rsStateOk = true;
+                _rsStateText = "不适用";
+            }
+            else
+            {
+                _rsStateOk = _rsStateAfter == 1;
+                _rsStateText = Yn(_rsStateOk);
+            }
+            Check("重开后世界状态唯一", _rsStateOk);
+
+            // 4) 拆完瞬间的残留（房主专属，三条分开断言）。
+            //
+            //    为什么必须在这一刻数：新世界一建起来，旧敌人 1～2 秒内就会被玩家打死，
+            //    "没反生成"与"被反生成"从画面到计数再无区别。M43 的四组注入第一次跑
+            //    就是这么撞出来的——S3 摘掉敌人反生成后，场上只剩 4 只（旧的那批已被打死），
+            //    「重开后敌人清空」照样判绿。**判据不红不代表代码没问题，
+            //    可能只是它在错误的时间点看了错的东西。**
+            //
+            //    三条拆开而不是合成一条：三种残留的成因不同（敌人注册表 / 掉落物账本 /
+            //    无人持有的世界状态对象），合成一条的话注入任何一处都报同一个键，
+            //    失败面会粘成一坨，也就失去了"每条判据各守一个面"的意义。
+            if (!_isHost || _rsEnemyBefore < 8)
+            {
+                _rsEnemyOk = true;
+                _rsEnemyText = "不适用";
+            }
+            else
+            {
+                _rsEnemyOk = _rsEnemyLeak == 0;
+                _rsEnemyText = Yn(_rsEnemyOk);
+            }
+            Check("拆完立刻无残留敌人", _rsEnemyOk);
+
+            if (!_isHost || _rsGemsBefore < 20)
+            {
+                _rsLeakGemOk = true;
+                _rsLeakGemText = "不适用";
+            }
+            else
+            {
+                _rsLeakGemOk = _rsGemsLeak == 0 && _rsHealthLeak == 0;
+                _rsLeakGemText = Yn(_rsLeakGemOk);
+            }
+            Check("拆完立刻无残留掉落物", _rsLeakGemOk);
+
+            if (!_isHost || _rsStateBefore < 1)
+            {
+                _rsLeakStateOk = true;
+                _rsLeakStateText = "不适用";
+            }
+            else
+            {
+                _rsLeakStateOk = _rsStateLeak == 0;
+                _rsLeakStateText = Yn(_rsLeakStateOk);
+            }
+            Check("拆完立刻无残留世界状态", _rsLeakStateOk);
+
+            Check("重开后玩家可控", _rsPlayerOk);
+
+            // 5) 客户端：收到重开广播。房主侧"不适用"——它就是广播的发出方。
+            if (_isHost)
+            {
+                Check("收到重开广播", true);   // 不适用
+            }
+            else
+            {
+                Check("收到重开广播", _rsSeen);
+            }
+
+            Check("全程零异常", _errors == 0);
+
+            Debug.Log("[SMOKE] ===== 联机重开局实测结果 =====");
+            Line("场景", _scene);
+            Line("角色", _isHost ? "房主" : "客户端");
+            Line("断点通过", _ok + "/" + _checked);
+            Line("重开后波次重置", _rsWaveText);
+            Line("重开后掉落物清零", _rsPickupText);
+            Line("重开后世界状态唯一", _rsStateText);
+            Line("拆完立刻无残留敌人", _rsEnemyText);
+            Line("拆完立刻无残留掉落物", _rsLeakGemText);
+            Line("拆完立刻无残留世界状态", _rsLeakStateText);
+            Line("重开后玩家可控", Yn(_rsPlayerOk));
+            Line("收到重开广播", _isHost ? "不适用" : Yn(_rsSeen));
+            Line("全程零异常", Yn(_errors == 0));
+            Line("重开前波次", _rsWaveBefore.ToString());
+            Line("重开前宝石", _rsGemsBefore + " 宝石 / " + _rsHealthBefore + " 回血球");
+            Line("重开前敌人", _rsEnemyBefore.ToString());
+            Line("重开后波次", _rsWaveAfter.ToString());
+            Line("重开后宝石", _rsGemsAfter + " 宝石 / " + _rsHealthAfter + " 回血球");
+            Line("重开后敌人", _rsEnemyAfter.ToString());
+            Line("拆完残留", _rsEnemyLeak + " 敌人 / " + _rsGemsLeak + " 宝石 / " + _rsStateLeak + " 状态");
+            Line("世界状态数", _rsStateBefore + " → " + _rsStateAfter);
+            Line("根对象", _rsRootBefore + " → " + _rsRootAfter);
+            Line("托管堆MB", (GC.GetTotalMemory(false) / 1048576f).ToString("F1"));
+            Line("平均帧率", (_t > 0f ? _frames / _t : 0f).ToString("F0"));
+            Line("反生成数", _isHost ? NetWorld.DespawnedOnReset.ToString() : "不适用");
+            Line("首次异常", _firstError);
+            Line("结论", (_errors == 0 && _fail.Count == 0 && _ok == _checked) ? "通过" : "不通过");
+            foreach (var f in _fail) Line("失败项", f);
         }
 
         private Sample Take()
@@ -284,13 +587,37 @@ namespace StarPixel.Dev
             }
             Check("末段贴顶后不再抬升", _growOk);
 
-            // 7) 长程数值不越界 + 全程零异常
+            // 7) 玩家遍历不随掉落物数量增长（M43）。
+            //
+            //    为什么单独判：M43 把"每个掉落物各自遍历玩家注册表"改成"每帧重建一份快照"。
+            //    这个改动**不会**改变任何一条可见行为——掉落物照样被吸、照样被捡，
+            //    所有玩法判据在改前改后都一样绿。它只影响成本，而成本没人看着就会退回去：
+            //    下一个人写新掉落物/新宠物/新召唤物时顺手调一次 NearestAlive 就白改了。
+            //
+            //    判据用"快照重建次数 vs 帧数"：正确实现下每帧最多 1 次（比值 ≈1）；
+            //    退回逐对象遍历时，重建次数会变成帧数 × 场上掉落物数（240 倍量级），
+            //    任何容差都盖不住。三态：世界没堆起来 / 客户端不跑掉落物模拟时"不适用"。
+            int builds = NetWorld.PlayerSnapshotBuilds;
+            bool snapAssertable = _isHost && peakGems >= 100 && _frames > 120;
+            if (!snapAssertable)
+            {
+                _snapOk = true;
+                _snapText = "不适用";
+            }
+            else
+            {
+                _snapOk = builds <= _frames * 1.5f;
+                _snapText = Yn(_snapOk);
+            }
+            Check("玩家遍历不随掉落物增长", _snapOk);
+
+            // 8) 长程数值不越界 + 全程零异常
             _valueOk = valueOk;
             Check("长程数值不越界", _valueOk);
             Check("全程零异常", _errors == 0);
 
             _naCount = 0;
-            foreach (var t in new[] { _growText, _trimText, _ledgerText })
+            foreach (var t in new[] { _growText, _trimText, _ledgerText, _snapText })
                 if (t == "不适用") _naCount++;
 
             Debug.Log("[SMOKE] ===== 联机长局稳定性实测结果 =====");
@@ -302,6 +629,7 @@ namespace StarPixel.Dev
             Line("上限真的生效", _trimText);
             Line("账本与场景一致", _ledgerText);
             Line("末段贴顶后不再抬升", _growText);
+            Line("玩家遍历不随掉落物增长", _snapText);
             Line("长程数值不越界", Yn(_valueOk));
             Line("全程零异常", Yn(_errors == 0));
             Line("游戏内时长", last.game.ToString("F0") + "s");
@@ -319,6 +647,7 @@ namespace StarPixel.Dev
                              (_heapLate / 1048576f).ToString("F1"));
             Line("GC次数", "gen0=" + last.gc0 + " gen1=" + last.gc1 + " gen2=" + last.gc2);
             Line("平均帧率", last.fps.ToString("F0"));
+            Line("快照重建/帧数", NetWorld.PlayerSnapshotBuilds + " / " + _frames);
             Line("首个异常", _firstError);
             Line("结论", (_errors == 0 && _fail.Count == 0 && _ok == _checked) ? "通过" : "不通过");
             foreach (var f in _fail) Line("失败项", f);
@@ -346,9 +675,82 @@ namespace StarPixel.Dev
                 if (p == null) continue;
                 if (!p.gameObject.scene.IsValid()) continue;   // 预制体/资产，不是场上实体
                 if (IsTemplate(p)) continue;
+                // M43：Fish-Net 的 Despawn 默认是**回池**（对象被停用后留在场景里复用），
+                // 只判 null 会把"已反生成"的对象当成"还在场上"——拆完瞬间的残留判据因此
+                // 把 0 误报成 200 多。场上 = 激活中的对象，这一判据跟渲染/碰撞的口径一致。
+                if (!p.gameObject.activeInHierarchy) continue;
                 if (p.Kind == NetPickupKind.Health) healths++;
                 else gems++;
             }
+        }
+
+        // =====================================================================================
+        //  RESTART 用的几个快照（同样走场景扫描，不读被测对象自己的账本）
+        // =====================================================================================
+
+        private static int Wave()
+        {
+            var ws = NetWorldState.Instance;
+            return ws != null ? ws.Wave : -1;
+        }
+
+        private static int GemCountNow(out int healths)
+        {
+            int gems;
+            CountPickups(out gems, out healths);
+            return gems;
+        }
+
+        private static int EnemyCount()
+        {
+            int n = 0;
+            foreach (var e in Resources.FindObjectsOfTypeAll<NetEnemy>())
+            {
+                if (e == null) continue;
+                if (!e.gameObject.scene.IsValid()) continue;
+                if (IsTemplate(e)) continue;
+                if (!e.gameObject.activeInHierarchy) continue;   // 已反生成（回池停用）不算场上
+                n++;
+            }
+            return n;
+        }
+
+        /// <summary>场上世界状态对象个数。重开后必须恰好 1 个——两个就会互相抢 Instance，波次来回跳。</summary>
+        private static int WorldStateCount()
+        {
+            int n = 0;
+            foreach (var w in Resources.FindObjectsOfTypeAll<NetWorldState>())
+            {
+                if (w == null) continue;
+                if (!w.gameObject.scene.IsValid()) continue;
+                if (IsTemplate(w)) continue;
+                if (!w.gameObject.activeInHierarchy) continue;
+                n++;
+            }
+            return n;
+        }
+
+        /// <summary>临时诊断：残留敌人的名字与网络状态（确认是"没登记"还是"IsSpawned 未就绪"）。</summary>
+        private static string EnemyLeakDetail()
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("注册表=").Append(NetEnemyRegistry.Count).Append(" | ");
+            foreach (var e in Resources.FindObjectsOfTypeAll<NetEnemy>())
+            {
+                if (e == null || !e.gameObject.scene.IsValid()) continue;
+                if (!e.gameObject.activeInHierarchy) continue;
+                var no = e.GetComponent<FishNet.Object.NetworkObject>();
+                sb.Append(e.name).Append("(spawned=").Append(no != null && no.IsSpawned ? 1 : 0).Append(") ");
+            }
+            return sb.ToString();
+        }
+
+        private static int RootCount()
+        {
+            int n = 0;
+            foreach (var tr in Resources.FindObjectsOfTypeAll<Transform>())
+                if (tr != null && tr.parent == null && !IsTemplate(tr)) n++;
+            return n;
         }
 
         // =====================================================================================

@@ -58,6 +58,25 @@ namespace StarPixel.Net
             return best;
         }
 
+        /// <summary>
+        /// M43：全部反生成（拆世界 / 重开一局用），只在房主侧调用。
+        ///
+        /// 为什么必须先拷一份再遍历：反生成会触发 <see cref="NetEnemy"/> 的 OnStopClient →
+        /// 反注册，边遍历边删原表会漏掉一半敌人——正是"重开后还有一批旧敌人留在地上"的成因。
+        /// 拷贝只在拆世界时发生一次，不影响战斗路径的零分配。
+        /// </summary>
+        public static void DespawnAll()
+        {
+            if (All.Count == 0) return;
+            var copy = new List<NetEnemy>(All);
+            All.Clear();
+            for (int i = 0; i < copy.Count; i++)
+            {
+                var e = copy[i];
+                if (e != null) NetSpawner.Despawn(e.gameObject);
+            }
+        }
+
         /// <summary>范围内的敌人依次回调（AoE 伤害用）。</summary>
         public static void ForEachWithin(Vector2 center, float radius, System.Action<Damageable> act)
         {

@@ -70,11 +70,15 @@ namespace StarPixel.Net
         {
             if (!IsServerInitialized) return;   // 纯客户端只跟随位置同步，不做本地判定
 
-            // 磁吸目标：距离最近的存活玩家（合作模式下共享掉落，先到先得）
-            var target = NetPlayerRegistry.NearestAlive(transform.position);
+            // 磁吸目标：距离最近的存活玩家（合作模式下共享掉落，先到先得）。
+            // M43：改走 NetWorld.NearestPlayer —— 它把"存活玩家"做成每帧一份的快照，
+            // 同一帧内 N 个掉落物共用一次注册表遍历。此前每个掉落物都自己调
+            // NetPlayerRegistry.NearestAlive()，房主侧成本是 N × 玩家数 次遍历/帧，
+            // 场上 240 个宝石时就是每帧 240 次全表扫描。
+            float dist;
+            var target = NetWorld.NearestPlayer(transform.position, out dist);
             if (target == null || target.Controller == null) return;
 
-            float dist = Vector2.Distance(transform.position, target.transform.position);
             if (dist <= CollectDist)
             {
                 Grant(target);

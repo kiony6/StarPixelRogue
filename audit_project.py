@@ -3859,6 +3859,142 @@ namespace A
 ]
 
 
+# ============================================================================
+# 第 21 项：拆世界必须走房主权威反生成（M43）
+# ============================================================================
+TEARDOWN_SIG_RE = re.compile(r'\bstatic\s+void\s+TeardownWorld\s*\(\s*\)')
+
+
+def _brace_body(text, open_idx):
+    """从 open_idx 处的 { 开始做括号配对，返回整段方法体。"""
+    depth = 0
+    for k in range(open_idx, len(text)):
+        ch = text[k]
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return text[open_idx:k + 1]
+    return text[open_idx:]
+
+
+def check_teardown_despawns_net():
+    """
+    拆世界时必须调用 <c>NetWorld.DespawnAllWorldObjects()</c>（M43）。
+
+    这是 M42 §9 留下的盲区，也是 M43 真正修掉的缺陷：<c>TeardownWorld()</c> 清了
+    PoolManager 的池实例、EnemyManager.ActiveEnemies、PickupManager 的账本——
+    **全是单机那套容器**。而在联机世界里：
+
+      · 敌人在 <c>NetEnemyRegistry</c> 里，不在 ActiveEnemies；
+      · 掉落物在 <c>NetWorld</c> 的账本里，不在 PickupManager；
+      · 世界状态对象由 <c>SpawnWorldState()</c> 生成，谁都没有持有它。
+
+    于是"重开一局"之后，旧宝石原封不动躺在脚下（而且捡不起来——账本已清零）、
+    旧敌人继续追着新玩家跑、两份 NetWorldState 抢 Instance（波次在两个数字之间跳）；
+    客户端更糟：房主若本地 Object.Destroy，客户端副本变僵尸，永远留在场上。
+
+    这一项拦的就是"漏掉那一行"。它不会崩溃、不会刷异常、所有短局判据全绿——
+    只有真的重开一局才看得见，所以必须由静态检查在这里守着。
+
+    判据：定义 <c>TeardownWorld()</c> 的脚本，其方法体内必须出现
+    <c>DespawnAllWorldObjects</c> 调用（注释里提到不算）。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)
+        if 'TeardownWorld' not in raw:
+            continue
+        clean = strip_noise(raw)
+        for m in TEARDOWN_SIG_RE.finditer(clean):
+            brace = clean.find('{', m.end())
+            if brace < 0:
+                continue
+            body = _brace_body(clean, brace)
+            if 'DespawnAllWorldObjects' in body:
+                continue
+            line = clean[:m.start()].count('\n') + 1
+            err("拆世界没有反生成联机实体: %s 第 %d 行 TeardownWorld()\n"
+                "      联机实体的生死必须走房主权威：拆世界时先调 NetWorld.DespawnAllWorldObjects()，\n"
+                "      它会 Despawn 全部敌人 / 掉落物 / 世界状态并广播给每个客户端。\n"
+                "      少了这一步不会崩溃、不会刷异常，只是重开一局后：\n"
+                "        · 旧宝石躺在脚下却捡不起来（账本已清零）；\n"
+                "        · 旧敌人继续追着新玩家跑；\n"
+                "        · 两份 NetWorldState 抢 Instance，波次在两个数字之间跳；\n"
+                "        · 客户端副本变僵尸，双端计数永久分叉。\n"
+                "      修法：在 TeardownWorld() 开头（任何本地销毁之前）调用它。"
+                % (rp, line))
+
+
+# 第 21 项夹具：拆世界是否走反生成（M43）
+SELFTEST_TD = [
+    # ① 开头先反生成，再清本地容器：正确顺序，放行
+    ("td01_先反生成", False, """
+namespace A
+{
+    public static class B
+    {
+        public static void TeardownWorld()
+        {
+            NetWorld.DespawnAllWorldObjects();
+            PoolManager.Instance?.DestroyAll();
+        }
+    }
+}
+"""),
+    # ② 只清单机容器——M43 之前的真实写法（联机实体全体漏掉）
+    ("td02_只清单机容器", True, """
+namespace A
+{
+    public static class B
+    {
+        public static void TeardownWorld()
+        {
+            PoolManager.Instance?.DestroyAll();
+            EnemyManager.Instance?.ResetAll();
+        }
+    }
+}
+"""),
+    # ③ 注释里写了但没调：注释不算实现（strip_noise 会剥掉，这里必须报错）
+    ("td03_注释里提了一句", True, """
+namespace A
+{
+    public static class B
+    {
+        public static void TeardownWorld()
+        {
+            // 这里本该 NetWorld.DespawnAllWorldObjects();
+            PoolManager.Instance?.DestroyAll();
+        }
+    }
+}
+"""),
+    # ④ 调用写在别的方法里，TeardownWorld 里没有：同样等于没做
+    ("td04_调用在别处", True, """
+namespace A
+{
+    public static class B
+    {
+        public static void ResetPickups()
+        {
+            NetWorld.DespawnAllWorldObjects();
+        }
+
+        public static void TeardownWorld()
+        {
+            PoolManager.Instance?.DestroyAll();
+        }
+    }
+}
+"""),
+]
+
+
 def _run_legal_fixtures(fixtures, checks=None):
     """把夹具写成 Resources/Legal 下的 txt 跑第 14 项，返回被报错的夹具名集合。"""
     import shutil
@@ -3930,6 +4066,7 @@ def selftest():
         ("跨端文案检查（第 18 项）", SELFTEST_XT, [check_no_text_over_net]),
         ("时间缩放唯一写者检查（第 19 项）", SELFTEST_TS, [check_timescale_single_writer]),
         ("联机实体本地销毁检查（第 20 项）", SELFTEST_ND, [check_net_entity_local_destroy]),
+        ("拆世界反生成检查（第 21 项）", SELFTEST_TD, [check_teardown_despawns_net]),
     ]
 
     all_bad = 0
@@ -3983,6 +4120,7 @@ def main():
     check_no_text_over_net()
     check_timescale_single_writer()
     check_net_entity_local_destroy()
+    check_teardown_despawns_net()
 
     n = len(cs_files())
     print("=" * 68)
