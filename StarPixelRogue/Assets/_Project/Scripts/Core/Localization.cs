@@ -495,6 +495,23 @@ namespace StarPixel.Core
             };
         }
 
+        /// <summary>
+        /// M40：某个键在**当前语言**下表里是否存在。
+        ///
+        /// 为什么需要它：<see cref="T(string)"/> 找不到键时会原样返回**键名**，
+        /// 而卡片描述对大多数属性强化本来就是**空串**（如实说"没有补充说明"）。
+        /// 直接 `T("upgrade.stat.desc." + kind)` 会让玩家看到
+        /// "upgrade.stat.desc.2" 这种开发期标识——既不空也不对。
+        /// 有了 Has 才能区分"这条没有说明"与"这条漏翻了"。
+        /// </summary>
+        public static bool Has(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return false;
+            EnsureReady();
+            var dict = Language == LangEn ? _en : _zh;
+            return dict.ContainsKey(key);
+        }
+
         /// <summary>取文案；缺失键返回键名本身（开发期可发现漏翻）。</summary>
         public static string T(string key)
         {

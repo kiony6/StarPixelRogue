@@ -59,6 +59,13 @@ namespace StarPixel.UI
         public int CurrentBatchId { get { return _active ? _currentBatchId : 0; } }
         /// <summary>面板是否正在展示（供探针判定"是否在选卡态"，不许再靠 timeScale 推断）。</summary>
         public bool IsShowing { get { return _active; } }
+
+        /// <summary>
+        /// M40：最近一次**真正上屏**的卡片文本（标题 + 描述，" | " 拼接）。
+        /// 联机冒烟据此核对"英文客户端眼前写的到底是不是英文"——
+        /// 只核对 kind 有没有传过来证明不了这件事（房主可以传 kind 却在客户端拼中文）。
+        /// </summary>
+        public string LastPresentedText { get; private set; }
         /// <summary>当前面板（供探针读取**真实上屏文本**，而不是内部列表——M35 的教训）。</summary>
         public Transform CurrentPanel { get { return transform.Find("LevelUpCanvas"); } }
 
@@ -264,6 +271,18 @@ namespace StarPixel.UI
 
         private void BuildPanel(List<UpgradeOffer> offers)
         {
+            // M40：记下**这一组真正上屏的文字**（含描述），供冒烟脚本核对语言。
+            // 放在 BuildPanel 而不是 PresentExternal：本地路径、联机路径、队列补弹
+            // 三条路最后都汇到这里，记一处就全盖住了。
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < offers.Count; i++)
+            {
+                if (i > 0) sb.Append(" | ");
+                sb.Append(offers[i].title);
+                if (!string.IsNullOrEmpty(offers[i].desc)) sb.Append(" — ").Append(offers[i].desc);
+            }
+            LastPresentedText = sb.ToString();
+
             var canvasGO = new GameObject("LevelUpCanvas");
             canvasGO.transform.SetParent(transform, false);  // M5：随管理器一起拆世界
             var canvas = canvasGO.AddComponent<Canvas>();

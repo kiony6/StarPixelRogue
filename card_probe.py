@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-《星界像素狂潮》M37 联机升级选卡不丢单无头实测
+《星界像素狂潮》M37–M40 联机升级选卡链路无头实测
 
 做什么：
     拉起 6 个无头进程，把「房主推卡 — 客户端选卡」这条链路上两处**只维护一份状态**的
@@ -11,6 +11,8 @@
       DRAIN   依次选掉：第 2、3 组按顺序自动补上，全选完面板关闭、队列清零
       ORDER   推 4 组再全部选掉：上屏顺序与回调顺序都必须等于推送顺序（防错配）
       BATCH   批次表纯逻辑：各批取回不串 / 一批只能取一次 / 非法 id 与越界都拒绝 / 上限淘汰
+      NOTICE  M39 收场通知：四种收场各出一条提示 / 零被吞 / 摘掉出口必须记为被吞 / 切语言重画
+      LOCALE  M40 文案按接收端语言现算：中文态该空的空 / 英文态零中文零键名 / 等级按本机 / 面板真实英文
       RESTORE 收尾与反向：队列清零、切回本地后本地升级仍能弹卡（防修过头把本地堵死）、全程零异常
 
 为什么必须测：
@@ -66,6 +68,7 @@ SCENARIOS = (
     ("GATE", "M38 待确认表纯逻辑：确认才生效 / 一笔只结一次 / 回执要对得上 / 拒绝与超时都有出口"),
     ("INVAL", "M38 批次作废：正在展示的被撤掉并补弹下一批 / 队列里的被移除 / 不存在的批次不误伤"),
     ("NOTICE", "M39 收场通知：四种收场各出一条提示 / 零被吞 / 摘掉出口必须记为被吞 / 切语言重画 / 短超时可压测"),
+    ("LOCALE", "M40 推卡文案：按 kind 现算 / 中文态该空的空 / 英文态零中文零键名 / 等级按本机 / 面板真实英文"),
     ("RESTORE", "收尾与反向：队列清零、切回本地后本地升级仍能弹卡、全程零异常"),
 )
 
@@ -73,7 +76,7 @@ BACKUP_SUFFIX = ".m37bak"
 
 # 每个场景的超时（秒）。BATCH/GATE 不搭世界，秒完；其余要 Build 一整个世界。
 TIMEOUT = {"BASE": 90, "QUEUE": 90, "DRAIN": 90, "ORDER": 90, "BATCH": 60,
-           "GATE": 60, "INVAL": 90, "NOTICE": 90, "RESTORE": 90}
+           "GATE": 60, "INVAL": 90, "NOTICE": 90, "LOCALE": 90, "RESTORE": 90}
 
 
 def rel(p):
@@ -284,6 +287,17 @@ def check(scene, res):
             ("全程零异常", _yes),
             ("断点通过", _eq("4/4")),
         ],
+        # M40 文案：按 kind 现算，且必须按**接收端自己的语言**——
+        # 房主中文 + 客户端英文时，卡片不能跟着房主走
+        "LOCALE": [
+            ("本地化键判定", _yes),
+            ("中文态卡片完整", _yes),
+            ("英文态零中文零键名", _yes),
+            ("等级按本机现算", _yes),
+            ("非法kind安全", _yes),
+            ("面板真实英文", _yes),
+            ("断点通过", _eq("6/6")),
+        ],
     }.get(scene)
 
     if spec is None:
@@ -317,7 +331,7 @@ def _label(f):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="M37 联机升级选卡不丢单无头实测")
+    ap = argparse.ArgumentParser(description="M37–M40 联机升级选卡链路无头实测")
     ap.add_argument("--exe", default=DEFAULT_EXE)
     ap.add_argument("--data-dir", default=None)
     ap.add_argument("--only", default=None, help="只跑指定场景，如 QUEUE")
@@ -342,7 +356,7 @@ def main():
             return 2
 
     print("=" * 74)
-    print("M37 联机升级选卡不丢单无头实测 · %d 个场景" % len(scenes))
+    print("M37–M40 联机升级选卡链路无头实测 · %d 个场景" % len(scenes))
     print("  产物   %s" % rel(exe))
     print("  数据   %s" % data_dir)
     print("=" * 74)
@@ -376,7 +390,8 @@ def main():
             for extra in ("收到", "上屏", "入队", "丢弃", "队列残余",
                           "上屏总数", "上屏顺序", "回调顺序",
                           "取回内容", "上限淘汰", "淘汰后残余",
-                          "单组上屏计数", "收到增量", "首个失败"):
+                          "单组上屏计数", "收到增量",
+                          "中/英属性卡标题", "本机/无玩家标题", "首个失败"):
                 if extra in res and res[extra] not in ("", "无"):
                     print("        %-16s %s" % (extra, res[extra]))
 

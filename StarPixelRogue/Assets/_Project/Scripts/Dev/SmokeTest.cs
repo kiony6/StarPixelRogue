@@ -65,6 +65,16 @@ namespace StarPixel.Dev
         private int _hostEvicted;    // 房主侧：被上限淘汰的批次
 
         /// <summary>
+        /// M40：客户端最近一次上屏的卡片文本 + 本机界面语言。
+        ///
+        /// 为什么必须采"上屏的那几行字"而不是"kind 有没有传过来"：
+        /// 修复前房主把 title/desc 一起发过去，客户端原样显示——双开时看计数一切正常
+        /// （收到 3、上屏 1……），只有把"英文客户端眼前写的是什么"读出来才看得见。
+        /// </summary>
+        private string _cardText = "";
+        private string _uiLang = "";
+
+        /// <summary>
         /// M37：收尾**前** 1 秒的采样。
         ///
         /// 为什么不能只看收尾瞬时值：两个进程的结束时刻是对齐到同一秒的死热，
@@ -361,6 +371,12 @@ namespace StarPixel.Dev
                 _ntTotal = StarPixel.Combat.UpgradeNotice.Total;
                 _ntShown = StarPixel.Combat.UpgradeNotice.ShownCount;
                 _ntSuppressed = StarPixel.Combat.UpgradeNotice.SuppressedCount;
+
+                // M40：客户端眼前**真正写着的那几行字**。语言同理要同刻采——
+                // 判据是"英文客户端不该看到中文卡片"，两个值必须来自同一时刻。
+                var lumNow = StarPixel.UI.LevelUpManager.Instance;
+                if (lumNow != null) _cardText = lumNow.LastPresentedText;
+                _uiLang = Core.Localization.Language;
             }
 
             // M14：观战者是否仍持有一个属于自己的（IsOwner）玩家对象。
@@ -503,12 +519,24 @@ namespace StarPixel.Dev
             var lum = LevelUpManager.Instance;
             if (lum != null)
             {
-                _extReceived = lum.ExternalReceived;
-                _extPresented = lum.ExternalPresented;
-                _extQueued = lum.ExternalQueued;
-                _extDropped = lum.ExternalDropped;
-                _extPending = lum.ExternalPendingCount;
-                _extInvalidated = lum.ExternalInvalidated;
+                // M40：这些字段必须与房主侧的「推卡批次」**同刻**（收尾前 1 秒）。
+                // 修复前这里无条件重采，而房主侧只在 _endSampled 那次采——
+                // 客户端在最后 1 秒又升了 4 级时，表格里就变成
+                // 「房主推 4 批 / 客户端收到 8 批」，看起来像丢了 4 单；
+                // 实际上只是两侧采样时刻不同（M36 已经栽过一次口径不一致）。
+                // 保留兜底：那次没采到（时长短于 1 秒）时才用瞬时值。
+                if (!_endSampled || _extReceived == 0)
+                {
+                    _extReceived = lum.ExternalReceived;
+                    _extPresented = lum.ExternalPresented;
+                    _extQueued = lum.ExternalQueued;
+                    _extDropped = lum.ExternalDropped;
+                    _extPending = lum.ExternalPendingCount;
+                    _extInvalidated = lum.ExternalInvalidated;
+                }
+                // M40：上屏文案同理——只在没采到时兜底
+                if (string.IsNullOrEmpty(_cardText)) _cardText = lum.LastPresentedText;
+                if (string.IsNullOrEmpty(_uiLang)) _uiLang = Core.Localization.Language;
             }
             // 上面已在收尾前 1 秒采过；这里只补一次（那次没采到时至少不是空的）
             if (!_endSampled)
@@ -572,6 +600,10 @@ namespace StarPixel.Dev
                 Debug.Log("[SMOKE] 收场总数    " + _ntTotal);
                 Debug.Log("[SMOKE] 通知上屏    " + _ntShown);
                 Debug.Log("[SMOKE] 通知被吞    " + _ntSuppressed);
+                // M40：联机推卡只传 kind，文案必须按**本机语言**现算。
+                // 输出"眼前写着的那几行字"，让 net_smoke 直接查有没有串成房主的语言。
+                Debug.Log("[SMOKE] 界面语言    " + (string.IsNullOrEmpty(_uiLang) ? "?" : _uiLang));
+                Debug.Log("[SMOKE] 推卡文案    " + (string.IsNullOrEmpty(_cardText) ? "无" : _cardText));
             }
             Debug.Log("[SMOKE] 会话角色    " + (_spectator ? "观战"
                 : StarPixel.Net.NetSession.IsHost ? "房主"

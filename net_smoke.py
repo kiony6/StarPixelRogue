@@ -237,6 +237,9 @@ def main():
                     help="M11：客户端在第 N 秒模拟一次意外掉线并验证自动重连（0=不触发）")
     ap.add_argument("--host-drop-at", type=float, default=0,
                     help="M11：房主在第 N 秒模拟一次意外掉线（权威世界保留、不拆世界）")
+    ap.add_argument("--client-lang", default="en",
+                    help="M40：客户端界面语言（en/zh，默认 en）。房主固定中文——"
+                         "两端语言不同才能暴露「推卡文案跟着房主走」。设空串表示不指定")
     args = ap.parse_args()
 
     if args.spectator and (args.drop_at > 0 or args.host_drop_at > 0):
@@ -328,6 +331,10 @@ def main():
     client_args = ["-batchmode", "-nographics", "-netClient",
                    "-netAddress", args.address,
                    "-smokeSeconds", str(client_seconds)]
+    # M40：默认让客户端跑英文——房主中文 + 客户端英文是联机房间里最常见的一种错配，
+    # 也正是"推卡文案跟着房主走"唯一会露馅的场景（同语言时两边看起来完全正常）。
+    if args.client_lang:
+        client_args += ["-lang", args.client_lang]
     if args.spectator:
         client_args.append("-netSpectator")
     if args.drop_at > 0:
@@ -379,6 +386,10 @@ def main():
         ("收场总数", "-", client_data.get("收场总数", "?")),
         ("通知上屏", "-", client_data.get("通知上屏", "?")),
         ("通知被吞", "-", client_data.get("通知被吞", "?")),
+        # M40：文案语言。客户端默认跑英文——同语言时两边看起来都正常，
+        # 只有"房主中文 + 客户端英文"才暴露推卡文案跟着房主走。
+        ("界面语言", host_data.get("界面语言", "?"), client_data.get("界面语言", "?")),
+        ("推卡文案", "-", client_data.get("推卡文案", "?")),
         ("房主已拒绝", host_data.get("房主已拒绝", "?"), "-"),
         ("本地被拒", "-", client_data.get("本地被拒", "?")),
         ("待确认残留", "-", client_data.get("待确认残留", "?")),
@@ -655,6 +666,31 @@ def main():
             problems.append(
                 "M39：客户端选了 %d 次卡，却没有产生任何一条收场通知——"
                 "通知链路整体空转，选卡的成败对玩家全是静默的" % c_picked)
+
+    # —— M40：推卡文案必须按**接收端自己的语言** ——
+    #
+    # 房主生成候选，但文案不能跟着房主走。房主中文 + 客户端英文是联机房间里
+    # 最常见的错配组合；修复前房主把 title[]/desc[] 一起发过去，客户端原样上屏，
+    # 于是英文玩家眼前整块选卡面板都是中文（M39 只修了收场提示，卡片本体漏了）。
+    #
+    # 判据读的是客户端**眼前真正写着的那几行字**（LevelUpManager.LastPresentedText），
+    # 不是"kind 有没有传过来"——协议对了、渲染照样串味的情况，只有读文本才看得见。
+    c_lang = client_data.get("界面语言", "")
+    c_card = client_data.get("推卡文案", "无")
+    if args.client_lang.lower().startswith("en"):
+        if c_lang and c_lang != "en-US":
+            problems.append(
+                "M40：客户端本该跑英文，实际界面语言是 %s——"
+                "本组判据（英文端零中文）失去区分力，检查 -lang 是否真的传到了进程" % c_lang)
+        if c_card and c_card != "无" and re.search(r"[\u4e00-\u9fff]", c_card):
+            problems.append(
+                "M40：英文客户端眼前的卡片是中文（%s）——推卡文案跟着房主语言走，"
+                "玩家看到的是他看不懂的字。房主应只发 kind，文案由接收端按本机语言现算"
+                % c_card[:80])
+    if c_recv > 0 and (not c_card or c_card == "无"):
+        problems.append(
+            "M40：客户端收到过 %d 批推卡，却没有记录任何上屏文案——"
+            "要么卡片根本没上屏，要么上屏时没留下可核对的文本" % c_recv)
 
     # —— M11 断线重连专项判定 ——
     # 三层证据缺一不可：客户端自述重连成功 + 进度没回退 + 房主侧真的观测到「2→1→2」。

@@ -266,6 +266,81 @@ namespace StarPixel.Combat
             return Core.Localization.T("upgrade.generic");
         }
 
+        /// <summary>
+        /// M40：按 kind **现算**这张卡的描述（与 <see cref="TitleOfKind"/> 同一套理由）。
+        ///
+        /// 分三档，与 <see cref="ApplyKind"/> 完全对齐：
+        ///   0..StatOfferCount-1  属性强化 —— 只有少数几条有补充说明（键不存在时返回空串，
+        ///                        不能回退成键名，见 <c>Localization.Has</c>）；
+        ///   100+id               武器解锁   —— 一句话武器定位；
+        ///   200+id               武器升级   —— **下一级**效果，等级按 p 手上那把现算。
+        ///
+        /// 最后一条是 M40 顺带修掉的第二处错位：房主生成的描述里，等级是**房主侧**的等级。
+        /// 房主 Lv3、客户端本地才同步到 Lv2 时，客户端看到的是 "Lv4 效果" 却点了一张
+        /// 自己实际只能升到 Lv3 的卡。现算之后，描述里的等级永远和客户端自己的一致。
+        /// </summary>
+        public static string DescOfKind(int kind, PlayerController p)
+        {
+            if (kind >= 200)
+            {
+                int id = kind - 200;
+                SkillDef def = CreateById(id);
+                int next = 2;                       // 找不到这把武器时的合理默认（第 1 → 2 级）
+                if (p != null && p.Weapons != null)
+                {
+                    foreach (var w in p.Weapons)
+                    {
+                        if (w == null || w.def == null || w.def.id != id) continue;
+                        if (def == null) def = w.def;
+                        next = Mathf.Min(w.level + 1, SkillDef.MaxLevel);
+                        break;
+                    }
+                }
+                return def != null ? def.NextLevelDesc(next) : "";
+            }
+            if (kind >= 100)
+            {
+                var def = CreateById(kind - 100);
+                return def != null ? WeaponDesc(def) : "";
+            }
+            if (kind >= 0 && kind < StatOfferCount)
+            {
+                string key = "upgrade.stat.desc." + kind;
+                return Core.Localization.Has(key) ? Core.Localization.T(key) : "";
+            }
+            return "";
+        }
+
+        /// <summary>
+        /// M40：接收端按房主发来的 kind 列表**现算**整张卡（标题 + 描述）。
+        ///
+        /// 为什么不再传字符串：房主原先把 <c>title</c>/<c>desc</c> 两个 string[] 一起发过去，
+        /// 客户端原样上屏。于是"房主中文 + 客户端英文"的房间里（很常见），
+        /// 客户端整个选卡面板都是中文——M39 只把**收场提示**改成了按客户端语言现算，
+        /// 卡片本体还带着房主的文案。只发 kind、文案本地现算，是同一处缺陷的另一半。
+        ///
+        /// <c>apply</c> 恒为 null：客户端不许本地执行应用（M38 的确认门在后面兜着）。
+        /// 纯逻辑函数，不依赖网络——LOCALE 探针可以在单机里把中英两态、三档 kind、
+        /// 非法 kind 全部当场断言，不必开双开。
+        /// </summary>
+        public static List<UpgradeOffer> OffersFromKinds(int[] kinds, PlayerController p)
+        {
+            var list = new List<UpgradeOffer>();
+            if (kinds == null) return list;
+            for (int i = 0; i < kinds.Length; i++)
+            {
+                int kind = kinds[i];
+                list.Add(new UpgradeOffer
+                {
+                    title = TitleOfKind(kind, p),
+                    desc = DescOfKind(kind, p),
+                    kind = kind,
+                    apply = null
+                });
+            }
+            return list;
+        }
+
         /// <summary>按序号应用属性强化（与 <see cref="StatOffer"/> 一一对应）。</summary>
         public static void ApplyStat(int index, PlayerController p)
         {

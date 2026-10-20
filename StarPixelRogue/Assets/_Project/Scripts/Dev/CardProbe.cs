@@ -104,6 +104,10 @@ namespace StarPixel.Dev
         private int _ivInvalidated, _ivPending;
         private string _ivAfter = "?";
 
+        // —— LOCALE（M40）：推卡文案必须按接收端自己的语言现算 ——
+        private bool _lcHasOk, _lcZhOk, _lcEnOk, _lcLevelOk, _lcBadOk, _lcPanelOk;
+        private string _lcZh0 = "?", _lcEn0 = "?", _lcT4 = "?", _lcTNoP = "?";
+
         // 制造可辨识的候选组（真实 BuildOffers 的标题是本地化串，分不清是哪一组）
         private static List<UpgradeOffer> Group(string tag, List<string> applied)
         {
@@ -184,6 +188,7 @@ namespace StarPixel.Dev
                 case "GATE":    body = Gate();    break;   // M38：纯逻辑，不搭世界
                 case "INVAL":   body = Inval();   break;   // M38：批次作废撤销
                 case "NOTICE":  body = Notice();  break;   // M39：收场必须看得见
+                case "LOCALE":  body = Locale();  break;   // M40：推卡文案按接收端语言现算
                 case "RESTORE": body = Restore(); break;
                 default:        body = Base();    break;
             }
@@ -828,6 +833,124 @@ namespace StarPixel.Dev
         }
 
         // =====================================================================================
+        // LOCALE：联机推卡文案必须按**接收端自己的语言**现算（M40）
+        //
+        // 钉的是"房主把文案一起发过去"：房主中文 + 客户端英文的房间里（很常见），
+        // 客户端整个选卡面板都会是中文。M39 只把**收场提示**改成了按客户端语言现算，
+        // 卡片本体还带着房主的 title/desc——同一处缺陷漏了另一半。
+        //
+        // 判据的关键：必须读**上屏的那几行字**。只断言"kind 传过来了"证明不了玩家眼前是什么。
+        // 另外单独钉住"等级按本机现算"：房主侧 Lv3、客户端可能只同步到 Lv2，
+        // 标题里写着 Lv4 而实际只能升到 Lv3 的那种错位，只有本机等级才能避开。
+        // =====================================================================================
+        private IEnumerator Locale()
+        {
+            GameBuilder.Build();
+            yield return Quiet();
+            yield return WaitReal(0.3f);
+
+            var p = StarPixel.Player.PlayerController.Instance;
+            var lum = LevelUpManager.Instance;
+            if (p == null || lum == null)
+            {
+                Fail("读不到 PlayerController / LevelUpManager——LOCALE 判据全部失灵");
+                yield break;
+            }
+            lum.SetExternalCards(true);          // 外部模式：本地升级不许自己弹卡搅局
+
+            // 1) 地基：Has 必须能区分「有这条说明」与「本来就没有说明」。
+            //    没有它就只能对空描述回退成键名（"upgrade.stat.desc.2" 直接怼到玩家脸上）。
+            _lcHasOk = Core.Localization.Has("upgrade.stat.desc.0")
+                       && !Core.Localization.Has("upgrade.stat.desc.2")
+                       && !Core.Localization.Has("no.such.key.m40");
+            Judge(_lcHasOk,
+                  "Localization.Has 判定不对（desc.0=" + Core.Localization.Has("upgrade.stat.desc.0")
+                  + "、desc.2=" + Core.Localization.Has("upgrade.stat.desc.2") + "）——"
+                  + "缺了它就无法既「该空的空着」又「不漏翻」地生成卡片描述");
+
+            // 备一把 3 级散射枪：武器升级卡要按**本机**等级算下一级
+            p.AddSkill(UpgradeCatalog.CreateById(2));
+            p.LevelUpWeapon(2);
+            p.LevelUpWeapon(2);
+
+            int[] kinds = { 0, 2, 102, 202 };     // 属性(有说明) / 属性(无说明) / 武器解锁 / 武器升级
+
+            // 2) 中文态：四张卡的标题都要有字，描述该有的有、该空的空
+            Core.Localization.SetLanguage(Core.Localization.LangZh, silent: true);
+            var zh = UpgradeCatalog.OffersFromKinds(kinds, p);
+            _lcZh0 = zh.Count > 0 ? zh[0].title : "?";
+            _lcZhOk = zh.Count == 4;
+            for (int i = 0; i < zh.Count; i++)
+                _lcZhOk = _lcZhOk && !string.IsNullOrEmpty(zh[i].title) && HasCjk(zh[i].title);
+            _lcZhOk = _lcZhOk
+                      && zh.Count == 4
+                      && HasCjk(zh[0].desc)          // 最大生命 +20 → "并回满"
+                      && zh[1].desc == ""            // 移速 +8% → 本来就没有补充说明
+                      && HasCjk(zh[2].desc);         // 武器解锁 → 一句话定位
+            Judge(_lcZhOk,
+                  "中文态按 kind 生成的卡片不全（属性0 标题=" + _lcZh0 + "、描述="
+                  + (zh.Count > 0 ? zh[0].desc : "?") + "；属性1 描述应为空，实际="
+                  + (zh.Count > 1 ? zh[1].desc : "?") + "）——"
+                  + "描述该空的空着、该有的有，卡片才不是半张");
+
+            // 3) 英文态：零汉字、且**不能是键名**（T() 缺键会原样返回键名，只查汉字会被蒙过去）
+            Core.Localization.SetLanguage(Core.Localization.LangEn, silent: true);
+            var en = UpgradeCatalog.OffersFromKinds(kinds, p);
+            _lcEn0 = en.Count > 0 ? en[0].title : "?";
+            _lcEnOk = en.Count == 4;
+            for (int i = 0; i < en.Count; i++)
+            {
+                _lcEnOk = _lcEnOk
+                          && !string.IsNullOrEmpty(en[i].title)
+                          && !HasCjk(en[i].title) && !en[i].title.StartsWith("upgrade.")
+                          && !HasCjk(en[i].desc) && !en[i].desc.StartsWith("upgrade.");
+            }
+            _lcEnOk = _lcEnOk && en.Count == 4 && en[0].desc != "" && en[1].desc == ""
+                      && en[0].title != zh[0].title;
+            Judge(_lcEnOk,
+                  "英文态卡片仍带中文/键名（属性0 标题=" + _lcEn0 + "、中文态=" + _lcZh0 + "）——"
+                  + "房主中文 + 客户端英文时，玩家眼前整块面板都是他看不懂的字");
+
+            // 4) 等级按**本机**现算：手上 Lv3 → 卡片说 Lv4；且满级不许冒出 Lv5
+            _lcT4 = UpgradeCatalog.TitleOfKind(202, p);
+            _lcTNoP = UpgradeCatalog.TitleOfKind(202, null);
+            p.LevelUpWeapon(2);                   // → Lv4（MaxLevel）
+            string tMax = UpgradeCatalog.TitleOfKind(202, p);
+            _lcLevelOk = _lcT4.Contains("4") && _lcT4 != _lcTNoP
+                         && tMax.Contains("4") && !tMax.Contains("5");
+            Judge(_lcLevelOk,
+                  "武器升级卡的等级不是按本机算的（本机Lv3→" + _lcT4 + "、无玩家→" + _lcTNoP
+                  + "、满级→" + tMax + "）——房主的等级与客户端不一定同步，"
+                  + "标题会写着「下一级是 Lv4」而玩家实际只能升到 Lv3");
+
+            // 5) 非法 kind 不许崩，也不许带上可执行的 apply（客户端不许本地应用，M38）
+            var bad = UpgradeCatalog.OffersFromKinds(new[] { -1, 9999 }, p);
+            _lcBadOk = bad.Count == 2
+                       && !string.IsNullOrEmpty(bad[0].title) && !string.IsNullOrEmpty(bad[1].title)
+                       && bad[0].apply == null && bad[1].apply == null
+                       && en.Count == 4 && en[3].apply == null;
+            Judge(_lcBadOk,
+                  "非法 kind 处理不当（张数=" + bad.Count + "、标题="
+                  + (bad.Count > 0 ? bad[0].title : "?") + "）——"
+                  + "要么抛异常把整个推卡链路打断，要么给客户端塞了一个能本地执行的 apply");
+
+            // 6) **上屏**才算数：英文态推一组卡，面板上真实渲染的文字必须零汉字
+            var cards = UpgradeCatalog.OffersFromKinds(new[] { 0, 102, 202 }, p);
+            lum.PresentExternal(1, cards, _ => { });
+            yield return Until(() => lum.IsShowing && lum.CurrentPanel != null);
+            string shown = PanelText(lum);
+            _lcPanelOk = !string.IsNullOrEmpty(shown) && !HasCjk(shown)
+                         && shown.IndexOf("CARD_", StringComparison.Ordinal) < 0;
+            Judge(_lcPanelOk,
+                  "英文客户端面板上渲染出了中文（实际：" + shown + "）——"
+                  + "这才是玩家真正看到的东西；纯逻辑函数对、面板照样串味的话等于没修");
+            lum.AutoChooseFirst();
+            yield return Quiet();
+
+            Core.Localization.SetLanguage(Core.Localization.LangZh, silent: true);
+        }
+
+        // =====================================================================================
         // RESTORE：收尾与反向——队列要清零，本地路径不能被修过头堵死
         // =====================================================================================
         private IEnumerator Restore()
@@ -906,6 +1029,7 @@ namespace StarPixel.Dev
                        : _scene == "GATE" ? 7
                        : _scene == "INVAL" ? 6
                        : _scene == "NOTICE" ? 7
+                       : _scene == "LOCALE" ? 6
                        : _scene == "RESTORE" ? 4 : 0;
 
             bool pass = _errors == 0 && _fail.Count == 0 && _checked == expect && _ok == expect;
@@ -997,14 +1121,23 @@ namespace StarPixel.Dev
                     Line("按 kind 取标题", Yn(_ntTitleOk));
                     Line("短超时可压测", Yn(_ntTimeoutOk));
                     break;
+                case "LOCALE":
+                    Line("本地化键判定", Yn(_lcHasOk));
+                    Line("中文态卡片完整", Yn(_lcZhOk));
+                    Line("中/英属性卡标题", _lcZh0 + " → " + _lcEn0);
+                    Line("英文态零中文零键名", Yn(_lcEnOk));
+                    Line("等级按本机现算", Yn(_lcLevelOk));
+                    Line("本机/无玩家标题", _lcT4 + " / " + _lcTNoP);
+                    Line("非法kind安全", Yn(_lcBadOk));
+                    Line("面板真实英文", Yn(_lcPanelOk));
+                    break;
                 case "RESTORE":
                     Line("队列残余", _rsPending.ToString());
                     Line("队列已排空", Yn(_rsQueueOk));
                     Line("面板已关闭", Yn(_rsPanelClosedOk));
                     Line("本地仍能弹卡", Yn(_rsLocalOk));
                     Line("全程零异常", Yn(_rsNoErrOk));
-                    break;
-            }
+                    break;            }
             Line("运行时异常", _errors.ToString());
             Line("结论", pass ? "通过" : "不通过");
             if (_firstError != "") Line("首个失败", _firstError);

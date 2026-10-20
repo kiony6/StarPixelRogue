@@ -2946,6 +2946,132 @@ namespace A
 ]
 
 
+# 第 18 项夹具：联机推卡不得跨端传界面文案（M40）
+# 全部带 [TargetRpc]——第 18 项只在 RPC 方法上查（别处传字符串数组不构成跨端串味）
+SELFTEST_XT = [
+    # ① 修复前的原样：房主把标题数组发给客户端，客户端原样上屏
+    ("xt01_传标题数组", True, """
+namespace A
+{
+    public class P
+    {
+        [TargetRpc]
+        private void ShowCardsTargetRpc(NetworkConnection conn, int batchId, string[] titles, int[] kinds)
+        {
+            var offers = new List<UpgradeOffer>();
+            for (int i = 0; i < titles.Length; i++)
+                offers.Add(new UpgradeOffer { title = titles[i], kind = kinds[i] });
+        }
+    }
+}
+"""),
+    # ② 只发 kind、文案现算 → 放行
+    ("xt02_只传kind现算", False, """
+namespace A
+{
+    public class P
+    {
+        [TargetRpc]
+        private void ShowCardsTargetRpc(NetworkConnection conn, int batchId, int[] kinds)
+        {
+            var offers = UpgradeCatalog.OffersFromKinds(kinds, _ctrl);
+            LevelUpManager.Instance.PresentExternal(batchId, offers, _ => { });
+        }
+    }
+}
+"""),
+    # ③ 描述数组同样不行（只拦标题会被改一半漏一半）
+    ("xt03_传描述数组", True, """
+namespace A
+{
+    public class P
+    {
+        [TargetRpc]
+        private void ShowCardsTargetRpc(NetworkConnection conn, int batchId, int[] kinds, string[] descs)
+        {
+            var offers = new List<UpgradeOffer>();
+            for (int i = 0; i < descs.Length; i++)
+                offers.Add(new UpgradeOffer { desc = descs[i], kind = kinds[i] });
+        }
+    }
+}
+"""),
+    # ④ 没有 RPC 的普通方法：本地组卡，不在检查范围内
+    ("xt04_非RPC传文案数组", False, """
+namespace A
+{
+    public class P
+    {
+        private void BuildLocal(List<string> titles)
+        {
+            for (int i = 0; i < titles.Count; i++)
+                _offers.Add(new UpgradeOffer { title = titles[i] });
+        }
+    }
+}
+"""),
+    # ⑤ 显式豁免且理由非空 → 放行并记录
+    ("xt05_豁免有理由", False, """
+namespace A
+{
+    public class P
+    {
+        // @xnettext: 这张是固定系统公告，两端必须一字不差
+        [TargetRpc]
+        private void ShowCardsTargetRpc(NetworkConnection conn, int batchId, string[] titles)
+        {
+            _panel.Show(titles);
+        }
+    }
+}
+"""),
+    # ⑥ 豁免但理由为空 → 不放行（空豁免等于没有豁免）
+    ("xt06_豁免空理由", True, """
+namespace A
+{
+    public class P
+    {
+        // @xnettext:
+        [TargetRpc]
+        private void ShowCardsTargetRpc(NetworkConnection conn, int batchId, string[] titles)
+        {
+            _panel.Show(titles);
+        }
+    }
+}
+"""),
+    # ⑦ RPC 里只取非文案字段 → 放行（防"见到数组下标就报"的误伤）
+    ("xt07_只取非文案字段", False, """
+namespace A
+{
+    public class P
+    {
+        [TargetRpc]
+        private void ShowCardsTargetRpc(NetworkConnection conn, int batchId, int[] kinds)
+        {
+            int kind = kinds[0];
+            _panel.Show(kind);
+        }
+    }
+}
+"""),
+    # ⑧ 参数名带 text 但不是字符串数组 → 放行（只认 string[]）
+    ("xt08_名字像文案但非字符串", False, """
+namespace A
+{
+    public class P
+    {
+        [TargetRpc]
+        private void ShowCardsTargetRpc(NetworkConnection conn, int[] texts)
+        {
+            _panel.Show(texts.Length);
+        }
+    }
+}
+"""),
+]
+
+
 # 第 15 项夹具：推卡批次一致性（M37）
 # 正例/反例都只造源码文本——本项查的正是"多次推入 vs 一份状态"这种
 # 编译得过、跑起来也对、只有并排比对才看得出的写法。
@@ -3254,6 +3380,131 @@ def check_notice_on_endings():
                 % (rp, i + 1, ln.strip()[:70], lines[s].strip()[:60]))
 
 
+# ============================================================================
+# 第 18 项：联机推卡不得跨端传界面文案（M40）
+# ============================================================================
+# 房主生成候选后，修复前把 title[] / desc[] 两个字符串数组一起发过去，
+# 客户端原样上屏。于是"房主中文 + 客户端英文"的房间里（很常见），
+# 客户端整块选卡面板都是中文——M39 只把**收场提示**改成按客户端语言现算，
+# 卡片本体漏了另一半。
+#
+# 判据分两层，任一层命中即报错：
+#   (a) RPC 方法签名里出现 `string[] <名字含 title/desc/text/label>` —— 文案上了网；
+#   (b) RPC 方法体内出现 `title = 某数组[i]` 这类赋值 —— 把跨端数组当界面文本用。
+# 只查含 RPC 的文件与方法：其它地方传字符串数组不构成"跨端串味"。
+#
+# 可用 `// @xnettext: 理由` 显式豁免，且**空理由无效**。
+NET_TEXT_PARAM_RE = re.compile(r'string\s*\[\s*\]\s*(\w+)')
+NET_TEXT_NAME_RE = re.compile(r'(?i)(title|desc|text|label|caption)')
+NET_TEXT_ASSIGN_RE = re.compile(
+    r'(?i)\b(?:title|desc|text|label|caption)\s*=\s*([A-Za-z_]\w*)\s*\[')
+
+
+def check_no_text_over_net():
+    """
+    联机 RPC 不许把界面文案发到对端（M40）。
+
+    房主只该告诉客户端"这一批是哪几类卡"（kind），标题与描述由接收端按
+    **自己的语言**现算。修复前的写法是：
+
+        [TargetRpc]
+        private void ShowCardsTargetRpc(NetworkConnection conn, int batchId,
+                                        string[] titles, string[] descs, int[] kinds)
+        {
+            offers.Add(new UpgradeOffer { title = titles[i], desc = descs[i] });
+        }
+
+    编译得过、跑得通、双开计数全对——只有"英文客户端眼前写着中文"这一件事无人发现。
+    抽到静态检查里是因为：这类缺陷在**同语言**环境下完全不可见，
+    而双开默认两端同语言，靠实测很难稳定复现。
+
+    判据：
+      (a) RPC 方法签名里不得出现名字含 title/desc/text/label 的 `string[]` 参数；
+      (b) RPC 方法体内不得把数组元素直接赋给 title/desc/text/label。
+    只作用于含 <c>[ServerRpc]</c>/<c>[TargetRpc]</c> 的文件，且只查 RPC 方法本身。
+
+    可用 `// @xnettext: 理由` 显式豁免，且**空理由无效**。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        norm = rp.replace('\\', '/')
+        if '/Dev/' in norm or '/Editor/' in norm:
+            continue
+        raw = read(path)
+        lines = strip_noise(raw).split('\n')
+        raw_lines = raw.split('\n')
+        if not any(RPC_DECL_RE.search(ln) for ln in lines):
+            continue
+        spans = method_spans(lines)
+
+        for i, ln in enumerate(lines):
+            if not RPC_DECL_RE.search(ln):
+                continue
+            # RPC 声明之后（允许一行特性/空行）是方法签名；签名可能折行，拼到右括号为止。
+            j = i + 1
+            while j < len(lines) and j < i + 4 and not re.search(r'\w+\s*\(', lines[j]):
+                j += 1
+            if j >= len(lines):
+                continue
+            sig_lines = [lines[j].strip()]
+            k = j + 1
+            while k < len(lines) and ')' not in sig_lines[-1] and len(sig_lines) < 6:
+                sig_lines.append(lines[k].strip())
+                k += 1
+            sig = " ".join(sig_lines)
+            mname = re.search(r'(\w+)\s*\(', sig)
+            mname = mname.group(1) if mname else "?"
+
+            exempt = False
+            for x in range(max(0, i - 2), min(len(raw_lines), i + 3)):
+                if ('@xnettext:' in raw_lines[x]
+                        and raw_lines[x].split('@xnettext:', 1)[1].strip()):
+                    exempt = True
+                    break
+            if exempt:
+                info("跨端文案豁免: %s 第 %d 行（人工确认）" % (rp, i + 1))
+                continue
+
+            # (a) 签名里的文案数组
+            bad_param = None
+            for pm in NET_TEXT_PARAM_RE.finditer(sig):
+                if NET_TEXT_NAME_RE.search(pm.group(1)):
+                    bad_param = pm.group(1)
+                    break
+            if bad_param:
+                err("RPC 跨端传界面文案: %s 第 %d 行 %s —— 方法 %s\n"
+                    "      参数 %s 把**房主生成的卡片文字**发给了对端，客户端会原样上屏。\n"
+                    "      房主中文 + 客户端英文的房间里（很常见），英文玩家整块选卡面板都是中文——\n"
+                    "      而同语言环境下这件事**完全不可见**：计数对、日志对、面板也对。\n"
+                    "      顺带还会错一处：标题里的武器等级是房主侧的，客户端未必同步到那一级。\n"
+                    "      修法：只发 kind（卡的类型），标题/描述由接收端按本机语言现算；\n"
+                    "      确需跨端传固定文案则写 // @xnettext: 理由。"
+                    % (rp, i + 1, ln.strip()[:70], mname, bad_param))
+
+            # (b) 方法体里把数组元素当界面文本
+            s, e = _span_of(spans, j)
+            if s is None:
+                continue
+            for b in range(s, e + 1):
+                if b >= len(lines):
+                    break
+                if not NET_TEXT_ASSIGN_RE.search(lines[b]):
+                    continue
+                for x in range(max(0, b - 2), min(len(raw_lines), b + 2)):
+                    if ('@xnettext:' in raw_lines[x]
+                            and raw_lines[x].split('@xnettext:', 1)[1].strip()):
+                        exempt = True
+                        break
+                if exempt:
+                    continue
+                err("RPC 跨端文案直接上屏: %s 第 %d 行 %s —— 方法 %s\n"
+                    "      这里把**从对端收到的数组**里的元素直接当成界面文本（title/desc/text），\n"
+                    "      玩家看到的就是发送方的语言，而不是本机语言。\n"
+                    "      修法：只接收 kind，文案用 UpgradeCatalog.TitleOfKind/DescOfKind 现算；\n"
+                    "      确属有意为之则写 // @xnettext: 理由。"
+                    % (rp, b + 1, lines[b].strip()[:70], mname))
+
+
 def _run_legal_fixtures(fixtures, checks=None):
     """把夹具写成 Resources/Legal 下的 txt 跑第 14 项，返回被报错的夹具名集合。"""
     import shutil
@@ -3322,6 +3573,7 @@ def selftest():
         ("推卡批次一致性检查（第 15 项）", SELFTEST_OF, [check_offer_batch_consistency]),
         ("本地镜像确认检查（第 16 项）", SELFTEST_LA, [check_local_apply_guarded]),
         ("收场可见出口检查（第 17 项）", SELFTEST_NF, [check_notice_on_endings]),
+        ("跨端文案检查（第 18 项）", SELFTEST_XT, [check_no_text_over_net]),
     ]
 
     all_bad = 0
@@ -3372,6 +3624,7 @@ def main():
     check_offer_batch_consistency()
     check_local_apply_guarded()
     check_notice_on_endings()
+    check_no_text_over_net()
 
     n = len(cs_files())
     print("=" * 68)

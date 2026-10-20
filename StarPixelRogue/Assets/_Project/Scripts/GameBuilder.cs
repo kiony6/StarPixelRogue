@@ -163,6 +163,24 @@ namespace StarPixel
             return false;
         }
 
+        /// <summary>
+        /// M40：命令行强制界面语言（-lang zh|en）。
+        ///
+        /// 用来做一件单机测不出来的事：**两端语言不同**的联机房间。
+        /// 房主中文 + 客户端英文时，若推卡文案跟着房主走，客户端整个选卡面板都会是中文。
+        /// 必须在 <c>SettingsManager.Ensure</c> **之后**调用——Ensure 会用存档里的语言覆盖一遍。
+        /// 只改运行时语言，不写存档：双开跑完不会把用户的语言设置改掉。
+        /// </summary>
+        private static void ApplyLanguageArg()
+        {
+            string v = ArgValue("-lang", "");
+            if (string.IsNullOrEmpty(v)) return;
+            bool en = v.StartsWith("en", System.StringComparison.OrdinalIgnoreCase);
+            Core.Localization.SetLanguage(en ? Core.Localization.LangEn : Core.Localization.LangZh,
+                                          silent: true);
+            Debug.Log("[M40] 命令行强制语言 → " + Core.Localization.Language);
+        }
+
         /// <summary>M17：读取 -smokeSeconds N（默认 60 秒）。</summary>
         private static float SmokeSeconds()
         {
@@ -291,6 +309,7 @@ namespace StarPixel
             Core.SaveManager.Ensure();
             Core.PlaytimeGuard.Ensure();
             Core.SettingsManager.Instance.AgreeTerms(Core.VersionInfo.ComplianceVersion);
+            ApplyLanguageArg();
             PrepareStage();
 
             // M18：无头环境必须显式锁帧。不锁时 NullGfxDevice 会跑到数千 FPS，

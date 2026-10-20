@@ -370,31 +370,38 @@ namespace StarPixel.Net
             int batchId = _offerBatches.Add(offers);
             if (batchId == 0) return;
 
-            var titles = new string[offers.Count];
-            var descs = new string[offers.Count];
+            // M40：只发 kind，**文案由接收端按自己的语言现算**。
+            //
+            // 修复前这里把房主生成的 title[] / desc[] 两个字符串数组一起发过去，
+            // 客户端原样上屏。于是"房主中文 + 客户端英文"的房间里（很常见），
+            // 客户端整个选卡面板都是中文——M39 只把**收场提示**改成了按客户端语言
+            // 现算，卡片本体还带着房主的文案，同一处缺陷的另一半漏了。
+            // 顺带还修掉一处更隐蔽的错位：标题里的武器等级是**房主侧**的等级，
+            // 客户端武器库还没同步到那一级时，看到的是"下一级"其实对不上。
             var kinds = new int[offers.Count];
-            for (int i = 0; i < offers.Count; i++)
-            {
-                titles[i] = offers[i].title;
-                descs[i] = offers[i].desc;
-                kinds[i] = offers[i].kind;
-            }
-            ShowCardsTargetRpc(Owner, batchId, titles, descs, kinds);
+            for (int i = 0; i < offers.Count; i++) kinds[i] = offers[i].kind;
+            ShowCardsTargetRpc(Owner, batchId, kinds);
         }
 
         [TargetRpc]
-        private void ShowCardsTargetRpc(NetworkConnection conn, int batchId,
-                                        string[] titles, string[] descs, int[] kinds)
+        private void ShowCardsTargetRpc(NetworkConnection conn, int batchId, int[] kinds)
         {
-            var offers = new List<UpgradeOffer>();
-            for (int i = 0; i < titles.Length; i++)
-                offers.Add(new UpgradeOffer
-                {
-                    title = titles[i],
-                    desc = i < descs.Length ? descs[i] : "",
-                    apply = null,
-                    kind = i < kinds.Length ? kinds[i] : 0
-                });
+            // M40：房主的 title/desc 一个字节都不过网——按本机语言现算。
+            var offers = UpgradeCatalog.OffersFromKinds(kinds, _ctrl);
+            if (offers.Count == 0) return;
+
+            // 双开核对用：真正要送到面板上的那几行字（客户端自己的语言）。
+            // net_smoke 据此断言「英文客户端不会看到中文卡片」——这是"看得见"那一层的证据，
+            // 只看 kind 有没有传过来证明不了玩家眼前写的是什么。
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < offers.Count; i++)
+            {
+                if (i > 0) sb.Append(" | ");
+                sb.Append(offers[i].title);
+                if (!string.IsNullOrEmpty(offers[i].desc)) sb.Append(" — ").Append(offers[i].desc);
+            }
+            Debug.Log("[M40] 推卡文案 batch=" + batchId + " lang=" + Core.Localization.Language
+                      + " text=" + sb.ToString());
 
             // M37：onChosen 闭包捕获 batchId——回传时必须带它，房主才知道该应用哪一批。
             // 这是「客户端排队」的另一半：客户端这边排队保证不丢单，房主这边批次化保证不错配，
