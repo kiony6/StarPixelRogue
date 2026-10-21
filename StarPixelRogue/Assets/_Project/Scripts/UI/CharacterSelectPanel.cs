@@ -52,7 +52,13 @@ namespace StarPixel.UI
         private void Build()
         {
             if (_root != null) Core.UIFactory.Destroy(_root);
-            var canvas = Core.UIFactory.CreateCanvas("CharacterSelectCanvas");
+            // M51：必须显式站在**模态层**上。此前它与 MainMenuCanvas 同为 sortingOrder 0，
+            // 谁在上面全看 Unity 的内部排序——实测选出是"菜单在上"：
+            // 面板画在菜单底下不说，顶部那颗「关闭」恰好落在主菜单标题的字框里，
+            // 点上去没有任何反应——玩家点了「角色」就再也出不来了。
+            // 也是只有"不绕过 raycast 的真实点击"才看得见的那一类缺陷。
+            var canvas = Core.UIFactory.CreateCanvas("CharacterSelectCanvas", null,
+                Core.UIFactory.ModalSortingOrder);
             _root = canvas.gameObject;
 
             var panel = Core.UIFactory.CreatePanel(_root.transform, "Panel", Vector2.zero,

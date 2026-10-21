@@ -175,7 +175,11 @@ namespace StarPixel.Dev
             var menuRoot = MenuRoot();
             var charBtn = menuRoot != null ? menuRoot.Find("CharacterBtn") : null;
             if (charBtn == null) { Fail("主菜单找不到「角色」按钮"); yield break; }
-            charBtn.GetComponent<Button>().onClick.Invoke();
+            // M51：走真实点击那条路（先 raycast），点不到直接算失败——
+            // 否则"按钮被全屏遮罩盖住"在探针里永远看不见。
+            string why;
+            if (!UIHitTest.Click(charBtn.GetComponent<Button>(), out why))
+                Fail("主菜单「角色」按钮点不到：" + why);
             yield return null;
 
             var panel = CharacterSelectPanelNode();
@@ -190,8 +194,9 @@ namespace StarPixel.Dev
             var card1 = panel != null ? panel.Find("Card1") : null;
             var btn1 = card1 != null ? card1.Find("SelectBtn") : null;
             if (btn1 == null) { Fail("找不到 Card1 的选择按钮"); yield break; }
-            btn1.GetComponent<Button>().onClick.Invoke();
-            _selectClicked = true;
+            string whySel;
+            _selectClicked = UIHitTest.Click(btn1.GetComponent<Button>(), out whySel);
+            if (!_selectClicked) Fail("Card1「选择」按钮点不到：" + whySel);
             yield return null;
 
             // 4) 内存
@@ -240,7 +245,9 @@ namespace StarPixel.Dev
             if (close == null) Fail("找不到关闭按钮");
             else
             {
-                close.GetComponent<Button>().onClick.Invoke();
+                string whyClose;
+                if (!UIHitTest.Click(close.GetComponent<Button>(), out whyClose))
+                    Fail("关闭按钮点不到：" + whyClose);
                 yield return null;
                 var p4 = CharacterSelectPanelNode();
                 _selClose = p4 == null || !p4.gameObject.activeInHierarchy;

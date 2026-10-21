@@ -289,6 +289,7 @@ namespace StarPixel.Dev
             canvasGo.transform.SetParent(host.transform, false);
             var canvas = canvasGo.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.sortingOrder = Core.UIFactory.MenuSortingOrder;   // M51：显式声明层级
             canvasGo.AddComponent<CanvasScaler>();
             var txt = Core.UIFactory.CreateText(canvasGo.transform, "Probe", "中文探针",
                 new Vector2(0, 0), 24, TextAnchor.MiddleCenter, new Vector2(400, 40));

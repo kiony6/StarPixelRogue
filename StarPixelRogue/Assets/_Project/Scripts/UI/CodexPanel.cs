@@ -57,7 +57,9 @@ namespace StarPixel.UI
         private void Build()
         {
             if (_root != null) Core.UIFactory.Destroy(_root);
-            var canvas = Core.UIFactory.CreateCanvas("CodexCanvas");
+            // M51：同 SettingsPanel / CharacterSelectPanel——显式站在模态层。
+            var canvas = Core.UIFactory.CreateCanvas("CodexCanvas", null,
+                Core.UIFactory.ModalSortingOrder);
             _root = canvas.gameObject;
 
             var panel = Core.UIFactory.CreatePanel(_root.transform, "Panel", Vector2.zero,

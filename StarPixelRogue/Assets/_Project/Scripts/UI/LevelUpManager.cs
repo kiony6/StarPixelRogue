@@ -118,6 +118,51 @@ namespace StarPixel.UI
         }
 
         /// <summary>
+        /// M51：外力**无选择地**收面板（游戏结束时用）。
+        ///
+        /// 与 <see cref="Choose"/> 的区别：Choose 要应用所选强化并接着弹下一批；
+        /// 这里什么都不给，直接把面板连同队列一起抹掉。
+        /// 触发场景：玩家死在选卡面板开着的瞬间（联机里很常见——服务端把血打空时，
+        /// 客户端往往正停在 3 选 1 上）。此前没人管这件小事的后果是：
+        /// 结算面板被 LevelUpCanvas 的 BG 挡住，「离开对局」按钮点不到，
+        /// 玩家拿不到任何出口，只能杀进程。
+        ///
+        /// 幂等：面板没开时返回 false，什么也不做（尤其不碰 timeScale）。
+        /// </summary>
+        /// <returns>是否确实收掉了一张面板。</returns>
+        public bool DismissPanel()
+        {
+            if (!_active) return false;
+
+            var panel = transform.Find("LevelUpCanvas");
+            if (panel != null) Destroy(panel.gameObject);
+
+            _active = false;
+            _chooser = null;
+            _currentBatchId = 0;
+            // 队列里还压着的批次属于已经结束的这一局，绝不能再弹出来：
+            // 那时世界已经拆了，给一张卡等于给一次空指针。
+            _pendingExternal.Clear();
+            _pending = 0;
+
+            if (Core.HitstopManager.Instance != null) Core.HitstopManager.Instance.SetPaused(false);
+            else Time.timeScale = Core.HitstopManager.BaseScale;
+            return true;
+        }
+
+        /// <summary>
+        /// M51：结算面板出场前调用——收掉可能还开着的选卡面板。
+        /// 静态是刻意的：GameOverPanel 不该为了一件"可能没有"的事去碰 LevelUpManager 的实例。
+        /// </summary>
+        public static void DismissForRunEnd()
+        {
+            var m = Instance;
+            if (m == null) return;
+            if (m.DismissPanel())
+                Debug.Log("[M51] 结算前收掉仍开着的选卡面板（世界已结束，不再选卡）");
+        }
+
+        /// <summary>
         /// M17 无头实测：自动选择第一张升级卡。
         /// 正常游戏里选卡由玩家点击触发，且选卡期间会把 timeScale 归零暂停；
         /// 无头环境无人点击会一直卡在暂停态，导致实测死锁（M17 首轮就卡在这里）。
@@ -289,6 +334,10 @@ namespace StarPixel.UI
             canvasGO.transform.SetParent(transform, false);  // M5：随管理器一起拆世界
             var canvas = canvasGO.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            // M51：选卡面板必须压得住 HUD。此前它与 HUDCanvas 同为 sortingOrder 0，
+            // 谁在上面不由代码决定——CARD 场景实测里排出来的结果是 HUD 在上，
+            // 卡片按钮恰好落在血条的填充图上：看得见，点不到。
+            canvas.sortingOrder = Core.UIFactory.ModalSortingOrder;
             canvasGO.AddComponent<CanvasScaler>();
             canvasGO.AddComponent<GraphicRaycaster>();
 

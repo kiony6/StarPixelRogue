@@ -70,8 +70,11 @@ namespace StarPixel.Compliance
             var btn = _modalRoot != null ? _modalRoot.transform.Find("Mask/Panel/AgreeBtn") : null;
             var b = btn != null ? btn.GetComponent<UnityEngine.UI.Button>() : null;
             if (b == null) return false;
-            b.onClick.Invoke();
-            return true;
+            // M51：返回值原本只回答"按钮存不存在"，可注释里写的是"点不到本身就是缺陷
+            // （按钮缺失/层级不对）"——后半句一整天都没实现过：onClick.Invoke() 直接调
+            // 回调，按钮被一层遮罩盖住也照样"点得响"。于是这个接口永远返回 true，
+            // 合规门上一旦盖了东西，探针是看不见的。改成走真实点击路径。
+            return StarPixel.Dev.UIHitTest.Click(b);
         }
 
         /// <summary>M21 实测：点击「不同意并退出」（走真实 Disagree 路径）。</summary>
@@ -80,8 +83,7 @@ namespace StarPixel.Compliance
             var btn = _modalRoot != null ? _modalRoot.transform.Find("Mask/Panel/DisagreeBtn") : null;
             var b = btn != null ? btn.GetComponent<UnityEngine.UI.Button>() : null;
             if (b == null) return false;
-            b.onClick.Invoke();
-            return true;
+            return StarPixel.Dev.UIHitTest.Click(b);       // M51：同上，必须真的点得到
         }
 
         private void Build()

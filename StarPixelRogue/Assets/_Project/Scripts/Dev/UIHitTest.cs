@@ -243,6 +243,35 @@ namespace StarPixel.Dev
             return lhs.distance.CompareTo(rhs.distance);
         }
 
+        /// <summary>
+        /// M51：按**真实点击走的那条路**点一下按钮——先命中测试，被挡住就不点。
+        ///
+        /// 为什么所有探针都必须换成这个，而不是继续写 <c>btn.onClick.Invoke()</c>：
+        ///   <c>Invoke()</c> 是**直接调用回调**，把 EventSystem 的 raycast 整层绕过去。
+        ///   于是"一层全屏遮罩盖在按钮上"这类缺陷在探针眼里压根不存在：
+        ///   按钮照样被"点"响、回调照样执行、判据照样绿——而真实玩家此刻什么也点不到。
+        ///   M48 造了本类、M49 在长局探针里用上了，可 BuildProbe / SettingsProbe /
+        ///   UISettingsProbe 三处仍在裸调 <c>Invoke()</c>（M49 §8 遗留第 3 条）。
+        ///
+        /// 返回值一定要被判据用起来：点不到返回 false，调用方应当 Fail，
+        /// 而不是"点不响就跳过"——那等于替缺陷把证据擦掉。
+        /// </summary>
+        public static bool Click(Button btn, out string why)
+        {
+            var h = Probe(btn);
+            why = Describe(h);
+            if (!h.Found || !h.Reachable) return false;
+            btn.onClick.Invoke();
+            return true;
+        }
+
+        /// <summary>不关心原因的点法（结果由调用方自己的判据负责）。</summary>
+        public static bool Click(Button btn)
+        {
+            string ignored;
+            return Click(btn, out ignored);
+        }
+
         /// <summary>日志用的一句话结果。</summary>
         public static string Describe(Hit h)
         {

@@ -57,8 +57,19 @@ namespace StarPixel.UI
                 else Time.timeScale = 0f;
             }
 
+            // M51：出场前先把还开着的选卡面板收掉。
+            //
+            // 死在选卡面板开着的时候绝不罕见——选卡期间玩家仍能挨伤害，
+            // 而此刻 LevelUpCanvas 里那张全屏 BG 会挡住本面板的所有按钮。
+            // 结果是"结算出来了，但一个按钮都点不动"，玩家被困在结算界面里。
+            // 顺序上必须**先收再建**：反过来做的话，这一帧里两块 Overlay 仍同时在榜。
+            LevelUpManager.DismissForRunEnd();
+
             if (_root != null) Core.UIFactory.Destroy(_root);
-            var canvas = Core.UIFactory.CreateCanvas("GameOverCanvas");
+            // M51：钉死覆盖层级。两块 sortingOrder 相同的 Overlay Canvas 谁压谁
+            // 取决于 Hierarchy 顺序（等于未定义），结算这种"必须点到"的界面不能赌。
+            var canvas = Core.UIFactory.CreateCanvas("GameOverCanvas", null,
+                Core.UIFactory.TopSortingOrder);
             _root = canvas.gameObject;
 
             var panel = Core.UIFactory.CreatePanel(_root.transform, "Panel", Vector2.zero,

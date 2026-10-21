@@ -4555,6 +4555,89 @@ def _run_legal_fixtures(fixtures, checks=None):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+
+
+def check_probe_clicks_real_path():
+    """
+    点按钮必须走**真实点击路径**（M51）。
+
+    <c>btn.onClick.Invoke()</c> 是直接调用回调，把 EventSystem 的 raycast
+    整层绕过去。于是"一层全屏遮罩盖在按钮上"这类缺陷在探针眼里压根不存在：
+    按钮照样被"点"响、回调照样执行、判据照样绿——而真实玩家此刻什么也点不到。
+
+    M48 造了 UIHitTest、M49 在长局探针里用上了，可 BuildProbe / SettingsProbe /
+    UISettingsProbe 三处仍在裸调 Invoke()，ComplianceGate 的两个 *ForTest 接缝
+    更严重——它们的注释写着"点不到本身就是缺陷（按钮缺失/层级不对）"，
+    实现的却是"按钮存在就返回 true"（M49 §8 遗留第 3 条）。M51 全部改走
+    UIHitTest.Click 之后，这条固化成静态检查：**除实现本身之外，一处都不许有**。
+
+    为什么这条值得固化：这已经是同一类缺陷的第二个里程碑（M48 补 raycast 层、
+    M51 铺开），而"绕过那一层"的写法只要留一处，那个界面就永远测不出遮挡。
+    """
+    for path in cs_files():
+        if os.path.basename(path) == "UIHitTest.cs":
+            continue                       # 它就是实现，里面那次 Invoke 是对的
+        raw = read(path)
+        if "onClick" not in raw:
+            continue
+        clean = strip_noise(raw)           # 注释里提到不算
+        for m in re.finditer(r"\.\s*onClick\s*\.\s*Invoke\s*\(\s*\)", clean):
+            line = clean[:m.start()].count("\n") + 1
+            err("绕过真实点击路径直接调用按钮回调: %s 第 %d 行 onClick.Invoke()\n"
+                "      这是直接调用回调，EventSystem 的 raycast 整层被跳过——\n"
+                "      按钮上面盖着全屏遮罩时，探针照样点得响、判据照样绿，\n"
+                "      而真实玩家此刻什么也点不到（M48 补的就是这一层）。\n"
+                "      修法：改成 UIHitTest.Click(btn, out why)，并用返回值判失败。"
+                % (rel(path), line))
+
+
+def check_force_exit_teardown_order():
+    """
+    合规强制退出：**先拆世界、再收会话**（M51）。
+
+    顺序不是风格问题。拆世界那一刻本端**还是房主**，
+    <c>DespawnAllWorldObjects</c> 的反生成才广播得出去；先 Stop 就只剩本地销毁，
+    客户端那份副本会变成僵尸、再也不收不到反生成（M43 立下的规矩）。
+
+    M50 把"到点必须收会话"补上了，但"先拆后收"这件事只写在注释里，
+    没有任何东西守着——把两行调换一下，现有全部判据一条都不会红
+    （EXIT 场景能看出"断了"，看不出"拆的时候还是不是房主"）。
+    """
+    for path in cs_files():
+        rp = rel(path)
+        if '/Dev/' in rp.replace('\\', '/'):
+            continue
+        raw = read(path)
+        if 'ForceExitMinor' not in raw:
+            continue
+        clean = strip_noise(raw)
+        m = re.search(r'void\s+ForceExitMinor\s*\(\s*\)', clean)
+        if not m:
+            continue
+        brace = clean.find('{', m.end())
+        if brace < 0:
+            continue
+        body = _brace_body(clean, brace)
+        teardown = body.find('TeardownWorld')
+        leave = body.find('LeaveSession')
+        if leave < 0:
+            leave = body.find('Stop(')
+        if teardown < 0:
+            continue                       # 不是这套写法（可能整段被挪走了），交给别的项
+        if leave < 0:
+            err("强制退出没有收联机会话: %s\n"
+                "      到点只拆了世界。联机下世界没了连接还在：\n"
+                "      客户端退出了但房主仍认为他在场（继续替他刷怪/算伤害/掉宝石），\n"
+                "      房主则把权威世界拆空、客户端还连着一张不再刷新的空地图。\n"
+                "      修法：拆完世界后调 LeaveSession()（内部 Stop(false) → 回主菜单）。"
+                % rp)
+        elif leave < teardown:
+            err("强制退出先收会话、后拆世界: %s\n"
+                "      顺序反了。先 Stop 就不再是房主，DespawnAllWorldObjects 的反生成\n"
+                "      广播不出去——客户端那份副本会变成僵尸，永久留在场上（M43 的规矩）。\n"
+                "      修法：GameBuilder.TeardownWorld(); 然后再 LeaveSession();"
+                % rp)
+
 def _run_fixtures(fixtures, checks):
     """把夹具写进临时目录跑一遍指定检查，返回被报错的夹具名集合。"""
     import shutil
@@ -4577,6 +4660,485 @@ def _run_fixtures(fixtures, checks):
         ASSETS_DIR = saved
         errors[:], infos[:] = saved_errors, saved_infos
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+SELFTEST_CLICK = [
+    # ① M51 之后的样子：走 UIHitTest，点不到就有返回值可判
+    ("ck01_走命中测试", False, """
+namespace A
+{
+    public class B
+    {
+        void Go()
+        {
+            string why;
+            if (!UIHitTest.Click(btn, out why)) Fail("点不到：" + why);
+        }
+    }
+}
+"""),
+    # ② M51 之前的样子：裸调回调，被挡住也照点
+    ("ck02_裸调回调", True, """
+namespace A
+{
+    public class B
+    {
+        void Go()
+        {
+            btn.onClick.Invoke();
+        }
+    }
+}
+"""),
+    # ③ 只在注释里提到，不算
+    ("ck03_注释里提到", False, """
+namespace A
+{
+    public class B
+    {
+        // 旧写法是 btn.onClick.Invoke()，M51 改成下面这样
+        void Go()
+        {
+            UIHitTest.Click(btn);
+        }
+    }
+}
+"""),
+]
+
+SELFTEST_EXIT_ORDER = [
+    # ① 正确顺序：先拆世界（此时还是房主，反生成才广播得出去）再收会话
+    ("eo01_先拆后收", False, """
+namespace A
+{
+    public class B
+    {
+        private void ForceExitMinor()
+        {
+            GameBuilder.TeardownWorld();
+            if (networked) LeaveSession();
+        }
+    }
+}
+"""),
+    # ② 顺序反了：Stop 之后不再是房主，反生成广播不出去
+    ("eo02_先收后拆", True, """
+namespace A
+{
+    public class B
+    {
+        private void ForceExitMinor()
+        {
+            if (networked) LeaveSession();
+            GameBuilder.TeardownWorld();
+        }
+    }
+}
+"""),
+    # ③ M47 的形态：只拆世界，连接还在
+    ("eo03_只拆不收", True, """
+namespace A
+{
+    public class B
+    {
+        private void ForceExitMinor()
+        {
+            GameBuilder.TeardownWorld();
+            UI.MainMenu.Ensure();
+        }
+    }
+}
+"""),
+]
+
+# 第 29 项夹具 ==============================================================
+SELFTEST_GO_TOP = [
+    # ① M51 之后的样子：出场前先收选卡面板、再把结算钉到最顶层
+    ("gt01_先收钉顶", False, """
+namespace StarPixel.UI
+{
+    public class GameOverPanel
+    {
+        private void ShowRun(bool victory)
+        {
+            UI.LevelUpManager.DismissForRunEnd();
+            var canvas = Core.UIFactory.CreateCanvas("GameOverCanvas", null,
+                Core.UIFactory.TopSortingOrder);
+        }
+    }
+}
+"""),
+    # ② M51 之前的样子：不传层级，两块 Overlay 谁压谁全看 Hierarchy 顺序
+    ("gt02_没钉层级", True, """
+namespace StarPixel.UI
+{
+    public class GameOverPanel
+    {
+        private void ShowRun(bool victory)
+        {
+            UI.LevelUpManager.DismissForRunEnd();
+            var canvas = Core.UIFactory.CreateCanvas("GameOverCanvas");
+        }
+    }
+}
+"""),
+    # ③ 钉了层级、但没收选卡面板：结局界面还在，却被 BG 挡着点不动
+    ("gt03_没收选卡面板", True, """
+namespace StarPixel.UI
+{
+    public class GameOverPanel
+    {
+        private void ShowRun(bool victory)
+        {
+            var canvas = Core.UIFactory.CreateCanvas("GameOverCanvas", null,
+                Core.UIFactory.TopSortingOrder);
+        }
+    }
+}
+"""),
+    # ④ 收晚了：这一帧里两块 Overlay 仍在榜，先建后收等于没收
+    ("gt04_收在后面", True, """
+namespace StarPixel.UI
+{
+    public class GameOverPanel
+    {
+        private void ShowRun(bool victory)
+        {
+            var canvas = Core.UIFactory.CreateCanvas("GameOverCanvas", null,
+                Core.UIFactory.TopSortingOrder);
+            UI.LevelUpManager.DismissForRunEnd();
+        }
+    }
+}
+"""),
+    # ⑤ 别的画布不受这一条管辖
+    ("gt05_别的画布", False, """
+namespace StarPixel.UI
+{
+    public class HudBuilder
+    {
+        private void Build()
+        {
+            var canvas = Core.UIFactory.CreateCanvas("HudCanvas");
+        }
+    }
+}
+"""),
+]
+
+
+def strip_comments(text):
+    """
+    只剥注释、保留字符串字面量（M51 第 29 项专用）。
+
+    <c>strip_noise</c> 把注释与字符串一起抹平，多数检查需要的正是那种"只看骨架"的视角；
+    但凡要认 `"GameOverCanvas"` 这类字面量（建面板那一行的身份就在字符串里），
+    抹掉它就等于抹掉了判据本身。这里反过来：**只去注释，留字符串**。
+
+    手写扫描而非正则的理由与 strip_noise 同源：`//` 藏在 `"https://"` 里、
+    `/*` 藏在路径注释里，正则会把它们当成真注释起点，从那里一路吞掉后面的代码。
+    """
+    out = []
+    i, n = 0, len(text)
+    block = False
+    while i < n:
+        c = text[i]
+        if block:
+            if c == '*' and i + 1 < n and text[i + 1] == '/':
+                block = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if c == '/' and i + 1 < n and text[i + 1] == '/':
+            while i < n and text[i] != '\n':
+                i += 1
+            continue
+        if c == '/' and i + 1 < n and text[i + 1] == '*':
+            block = True
+            i += 2
+            continue
+        if c == '"':                                # 字符串整体照抄，一个字符不改
+            out.append(c)
+            i += 1
+            while i < n:
+                out.append(text[i])
+                if text[i] == '\\' and i + 1 < n:
+                    i += 2
+                    out.append(text[i - 1])
+                    continue
+                if text[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        out.append(c)
+        i += 1
+    return ''.join(out)
+
+
+def _paren_args(text, open_at):
+    """从 open_at 处的 '(' 起按括号深度取实参，返回去空白后的实参列表。"""
+    if open_at < 0 or open_at >= len(text) or text[open_at] != '(':
+        return []
+    depth, i, n = 0, open_at, len(text)
+    while i < n:
+        if text[i] == '(':
+            depth += 1
+        elif text[i] == ')':
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    if i >= n:
+        return []
+    body = text[open_at + 1:i]
+    parts, cur, depth = [], [], 0
+    for ch in body:
+        if ch == '(' or ch == '[':
+            depth += 1
+        elif ch == ')' or ch == ']':
+            depth -= 1
+        if ch == ',' and depth == 0:
+            parts.append(''.join(cur).strip())
+            cur = []
+            continue
+        cur.append(ch)
+    tail = ''.join(cur).strip()
+    if tail or parts:
+        parts.append(tail)
+    return parts
+
+
+# 第 30 项夹具 ==============================================================
+SELFTEST_CANVAS_LAYER = [
+    # ① 基准层：主菜单不抬层级
+    ("cv01_主菜单基准层", False, """
+namespace StarPixel.UI
+{
+    public class MainMenu
+    {
+        private void Build()
+        {
+            var canvas = Core.UIFactory.CreateCanvas("MainMenuCanvas");
+        }
+    }
+}
+"""),
+    # ② 模态面板显式声明层级
+    ("cv02_模态钉层级", False, """
+namespace StarPixel.UI
+{
+    public class SettingsPanel
+    {
+        private void Build()
+        {
+            var canvas = Core.UIFactory.CreateCanvas("SettingsCanvas", null,
+                Core.UIFactory.ModalSortingOrder);
+        }
+    }
+}
+"""),
+    # ③ M51 之前：模态与菜单同为 0，谁压谁听 Unity 的
+    ("cv03_模态没钉", True, """
+namespace StarPixel.UI
+{
+    public class CodexPanel
+    {
+        private void Build()
+        {
+            var canvas = Core.UIFactory.CreateCanvas("CodexCanvas");
+        }
+    }
+}
+"""),
+    # ④ 显式写 0 一样不算数——写出来只是把"没层级"翻译成一行代码
+    ("cv04_显式写0", True, """
+namespace StarPixel.UI
+{
+    public class DummyPanel
+    {
+        private void Build()
+        {
+            var canvas = Core.UIFactory.CreateCanvas("DummyCanvas", null, 0);
+        }
+    }
+}
+"""),
+    # ⑤ 基准层不许被抬起来：抬了它，其余各层就失去了共同的参照，
+    #    于是"没声明"的那些又变成听天由命
+    ("cv05_菜单被抬高", True, """
+namespace StarPixel.UI
+{
+    public class MainMenu
+    {
+        private void Build()
+        {
+            var canvas = Core.UIFactory.CreateCanvas("MainMenuCanvas", null,
+                Core.UIFactory.ModalSortingOrder);
+        }
+    }
+}
+"""),
+    # ⑥ 手工 AddComponent<Canvas>() 同样得声明层级
+    ("cv06_手工画布钉层级", False, """
+namespace StarPixel.UI
+{
+    public class LevelUpManager
+    {
+        private void BuildPanel()
+        {
+            var canvas = canvasGO.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.sortingOrder = Core.UIFactory.ModalSortingOrder;
+        }
+    }
+}
+"""),
+    # ⑦ 手工建却没写：与上面的实现差一行，恰恰是 CARD 场景红的那一行
+    ("cv07_手工画布没钉", True, """
+namespace StarPixel.UI
+{
+    public class Something
+    {
+        private void BuildPanel()
+        {
+            var canvas = canvasGO.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvasGO.AddComponent<CanvasScaler>();
+        }
+    }
+}
+"""),
+]
+
+
+def check_canvas_layer_order():
+    """
+    每个自建 Canvas 都必须**声明自己在哪一层**（M51 第 30 项）。
+
+    为什么这一条存在：两块 <c>sortingOrder</c> 相同的 Overlay Canvas 谁压谁，
+    不在代码里——而在 Unity 内部的排序里。写的人以为"后建的在上面"，
+    M51 实测打出来的却是 `MainMenuCanvas ro=1 > CharacterSelectCanvas ro=0`：
+    选角面板画在菜单**底下**，而它顶部那颗「关闭」恰好落在主菜单标题的字框里，
+    点上去毫无反应——玩家点了「角色」就再也出不来了。
+
+    在此之前这条缺陷从没露过面：`btn.onClick.Invoke()` 是把回调直接撸上来，
+    raycast 那层根本没参与，判据一片绿。M48 补了 raycast、M51 铺开真实点击之后，
+    它才第一次被看见。层级这种事一旦靠"刚好排成这样"，改动任意一处 UI 都会重排。
+
+    规矩两条：主菜单/HUD 是基准层（不许抬），其余都得自己说清楚站在哪一层
+    （<c>ModalSortingOrder</c> / <c>HintSortingOrder</c> / <c>TopSortingOrder</c> 或别的正数）。
+    手工 `AddComponent<Canvas>()` 的那几处同样要显式赋值——默认值不是答案。
+    """
+    for path in cs_files():
+        if os.path.basename(path) == "UIFactory.cs":
+            continue                       # 这里是默认值本身（0），不该被自己的规则判死
+        clean = strip_comments(read(path))
+
+        # ① 走 UIFactory.CreateCanvas 的：看第三个实参
+        for m in re.finditer(r'CreateCanvas(\s*)\(\s*"(\w+)"', clean):
+            name = m.group(2)
+            line = clean[:m.start()].count("\n") + 1
+            where = "%s 第 %d 行" % (rel(path), line)
+            parts = _paren_args(clean, m.start(1) + len(m.group(1)))
+            third = parts[2] if len(parts) >= 3 else ""
+            positive = ('SortingOrder' in third or 'sortingOrder' in third)
+            if not positive:
+                try:
+                    positive = int(third) > 0
+                except ValueError:
+                    positive = False
+
+            if name == "MainMenuCanvas":
+                if third not in ("", "0"):
+                    err("主菜单被抬离基准层: %s\n"
+                        "      主菜单是其余各层共同的参照，抬它等于把这个参照拔掉——\n"
+                        "      凡是没声明层级的画布又变回「听 Unity 内部排序」。\n"
+                        "      修法：CreateCanvas(\"MainMenuCanvas\")，不传排序参数。"
+                        % where)
+            elif not positive:
+                err("画布 %s 没有声明层级: %s\n"
+                    "      与主菜单同为 sortingOrder 0 时，谁压谁不由代码决定——\n"
+                    "      M51 实测里选角面板就画在了菜单底下，而它那颗「关闭」\n"
+                    "      恰好落在菜单标题的字框里：看得见、点不动，等同于没有出口。\n"
+                    "      修法：显式传 Core.UIFactory.ModalSortingOrder（浮在菜单上的面板）\n"
+                    "            或 TopSortingOrder（结算这类唯一出口）。"
+                    % (name, where))
+
+        # ② 手工 AddComponent<Canvas>() 的：旁边必须有一次 sortingOrder 赋值
+        for m in re.finditer(r'AddComponent\s*<\s*Canvas\s*>\s*\(\s*\)', clean):
+            line = clean[:m.start()].count("\n") + 1
+            near = clean[m.start():m.start() + 240]
+            if 'sortingOrder' not in near:
+                err("手工建的 Canvas 没有声明层级: %s 第 %d 行\n"
+                    "      不写 sortingOrder 就是「同一层里再听一次 Unity 的内部排序」——\n"
+                    "      M51 的 CARD 场景里，选卡面板因此被 HUD 的血条盖住：卡片看得见、点不到。\n"
+                    "      修法：紧接着补一句 canvas.sortingOrder = Core.UIFactory.XxxSortingOrder。"
+                    % (rel(path), line))
+
+
+def check_gameover_topmost():
+    """
+    结算面板必须**钉顶**且**出场前收掉选卡面板**（M51）。
+
+    两件事是同一个故障的两半：玩家死在选卡面板开着的那一刻时，
+    LevelUpCanvas 里那张与屏幕等大的 BG（Image 的 raycastTarget 默认开）
+    会盖住结算面板上的按钮。联机下那颗按钮叫「离开对局」——它是这局唯一的出口，
+    点不到就等于把玩家锁死在一张已经结束的画面里，只能杀进程。
+
+    两半都要治：收掉选卡面板保证屏幕上不再有别人；钉死 sortingOrder 保证
+    就算将来又冒出一个忘记关的层，被压住的也不会是出口。只治一半都不够——
+    不钉顶则任何"忘了关"都会复发，不收面板则这块透明的 BG 仍会吃掉别的判定。
+    """
+    for path in cs_files():
+        # 这里刻意**不用** strip_noise：它连字符串字面量一起抹掉，
+        # 而这条检查恰恰要靠 "GameOverCanvas" 这个字面量认出建面板那一行。
+        # 只需要去掉注释（注释里提到这种写法是本条的自我说明，不算数）。
+        clean = strip_comments(read(path))
+        m = re.search(r'CreateCanvas(\s*)\(\s*"GameOverCanvas"', clean)
+        if not m:
+            continue
+        line = clean[:m.start()].count("\n") + 1
+        where = "%s 第 %d 行" % (rel(path), line)
+
+        # 层级：第三个实参（sortingOrder）必须显式给出且 > 0。
+        # 实参位置由正则里那个 (\s*) 定位，跨度可能很长（实参还会换行对齐），
+        # 用 find/rfind 去找那个左括号都会在跨行调用上找错地方。
+        open_at = m.start(1) + len(m.group(1))
+        parts = _paren_args(clean, open_at)
+        top_ok = False
+        if len(parts) >= 3:
+            third = parts[2]
+            if 'TopSortingOrder' in third or 'sortingOrder' in third:
+                top_ok = True
+            else:
+                try:
+                    top_ok = int(third) > 0
+                except ValueError:
+                    top_ok = False
+        if not top_ok:
+            err("结算面板没有钉死覆盖层级: %s\n"
+                "      建 canvas 时不传 sortingOrder，两块 Overlay Canvas 谁压谁\n"
+                "      取决于 Hierarchy 顺序——同一份代码在不同机器上有时点得到按钮、\n"
+                "      有时点不到，而且被挡住的偏偏是「离开对局」这类唯一出口。\n"
+                "      修法：CreateCanvas(\"GameOverCanvas\", null, Core.UIFactory.TopSortingOrder)。"
+                % where)
+
+        # 收面板：必须在建面板**之前**
+        dismiss = clean.find('DismissForRunEnd')
+        if dismiss < 0:
+            err("结算面板出场前没收掉选卡面板: %s\n"
+                "      死在选卡面板开着的时候很常见（选卡期间照样挨伤害）。\n"
+                "      那时 LevelUpCanvas 的全屏 BG 会盖住这颗按钮——面板看得见、点不动，\n"
+                "      联机下就是「结算出来了，但离不了场」。\n"
+                "      修法：建面板前调 UI.LevelUpManager.DismissForRunEnd()。"
+                % where)
+        elif dismiss > m.start():
+            err("收选卡面板的时机在建面板之后: %s\n"
+                "      顺序反了意味着同一帧里两块 Overlay 仍在榜，此刻被压住的正是结算。\n"
+                "      修法：把 DismissForRunEnd() 挪到 CreateCanvas 之前。"
+                % where)
 
 
 def selftest():
@@ -4603,6 +5165,10 @@ def selftest():
         ("拆世界收面板检查（第 24 项）", SELFTEST_TD_PANEL, [check_teardown_closes_panel]),
         ("强制退出菜单可达检查（第 25 项）", SELFTEST_FORCE_EXIT, [check_force_exit_shows_menu]),
         ("建世界收提示检查（第 26 项）", SELFTEST_BUILD_HINT, [check_build_dismisses_hint]),
+        ("真实点击路径检查（第 27 项）", SELFTEST_CLICK, [check_probe_clicks_real_path]),
+        ("强制退出顺序检查（第 28 项）", SELFTEST_EXIT_ORDER, [check_force_exit_teardown_order]),
+        ("结算面板层级检查（第 29 项）", SELFTEST_GO_TOP, [check_gameover_topmost]),
+        ("画布层级声明检查（第 30 项）", SELFTEST_CANVAS_LAYER, [check_canvas_layer_order]),
     ]
 
     all_bad = 0
@@ -4662,6 +5228,10 @@ def main():
     check_teardown_closes_panel()
     check_force_exit_shows_menu()
     check_build_dismisses_hint()
+    check_probe_clicks_real_path()
+    check_force_exit_teardown_order()
+    check_gameover_topmost()
+    check_canvas_layer_order()
 
     n = len(cs_files())
     print("=" * 68)

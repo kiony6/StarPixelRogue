@@ -27,13 +27,49 @@ namespace StarPixel.Core
         }
         private static Font _font;
 
+        /// <summary>
+        /// M51：结算面板必须压在所有面板之上，否则它的按钮会被别处的全屏遮罩吃掉点击。
+        ///
+        /// 教训来自联机「离开对局」实测：死亡那一刻如果选卡面板还开着，LevelUpCanvas 里那张
+        /// 与屏幕等大的 BG（<see cref="Image"/>，alpha 0 但 raycastTarget 默认开）会盖住
+        /// GameOverCanvas 上的按钮。两个 Overlay Canvas 的 sortingOrder 都是 0，
+        /// GraphicRaycaster 按 order 排序时二者平级，谁先挡住 Metro 全看 Hierarchy 顺序——
+        /// 于是同一份代码在不同机器上"有时点得到、有时点不到"。
+        /// 结局与手感双输（点了没反应），所以结算这一层直接钉一个高 order。
+        /// </summary>
+        public const int TopSortingOrder = 9000;
+
+        /// <summary>
+        /// M51：叠在主菜单 / HUD 之上的那一层（设置 / 图鉴 / 选角 / 选卡）。
+        ///
+        /// 与 <see cref="TopSortingOrder"/> 分层而不是共用，是为了让两件事分开：
+        /// 模态只要压得住它底下的那一层（1000），而"玩家的出口"必须压得住一切
+        /// （9000）——真到了"设置压在结算之上"那天，需要的正是这两个数字差出来的一次比较。
+        /// </summary>
+        public const int ModalSortingOrder = 1000;
+
+        /// <summary>
+        /// M51：时耗提示遮罩所在的层。
+        ///
+        /// 它必须压得住选卡面板——预警弹出那一刻，屏幕上常常正停着一张 3 选 1，
+        /// 压不住的话这条提示是发给了空气（M49 的 CARD 场景就是问这件事）。
+        /// 又必须低于结算：结算上的「离开对局」是玩家唯一的出口，
+        /// 任何"挂在屏幕上忘了收"的东西压住它，都等于把人锁死。
+        /// </summary>
+        public const int HintSortingOrder = 5000;
+
+        /// <summary>主菜单 / HUD 所在层。基准层不抬，别的层才有参照。</summary>
+        public const int MenuSortingOrder = 0;
+
         /// <summary>全屏 Overlay Canvas（自动挂 Scaler + Raycaster）。</summary>
-        public static Canvas CreateCanvas(string name, Transform parent = null)
+        /// <param name="sortingOrder">覆盖层级；越大越靠前（渲染与射线命中同序）。</param>
+        public static Canvas CreateCanvas(string name, Transform parent = null, int sortingOrder = 0)
         {
             var go = new GameObject(name, typeof(RectTransform));
             if (parent != null) go.transform.SetParent(parent, false);
             var canvas = go.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.sortingOrder = sortingOrder;
             var scaler = go.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             scaler.referenceResolution = new Vector2(1280, 720);
@@ -149,7 +185,9 @@ namespace StarPixel.Core
         /// <summary>模态根：全屏半透明遮罩 + 居中容器。返回 (遮罩, 容器)。</summary>
         public static (GameObject mask, GameObject root) CreateModal(string name, Color maskColor)
         {
-            var canvas = CreateCanvas(name);
+            // M51：模态遮罩一律站在**提示层**上。它唯一要做的事就是"盖住眼前的一切"，
+            // 所以它不能与底下那些层同处 —— 否则"到底盖住了没有"取决于 Unity 的内部排序。
+            var canvas = CreateCanvas(name, null, HintSortingOrder);
             var mask = new GameObject("Mask", typeof(RectTransform));
             mask.transform.SetParent(canvas.transform, false);
             var mrt = (RectTransform)mask.transform;

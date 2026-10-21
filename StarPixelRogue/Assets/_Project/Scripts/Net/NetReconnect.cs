@@ -184,7 +184,7 @@ namespace StarPixel.Net
             root.transform.SetParent(transform, false);
             var canvas = root.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = 1000;                 // 置顶，盖过 HUD/大厅
+            canvas.sortingOrder = Core.UIFactory.ModalSortingOrder;   // M51：叠在 HUD/大厅之上
             var scaler = root.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             scaler.referenceResolution = new Vector2(1280, 720);

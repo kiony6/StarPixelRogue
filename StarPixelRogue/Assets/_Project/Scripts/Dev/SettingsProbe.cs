@@ -248,7 +248,11 @@ namespace StarPixel.Dev
             if (btn == null) { Fail("开关无 Button 组件 " + name); yield break; }
 
             bool before = ReadToggleText(node) == Localization.T("common.on");
-            btn.onClick.Invoke();
+            // M51：真实点击路径。旧写法 onClick.Invoke() 绕过了 raycast，
+            // 于是"前面盖了层东西"这种缺陷在探针里是隐形的。
+            string why;
+            bool clicked = UIHitTest.Click(btn, out why);
+            if (!clicked) Fail("开关点不到 " + name + "：" + why);
             yield return null;
 
             _panel = CurrentPanel();
@@ -570,7 +574,9 @@ namespace StarPixel.Dev
             var node = Find(name);
             var btn = node != null ? node.GetComponent<Button>() : null;
             if (btn == null) { Fail("找不到按钮 " + name); return; }
-            btn.onClick.Invoke();
+            // M51：走真实点击那条路（先 raycast 确认没被挡）。
+            string why;
+            if (!UIHitTest.Click(btn, out why)) Fail("按钮点不到 " + name + "：" + why);
         }
 
         void Update()

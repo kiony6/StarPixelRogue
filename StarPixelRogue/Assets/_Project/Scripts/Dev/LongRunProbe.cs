@@ -612,15 +612,20 @@ namespace StarPixel.Dev
         /// <summary>
         /// 按名字点一次场景里的 UI 按钮。找不到返回 false（判据会把它打成"未点到"）。
         ///
-        /// 注意它**绕过了 raycast**：<c>onClick.Invoke()</c> 是直接调用回调，
-        /// 按钮上面盖着几层遮罩都不影响。要验"玩家点不点得到"得用 <see cref="UIHitTest"/>。
+        /// M51：**必须走真实点击路径**。<c>onClick.Invoke()</c> 是直接调用回调，
+        /// 按钮上面盖着几层遮罩都不影响——于是"玩家其实点不到"这件事在探针里是隐形的。
+        /// 三个调用点（PANEL 的重开 / EXIT 的重新开始 / CARD 的关提示）在点之前
+        /// 本来就已经各有一条命中判据，说明它们**本来就期望点得到**；
+        /// 既然期望点得到，那就该真的点，而不是绕过那一层再自己骗自己。
         /// </summary>
         private static bool ClickButton(string name)
         {
             var b = FindButton(name);
             if (b == null) return false;
-            b.onClick.Invoke();
-            return true;
+            string why;
+            bool ok = UIHitTest.Click(b, out why);
+            if (!ok) Debug.Log("[SMOKE] 按钮点不到  " + name + "：" + why);
+            return ok;
         }
 
         private void ReportPanel()

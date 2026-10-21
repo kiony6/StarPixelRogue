@@ -36,6 +36,7 @@ namespace StarPixel.Dev
         private bool _stage1, _stage2, _stage3, _stage4, _stage5;
         private bool _toggleFound, _statusFound, _syncFound;
         private bool _switchTookEffect;
+        private bool _switchClicked;   // M51：开关真的被"点"到了（没被任何东西挡住）
         private string _zhStatus = "";
         private string _enStatus = "";
 
@@ -126,7 +127,18 @@ namespace StarPixel.Dev
             var panel = FindPanel();
             var toggle = panel != null ? panel.Find("CloudSaveToggle") : null;
             var btn = toggle != null ? toggle.GetComponent<Button>() : null;
-            if (btn != null) btn.onClick.Invoke();
+            if (btn == null) { _switchClicked = false; }
+            else
+            {
+                // M51：真实点击路径。旧写法 `if (btn != null) btn.onClick.Invoke()` 有两层躲避：
+                // ① 绕过 raycast（盖住也照点）；② 按钮不在时**静默跳过**，连失败都不报。
+                string why;
+                _switchClicked = UIHitTest.Click(btn, out why);
+                // 点不到就**当错误报**（而不是悄悄跳过）：本类没有 Fail()，
+                // 而 Debug.LogError 正好会进 _errors / _firstError——
+                // 红的时候日志里带得出"是被什么挡住的"，不用再去猜。
+                if (!_switchClicked) Debug.LogError("[SMOKE] 云存档开关点不到：" + why);
+            }
 
             var s = SettingsManager.Instance;
             _switchTookEffect = s != null && s.Current.cloudSave;
@@ -327,13 +339,18 @@ namespace StarPixel.Dev
             if (string.IsNullOrEmpty(leftover)) leftover = FirstMatch(_piecesEn, HasCjk);
             bool noCjk = string.IsNullOrEmpty(leftover);
 
-            bool pass = controls && _switchTookEffect && zhOk && enOk && lobbyOk && cardsOk
-                        && noRawKey && noCjk && _errors == 0;
+            // M51：`_switchClicked` 必须单列。旧判据只看"点完开关值变了没有"——
+            // 而开关被挡住时值也不会变，看着像"这个开关坏了"，其实是"你点不到它"。
+            // 把两件事分开判，红的时候才知道该去修哪一层。
+            bool pass = controls && _switchClicked && _switchTookEffect &&
+                        zhOk && enOk && lobbyOk && cardsOk &&
+                        noRawKey && noCjk && _errors == 0;
 
             Debug.Log("[SMOKE] ===== UI 实测结果 =====");
             Debug.Log("[SMOKE] 云存档开关控件  " + (_toggleFound ? "存在" : "缺失"));
             Debug.Log("[SMOKE] 云存档状态控件  " + (_statusFound ? "存在" : "缺失"));
             Debug.Log("[SMOKE] 立即同步控件    " + (_syncFound ? "存在" : "缺失"));
+            Debug.Log("[SMOKE] 开关可点到      " + (_switchClicked ? "是" : "否"));
             Debug.Log("[SMOKE] 开关点击生效    " + (_switchTookEffect ? "是" : "否"));
             // 注意：键与值之间必须留 2 个以上空格——解析脚本的 [SMOKE] 正则靠它切分
             Debug.Log("[SMOKE] 中文状态文案    " + _zhStatus);

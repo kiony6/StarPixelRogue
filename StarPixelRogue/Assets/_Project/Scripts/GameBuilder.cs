@@ -1189,6 +1189,9 @@ namespace StarPixel
             Track(canvasGO);                                 // 纳入拆世界范围，防重开后残留旧 HUD 画布
             var canvas = canvasGO.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            // M51：显式声明层级（基准层）。0 是默认值，但"默认"不是答案——
+            // 靠默认值活着的两块 Overlay 谁压谁，听的是 Unity 的内部排序，不是这份源码。
+            canvas.sortingOrder = Core.UIFactory.MenuSortingOrder;
             var scaler = canvasGO.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             scaler.referenceResolution = new Vector2(1280, 720);

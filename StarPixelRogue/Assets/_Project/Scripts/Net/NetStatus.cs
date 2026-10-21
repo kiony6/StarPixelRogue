@@ -24,6 +24,7 @@ namespace StarPixel.Net
             canvasGO.transform.SetParent(transform, false);   // M28：随管理器一起拆世界，防重开后残留画布
             var canvas = canvasGO.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.sortingOrder = Core.UIFactory.MenuSortingOrder;   // M51：显式声明层级
             var scaler = canvasGO.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             scaler.referenceResolution = new Vector2(1280, 720);

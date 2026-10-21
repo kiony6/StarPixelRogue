@@ -27,6 +27,7 @@ namespace StarPixel.UI
             go.transform.SetParent(transform, false);   // M5：随管理器一起拆世界，防重开后残留画布
             _canvas = go.AddComponent<Canvas>();
             _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            _canvas.sortingOrder = Core.UIFactory.MenuSortingOrder;   // M51：显式声明层级
             go.AddComponent<CanvasScaler>();
             go.AddComponent<GraphicRaycaster>();
             BuildTemplate();

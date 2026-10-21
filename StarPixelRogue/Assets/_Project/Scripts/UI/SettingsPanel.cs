@@ -89,7 +89,9 @@ namespace StarPixel.UI
         {
             if (_root != null) Core.UIFactory.Destroy(_root);
             Core.SettingsManager.Ensure();            // 设置数据必须先于控件读取
-            var canvas = Core.UIFactory.CreateCanvas("SettingsCanvas");
+            // M51：与选角同源——显式站在模态层，不再指望"谁后创建谁在上面"。
+            var canvas = Core.UIFactory.CreateCanvas("SettingsCanvas", null,
+                Core.UIFactory.ModalSortingOrder);
             _root = canvas.gameObject;
 
             // M13：620 → 700，为云存档区块腾出空间（仍低于 720p 屏高，不会溢出）。

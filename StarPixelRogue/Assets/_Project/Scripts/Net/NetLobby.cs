@@ -22,6 +22,14 @@ namespace StarPixel.Net
         /// </summary>
         public GameObject PanelRoot => _root;
 
+        /// <summary>
+        /// 当前状态行文案（M51：为无头实测提供定位入口）。
+        /// 与 <see cref="PanelRoot"/> 同理——"断线后玩家看到的是什么"这件事，
+        /// 只能从这行文字上读；读不到就只能断言"大厅建出来了"，
+        /// 而大厅建出来但写着"请选择模式"（等于什么都没解释）同样是个缺陷。
+        /// </summary>
+        public string StatusText => _statusText != null ? _statusText.text : "";
+
         void Awake()
         {
             BuildUI();
@@ -49,6 +57,7 @@ namespace StarPixel.Net
             _root = new GameObject("NetLobbyCanvas");
             var canvas = _root.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.sortingOrder = Core.UIFactory.MenuSortingOrder;   // M51：显式声明层级
             var scaler = _root.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             scaler.referenceResolution = new Vector2(1280, 720);

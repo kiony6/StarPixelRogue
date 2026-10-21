@@ -215,6 +215,16 @@ namespace StarPixel.Net
             // M37：玩家对象在房主侧反生成，未回应的供选批次一并作废——
             // 留着会让重连后的一次选择命中上一局的批次（等价于发错一张卡）
             _offerBatches.Clear();
+
+            // M51：房主侧同样要摘牌。
+            //
+            // Unregister 原先只写在 OnStopClient 里，那是"本机这一端"的视角：
+            // 客户端下线时它自己的对象会反生成，自然会走到。可在**房主**这边，
+            // 掉线的是别人的对象——房主只是服务端，OnStopClient 不会为它触发，
+            // 于是注册表里永远留着一个看不见、打不着、也算进人数的幽灵：
+            // 房主界面显示 2 人，实际上屋里只剩他自己（房主侧的扫人数判据据此失败）。
+            // 这一行对房间内的重连也无害：重连时会重新生成、重新 Register。
+            NetPlayerRegistry.Unregister(this);
             if (!string.IsNullOrEmpty(_reconnectToken) && _ctrl != null)
             {
                 var snap = _ctrl.CaptureProgression();

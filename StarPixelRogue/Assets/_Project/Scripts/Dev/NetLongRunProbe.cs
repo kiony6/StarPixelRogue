@@ -135,6 +135,45 @@ namespace StarPixel.Dev
         private bool _exMenuVisible, _exNetworkedAfter, _exWorldGone, _exRunningAfter, _exLocalAlive;
         private string _exNotice = "";
 
+        // —— M51 LEAVE：「离开对局」按钮走的那条路 ——
+        //
+        // M50 修掉了一个很安静的缺陷：FishNetBackend.Stop() 第一行把 OnClientConnectionState
+        // 退订了，而"主动离开"的全部收尾都写在那个回调里。于是结算面板上「离开对局」
+        // 点下去的真实后果是：连接断了，**世界还在、大厅没建、Mode 仍是 Client**。
+        // 注释写着"触发断线回调 → 重建联机大厅"，代码做的恰好是让那个回调不可能触发。
+        //
+        // 修完之后这条分支**没有任何测试走过**：M50 的 EXIT 场景走的是
+        // ForceExitMinor → Stop(false)（明确不重建大厅），恰好是相反的那一半。
+        // 也就是说 M50 只证明了"到点那条路不重建大厅是对的"，没有证明
+        // "离开对局这条路**会**重建大厅"。
+        //
+        // 场景分工同 EXIT：**客户端**当动作方（死 → 结算面板 → 点「离开对局」），
+        // 房主只旁观（问"他走了吗"）。理由一样——房主自己走会把整间房带走，
+        // 客户端那边是"被断线"，两条链会缠在一起，红一条分不清是谁的错。
+        private bool _lvPrepped, _lvClicked, _lvSampled;
+        private bool _lvPanelShown, _lvBtnFound, _lvHitOk, _lvBtnGone;
+        private bool _lvUnnetworked, _lvLobbyBack, _lvLobbyStatusOk, _lvWorldGone;
+        private bool _lvPlayersSelf, _lvLocalAliveHost;
+        private int _lvPlayersBefore = -1, _lvPlayersAfter = -1, _lvPlayersNow = -1;
+        private int _lvWaveBefore = -1, _lvWaveAfter = -1;
+        private float _lvScaleHost = -1f;
+        private string _lvHitDetail = "", _lvLobbyStatusText = "", _lvLobbyStatusBefore = "";
+
+        // —— M51 HOSTEXIT：房主自己到点，把整间房带走 ——
+        //
+        // M50 把"客户端到点"那条链走通了，房主那条一直没走。它不一样：
+        // 房主到点 = 服务端停止 = **整间房解散**，客户端不是"被踢"而是"房子没了"。
+        // 客户端在这条链上会先被 NetReconnect 抓走（它自己不知道这是主动关闭），
+        // 重试 5 次 × 1.5s 全失败后才 GiveUp → 回大厅。
+        // 这正是要测的：**玩家最终落到哪儿**。落到大厅是对的（还能再开一局，
+        // 也可以换一家）；卡在"正在重连"里出不来、或者落到一张空白场景，都是缺陷。
+        private bool _hxPrepped, _hxForced, _hxHostSampled, _hxRestored;
+        private bool _hxMinorOn, _hxStartOk, _hxHintAtWarn, _hxMenuVisible;
+        private bool _hxWorldGone, _hxUnnetworked, _hxLobbyBack, _hxLobbyStatusOk;
+        private int _hxWarnCount, _hxForceCount;
+        private float _hxSecAtForce, _hxSecAtWarn;
+        private string _hxNotice = "", _hxLobbyStatusText = "";
+
         private const int SEGMENTS = 6;
         private readonly List<Sample> _samples = new List<Sample>();
         private int _done;
@@ -176,7 +215,33 @@ namespace StarPixel.Dev
             p._isHost = NetSession.IsHost;
             Debug.Log("[SMOKE] 联机长局实测启动  场景=" + p._scene + " 角色=" + (p._isHost ? "房主" : "客户端") +
                       " 真实时长=" + p._limit.ToString("F0") + "s");
+
+            // M51：这两个场景要观察"回到联机大厅"，那就得先有大厅。
+            //
+            // 真实流程是：主菜单 → 联机大厅 → 点「创建/加入房间」→ NetLobby.OnBackendReady
+            // → EnterGame()（**销毁大厅 UI，保留组件**）→ GameBuilder.Build()。
+            // 无头入口（StartNetSmoke）直接 StartHost/StartClient，把大厅整段跳过了——
+            // 于是断线时 NotifyDisconnected 里的 FindObjectOfType<NetLobby>() 找不到任何东西，
+            // 直接 return，"大厅重建"这件事无从观察，判据也就只能退化成"没崩"。
+            //
+            // 这里补的就是被跳过的那一步：建出大厅（组件），再按 EnterGame 的做法销毁它的 UI。
+            // 为什么必须销毁：大厅画布是后建的 overlay，画布同 sortOrder 时后建的在上，
+            // 留着它会盖住结算面板的按钮——那会把"点不到按钮"变成一条假红。
+            if (p._scene == "LEAVE" || p._scene == "HOSTEXIT") EnsureLobbyScaffold();
         }
+
+        /// <summary>补出"从大厅进入对局"那一步（M51）：大厅组件在、UI 不在。</summary>
+        private static void EnsureLobbyScaffold()
+        {
+            var lobby = UnityEngine.Object.FindObjectOfType<NetLobby>();
+            if (lobby == null)
+            {
+                lobby = new GameObject("NetLobby").AddComponent<NetLobby>();
+                Debug.Log("[SMOKE] 已补建联机大厅（无头入口跳过了主菜单 → 大厅这一段）");
+            }
+            if (lobby.PanelRoot != null) UnityEngine.Object.Destroy(lobby.PanelRoot);
+        }
+
 
         // 静态事件必须退订（M29：销毁后委托链仍攥着本实例）
         private System.Action<int> _onKill;
@@ -216,6 +281,18 @@ namespace StarPixel.Dev
             if (_scene == "EXIT")
             {
                 TickExit();
+                return;
+            }
+
+            if (_scene == "LEAVE")
+            {
+                TickLeave();
+                return;
+            }
+
+            if (_scene == "HOSTEXIT")
+            {
+                TickHostExit();
                 return;
             }
 
@@ -739,7 +816,7 @@ namespace StarPixel.Dev
             _exMenuVisible = mm != null && mm.IsVisible;
             _exNotice = mm != null ? mm.NoticeText : "";
             _exNetworkedAfter = NetSession.IsNetworked;
-            _exWorldGone = EnemyManager.Instance == null;
+            _exWorldGone = WorldGone();
             _exRunningAfter = !Core.PlaytimeGuard.GameRunning;
             _exPlayersAfterSelf = PlayerCount();
         }
@@ -819,6 +896,308 @@ namespace StarPixel.Dev
                 Line("强制退出后会话", _exNetworkedAfter ? "仍连接" : "已断开");
                 Line("强制退出后主菜单", _exMenuVisible ? ("可见，提示「" + _exNotice + "」") : "不可见");
                 Line("强制退出后玩家", _exPlayersAfterSelf.ToString());
+                Line("首次异常", _firstError);
+            }
+
+            Line("结论", (_errors == 0 && _fail.Count == 0 && _ok == _checked) ? "通过" : "不通过");
+            foreach (var f in _fail) Line("失败项", f);
+        }
+
+        // =====================================================================================
+        //  LEAVE：「离开对局」必须真的把人带回大厅
+        // =====================================================================================
+
+        /// <summary>
+        /// M50 修的那个缺陷（Stop 先退订回调 → 主动离开分支永远走不到）修完之后，
+        /// **没有任何测试走过修好的那一半**：EXIT 场景走的是 Stop(false)，
+        /// 断言的恰恰是"**不**重建大厅"。所以到今天为止，"重建大厅"这件事一次都没被验证过——
+        /// 它可以一直是坏的，而所有判据全绿。
+        ///
+        /// 客户端当动作方：死 → 结算面板 → 点「离开对局」→ 必须落到大厅且带断线提示。
+        /// 房主只旁观，回答"他走了吗"（扫场 2 → 1）。
+        /// </summary>
+        private void TickLeave()
+        {
+            float L = _limit;
+
+            if (_isHost)
+            {
+                if (_lvPlayersBefore < 0 && _t >= L * 0.25f)
+                {
+                    _lvPlayersBefore = PlayerCount();
+                    _lvWaveBefore = Wave();
+                }
+                if (_lvPlayersAfter < 0 && _t >= L * 0.60f)
+                {
+                    _lvPlayersAfter = PlayerCount();
+                    _lvWaveAfter = Wave();
+                    var lp = NetPlayerRegistry.Local;
+                    _lvLocalAliveHost = lp != null && (lp.Damageable == null || !lp.Damageable.isDead);
+                    _lvScaleHost = Time.timeScale;
+                }
+            }
+            else
+            {
+                if (!_lvPrepped && _t >= L * 0.20f) { _lvPrepped = true; LeavePrep(); }
+                if (!_lvClicked && _t >= L * 0.30f) { _lvClicked = true; LeaveClick(); }
+                if (!_lvSampled && _t >= L * 0.40f) { _lvSampled = true; LeaveSample(); }
+            }
+
+            if (_t >= L)
+            {
+                ReportLeave();
+                enabled = false;
+            }
+        }
+
+        private void LeavePrep()
+        {
+            // 走**真实的**结算入口。NetPlayer 在服务端血量同步到 0 时调的就是
+            // EventBus.RaiseGameOver()（NetPlayer.cs 那个分支），HUDController 收到后
+            // 才发 OnRunEnded → GameOverPanel.ShowRun 建面板。
+            // 探针扮演的是"服务端告诉我我死了"这一步，**不碰面板**——
+            // 面板、按钮、回调全由产品代码自己建、自己接。
+            Core.EventBus.RaiseGameOver();
+            _lvPanelShown = FindLeaveButton() != null;
+        }
+
+        private static UnityEngine.UI.Button FindLeaveButton()
+        {
+            var canvas = GameObject.Find("GameOverCanvas");
+            if (canvas == null) return null;
+            var t = canvas.transform.Find("Panel/LeaveBtn");
+            return t != null ? t.GetComponent<UnityEngine.UI.Button>() : null;
+        }
+
+        private void LeaveClick()
+        {
+            var btn = FindLeaveButton();
+            _lvBtnFound = btn != null;
+            if (btn == null) { _lvHitDetail = "找不到「离开对局」按钮"; return; }
+            // 真实点击路径（先 raycast）。这条按钮尤其不能裸 Invoke：
+            // 玩家点它的时刻，屏幕上常常还摞着别的东西（结算面板自己、时长预警遮罩）。
+            _lvHitOk = UIHitTest.Click(btn, out _lvHitDetail);
+        }
+
+        private void LeaveSample()
+        {
+            _lvUnnetworked = !NetSession.IsNetworked;          // ResetToOffline 之后才是 false
+            var lobby = UnityEngine.Object.FindObjectOfType<NetLobby>();
+            _lvLobbyBack = lobby != null && lobby.PanelRoot != null && lobby.PanelRoot.activeInHierarchy;
+            _lvLobbyStatusText = lobby != null ? lobby.StatusText : "";
+            _lvLobbyStatusOk = _lvLobbyStatusText == Core.Localization.T("net.disconnected");
+            _lvWorldGone = WorldGone();
+            _lvBtnGone = GameObject.Find("GameOverCanvas") == null;
+            _lvPlayersNow = PlayerCount();
+        }
+
+        private void ReportLeave()
+        {
+            Debug.Log("[SMOKE] ===== 联机「离开对局」实测结果 =====");
+            Line("场景", _scene);
+            Line("角色", _isHost ? "房主" : "客户端");
+
+            if (_isHost)
+            {
+                Check("开局对端在场", _lvPlayersBefore >= 2);
+                Check("对端离开后被清", _lvPlayersAfter == _lvPlayersBefore - 1);
+                Check("房主世界继续推进", _lvWaveBefore >= 1 && _lvWaveAfter > _lvWaveBefore);
+                Check("房主自身不受影响", _lvLocalAliveHost && _lvScaleHost > 0.0001f);
+                Check("全程零异常", _errors == 0);
+
+                Line("断点通过", _ok + "/" + _checked);
+                Line("开局对端在场", Yn(_lvPlayersBefore >= 2));
+                Line("对端离开后被清", Yn(_lvPlayersAfter == _lvPlayersBefore - 1));
+                Line("房主世界继续推进", Yn(_lvWaveBefore >= 1 && _lvWaveAfter > _lvWaveBefore));
+                Line("房主自身不受影响", Yn(_lvLocalAliveHost && _lvScaleHost > 0.0001f));
+                Line("全程零异常", Yn(_errors == 0));
+                Line("开局场上玩家", _lvPlayersBefore.ToString());
+                Line("对端离开后玩家", _lvPlayersAfter.ToString());
+                Line("波次轨迹", _lvWaveBefore + " → " + _lvWaveAfter);
+                Line("房主 timeScale", _lvScaleHost.ToString("F2"));
+                Line("首次异常", _firstError);
+            }
+            else
+            {
+                // 1) 前置：面板真的建出来了。恒假的话下面"按钮点得到"之类都是平凡成立。
+                Check("结算面板已建出", _lvPanelShown);
+                // 2) 【核心前半】按钮必须真的点得到：M50 的修复让回调能跑到，
+                //    但玩家得先能点到它。这两件事是分开的两个缺陷来源。
+                Check("「离开对局」按钮点得到", _lvBtnFound && _lvHitOk);
+                // 3) 【核心】会话闭合。
+                Check("离开后已离开会话", _lvUnnetworked);
+                // 4) 【核心后半】大厅重建 + 断线提示。这两条是 M50 修复的
+                //    `_returnToLobbyOnStop` 分支，**至今没有任何测试覆盖过**：
+                //    旧实现下断线回调根本不会触发，这两条会同时红。
+                Check("离开后大厅已重建", _lvLobbyBack);
+                Check("离开后大厅有断线提示", _lvLobbyStatusOk);
+                Check("离开后世界已拆", _lvWorldGone);
+                Check("离开后结算面板已收", _lvBtnGone);
+                Check("离开后本端玩家已清", _lvPlayersNow == 0);
+                Check("全程零异常", _errors == 0);
+
+                Line("断点通过", _ok + "/" + _checked);
+                Line("结算面板已建出", Yn(_lvPanelShown));
+                Line("「离开对局」按钮点得到", Yn(_lvBtnFound && _lvHitOk));
+                Line("离开后已离开会话", Yn(_lvUnnetworked));
+                Line("离开后大厅已重建", Yn(_lvLobbyBack));
+                Line("离开后大厅有断线提示", Yn(_lvLobbyStatusOk));
+                Line("离开后世界已拆", Yn(_lvWorldGone));
+                Line("离开后结算面板已收", Yn(_lvBtnGone));
+                Line("离开后本端玩家已清", Yn(_lvPlayersNow == 0));
+                Line("全程零异常", Yn(_errors == 0));
+                Line("按钮命中详情", _lvHitDetail);
+                Line("大厅提示文案", _lvLobbyStatusText);
+                Line("离开后玩家", _lvPlayersNow.ToString());
+                Line("首次异常", _firstError);
+            }
+
+            Line("结论", (_errors == 0 && _fail.Count == 0 && _ok == _checked) ? "通过" : "不通过");
+            foreach (var f in _fail) Line("失败项", f);
+        }
+
+        // =====================================================================================
+        //  HOSTEXIT：房主自己到点，整间房被带走
+        // =====================================================================================
+
+        /// <summary>
+        /// M50 测的是"客户端到点"：他走，房主留下来。这一条是它的反面——
+        /// **房主到点**，服务端停止，整间房解散。客户端那侧根本不知道这是一次
+        /// 主动关闭，它会先被 NetReconnect 抓走（5 次 × 1.5s 全失败）才 GiveUp。
+        ///
+        /// 所以这一轮真正要回答的问题是：**玩家最后落到哪儿**。
+        ///   · 落到联机大厅：对。大厅还能再开一局/换一家；
+        ///   · 卡在"正在重连"里出不来：错；
+        ///   · 落到一张空白场景：错。
+        /// 这三种结局在"没崩、退出码 0"这一层是完全一样的，必须靠落点判据区分。
+        /// </summary>
+        private void TickHostExit()
+        {
+            float L = _limit;
+
+            if (_isHost)
+            {
+                if (!_hxPrepped && _t >= L * 0.20f) { _hxPrepped = true; HostExitPrep(); }
+                if (!_hxForced && _t >= L * 0.34f) { _hxForced = true; HostExitForce(); }
+                if (!_hxHostSampled && _t >= L * 0.44f) { _hxHostSampled = true; HostExitSample(); }
+            }
+            else if (_t >= L * 0.34f && !_hxLobbyBack)
+            {
+                // 客户端只能等，而且**不能单点采样**：重连有 5 次、每次 1.5s，
+                // 中途采样会时红时绿——那种判据跑三遍能得三个结论。
+                // 这里问的是"最终落点"，所以一旦落到大厅就锁存，之后不再改。
+                var lobby = UnityEngine.Object.FindObjectOfType<NetLobby>();
+                bool back = lobby != null && lobby.PanelRoot != null && lobby.PanelRoot.activeInHierarchy;
+                if (back)
+                {
+                    _hxLobbyBack = true;
+                    _hxLobbyStatusText = lobby.StatusText;
+                    _hxLobbyStatusOk = _hxLobbyStatusText == Core.Localization.T("net.disconnected");
+                    _hxWorldGone = WorldGone();
+                    _hxUnnetworked = !NetSession.IsNetworked;
+                }
+            }
+
+            if (_t >= L)
+            {
+                ReportHostExit();
+                enabled = false;
+            }
+        }
+
+        private void HostExitPrep()
+        {
+            Core.SettingsManager.Instance?.SetMinorMode(true);
+            Core.PlaytimeGuard.ResetToday();
+            Core.PlaytimeGuard.ResetCounters();
+
+            var g = Core.PlaytimeGuard.Instance;
+            _hxStartOk = g != null && Core.PlaytimeGuard.GameRunning;
+            _hxMinorOn = Core.SettingsManager.Instance != null &&
+                         Core.SettingsManager.Instance.Current.minorMode;
+
+            AdvancePlaytimeTo(Core.PlaytimeGuard.MinorDailyLimitSeconds - 60f);
+            if (g != null)
+            {
+                _hxSecAtWarn = g.TodaySeconds;
+                _hxWarnCount = g.WarnCount;
+                _hxHintAtWarn = g.HintShowing;
+            }
+        }
+
+        private void HostExitForce()
+        {
+            var g = Core.PlaytimeGuard.Instance;
+            if (g == null) return;
+            // 跨过上限：**真实的** ForceExitMinor（探针不自己拆世界、不自己断连）
+            AdvancePlaytimeTo(Core.PlaytimeGuard.MinorDailyLimitSeconds + 60f);
+            _hxSecAtForce = g.TodaySeconds;
+            _hxForceCount = g.ForceExitCount;
+        }
+
+        private void HostExitSample()
+        {
+            var mm = UI.MainMenu.Instance;
+            _hxMenuVisible = mm != null && mm.IsVisible;
+            _hxNotice = mm != null ? mm.NoticeText : "";
+            _hxUnnetworked = !NetSession.IsNetworked;
+            _hxWorldGone = WorldGone();
+        }
+
+        private void ReportHostExit()
+        {
+            // 绝不把青少年模式与已累计时长留在 settings.json / playtime.json 里：
+            // 两端共用一份数据目录，不恢复的话下一轮回归一开局就是"已到点"。
+            if (_isHost)
+            {
+                Core.SettingsManager.Instance?.SetMinorMode(false);
+                Core.PlaytimeGuard.ResetToday();
+            }
+
+            Debug.Log("[SMOKE] ===== 联机房主到点实测结果 =====");
+            Line("场景", _scene);
+            Line("角色", _isHost ? "房主" : "客户端");
+
+            if (_isHost)
+            {
+                Check("青少年模式且对局计时在走", _hxMinorOn && _hxStartOk);
+                Check("到点前弹出一次预警", _hxWarnCount == 1 && _hxHintAtWarn);
+                Check("到点恰好强制退出一次", _hxForceCount == 1);
+                Check("强制退出后已离开会话", _hxUnnetworked);
+                Check("强制退出后世界已拆", _hxWorldGone);
+                Check("强制退出后主菜单可见且有提示",
+                      _hxMenuVisible && !string.IsNullOrEmpty(_hxNotice) &&
+                      !_hxNotice.StartsWith("playtime."));
+                Check("全程零异常", _errors == 0);
+
+                Line("断点通过", _ok + "/" + _checked);
+                Line("青少年模式且对局计时在走", Yn(_hxMinorOn && _hxStartOk));
+                Line("到点前弹出一次预警", Yn(_hxWarnCount == 1 && _hxHintAtWarn));
+                Line("到点恰好强制退出一次", Yn(_hxForceCount == 1));
+                Line("强制退出后已离开会话", Yn(_hxUnnetworked));
+                Line("强制退出后世界已拆", Yn(_hxWorldGone));
+                Line("强制退出后主菜单可见且有提示", Yn(_hxMenuVisible && !string.IsNullOrEmpty(_hxNotice)));
+                Line("全程零异常", Yn(_errors == 0));
+                Line("时长轨迹", Mathf.RoundToInt(_hxSecAtWarn) + "（预警）→ " +
+                                Mathf.RoundToInt(_hxSecAtForce) + "（到点）");
+                Line("强制退出后主菜单", _hxMenuVisible ? ("可见，提示「" + _hxNotice + "」") : "不可见");
+                Line("首次异常", _firstError);
+            }
+            else
+            {
+                Check("房主到点后已离开会话", _hxUnnetworked);
+                Check("被带回联机大厅", _hxLobbyBack);
+                Check("大厅有断线提示", _hxLobbyStatusOk);
+                Check("本地世界已拆", _hxWorldGone);
+                Check("全程零异常", _errors == 0);
+
+                Line("断点通过", _ok + "/" + _checked);
+                Line("房主到点后已离开会话", Yn(_hxUnnetworked));
+                Line("被带回联机大厅", Yn(_hxLobbyBack));
+                Line("大厅有断线提示", Yn(_hxLobbyStatusOk));
+                Line("本地世界已拆", Yn(_hxWorldGone));
+                Line("全程零异常", Yn(_errors == 0));
+                Line("大厅提示文案", _hxLobbyStatusText);
                 Line("首次异常", _firstError);
             }
 
@@ -1102,6 +1481,26 @@ namespace StarPixel.Dev
         {
             var ws = NetWorldState.Instance;
             return ws != null ? ws.Wave : -1;
+        }
+
+        /// <summary>
+        /// M51：本端世界是否已拆——**刻意不靠 EnemyManager.Instance 判**。
+        ///
+        /// 联机世界里 EnemyManager 只建在房主侧（<c>BuildNetworked</c> 的 IsAuthority 分支），
+        /// 客户端从头到尾就没它，于是"客户端世界已拆"这条判据**恒绿**：
+        /// 哪怕本地世界一点没拆、管理器都还活着，`Instance == null` 依然是 true。
+        /// 这正是 M50 §5 记过的那种"永远绿的假判据"——注入组里它一次没红过，
+        /// 就是它没在看着任何东西的证据（Q2 期望 5 红、只来 3 红，缺的就是它）。
+        ///
+        /// 改看 PoolManager：两条建世界路径都是无条件建它（单机 <c>Build</c>、
+        /// 联机 <c>BuildNetworked</c>，后者还是 M18 修"联机下没有任何对象池"时补的），
+        /// 而 <c>TeardownWorld</c> 会当帧把 Instance 同步清掉（见那里 ClearSingletons 的注释）。
+        /// 于是它能把"真的拆了"和"只是 FishNet 把网络对象反生成了"区分开——
+        /// 后者正是"点了离开、连是断了、本地残骸全是原样"的形态。
+        /// </summary>
+        private static bool WorldGone()
+        {
+            return Core.PoolManager.Instance == null;
         }
 
         private static int GemCountNow(out int healths)
