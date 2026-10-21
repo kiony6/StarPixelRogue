@@ -71,6 +71,11 @@ namespace StarPixel.Player
             {
                 EventBus.RaisePlayerHurt();
                 EventBus.RaiseShake(0.14f, 0.14f);
+                // M53：挨打要看得见。此前只有震屏与红晕，二者都是"整块屏幕在变"，
+                // 落在角色身上的那一击反而没有实体感。
+                Fx.Spray(transform.position, Random.insideUnitCircle.normalized, new Color(1f, 0.35f, 0.32f),
+                    5, 3.4f, 0.26f, 0.3f, 1.2f, 6);
+                Fx.Flash(transform.position, new Color(1f, 0.5f, 0.45f), 1.3f, 0.2f, 6);
             }
             _prevHpRatio = ratio;
         }
@@ -353,6 +358,9 @@ namespace StarPixel.Player
             {
                 float spread = (count > 1) ? (i - (count - 1) / 2f) * 0.18f : 0f;
                 Vector2 d = Rotate(dir, spread);
+                // M53：枪口闪光。开火这件事原本只有音效，
+                // 玩家视野被弹幕填满时，是这一小簇火星在告诉他人开了几枪。
+                Fx.Spray(transform.position, d, new Color(1f, 0.92f, 0.6f), 2, 3.6f, 0.22f, 0.16f, 0.32f, 6);
                 if (_projectileSpawner != null)
                 {
                     // 联机：走网络弹丸（房主权威生成，客户端经 NetworkTransform 同步）
@@ -379,7 +387,24 @@ namespace StarPixel.Player
             {
                 if (dmgable != null && !dmgable.isDead) dmgable.TakeDamage(dmg);
             });
-            Effects.TempEffect.SpawnRing(transform.position, r, w.def.tags != null && System.Array.IndexOf(w.def.tags, "ice") >= 0 ? Color.cyan : Color.yellow);
+
+            // M53：Nova 是半径最大的一招，以前却只有一个实心方块往外撑——
+            // 撑到一半它就变成一块糊在屏幕上的雾，既看不出半径也看不出威力。
+            // 换成"两层冲击环 + 中心闪耀 + 沿环外缘撒火星"之后，打击范围本身才是可读的。
+            bool ice = w.def.tags != null && System.Array.IndexOf(w.def.tags, "ice") >= 0;
+            Color core = ice ? new Color(0.62f, 0.95f, 1f) : new Color(1f, 0.86f, 0.42f);
+            Color edge = ice ? new Color(0.42f, 0.82f, 1f) : new Color(1f, 0.62f, 0.25f);
+            Fx.Shockwave(transform.position, r * 0.25f, r * 1.08f, edge, 0.34f, 4);
+            Fx.Shockwave(transform.position, r * 0.15f, r * 0.78f, Color.white, 0.24f, 5);
+            Fx.Flash(transform.position, core, r * 1.15f, 0.24f, 5);
+            Fx.Glow(transform.position, core, r * 1.6f, 0.34f, 1);
+            // 沿环撒一圈火星：这是唯一能体现"半径到了这里"的表现
+            for (int i = 0; i < 10; i++)
+            {
+                float a = (i / 10f) * Mathf.PI * 2f;
+                Vector2 at = (Vector2)transform.position + new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * r * 0.92f;
+                Fx.Spray(at, new Vector2(Mathf.Cos(a), Mathf.Sin(a)), edge, 1, 2.2f, 0.24f, 0.26f, 0.25f, 5);
+            }
         }
 
         // —— M6.1 链闪电：在敌人之间跳跃，每跳伤害衰减 ——

@@ -25,6 +25,13 @@ namespace StarPixel.Combat.Skill
         private GameObject _template;
         private float _hitRadius = 0.35f;
 
+        // M53：尾焰。追踪弹会频繁改向，喷口那一串火星正是"它在追"的证据；
+        // 没有尾迹时它看着像一枚会拐弯的方块，读不出意图。
+        private float _trailTimer;
+        private float _sparkTimer;
+        private const float TrailInterval = 0.03f;
+        private const float SparkInterval = 0.07f;
+
         public void Launch(Vector2 origin, Vector2 dir, float dmg, float spd, float turn, GameObject template)
         {
             _template = template;
@@ -37,6 +44,8 @@ namespace StarPixel.Combat.Skill
             _retargetTimer = 0f;
             _elapsed = 0f;
             applySlow = false;
+            _trailTimer = 0f;
+            _sparkTimer = 0f;
             gameObject.SetActive(true);
         }
 
@@ -70,6 +79,22 @@ namespace StarPixel.Combat.Skill
             transform.position = (Vector2)transform.position + _dir * speed * Time.deltaTime;
             float zAngle = Mathf.Atan2(_dir.y, _dir.x) * Mathf.Rad2Deg;
             transform.rotation = Quaternion.Euler(0f, 0f, zAngle);
+
+            // 尾焰 + 零星火星：两者用不同间隔，彼此错开，
+            // 免得两条序列同步闪动、暴露出它们是由同一个计时器驱动的
+            _trailTimer -= Time.deltaTime;
+            if (_trailTimer <= 0f)
+            {
+                _trailTimer = TrailInterval;
+                StarPixel.Effects.Fx.Trail(transform.position, new Color(1f, 0.62f, 0.22f), 0.42f, 0.26f, 3);
+            }
+            _sparkTimer -= Time.deltaTime;
+            if (_sparkTimer <= 0f)
+            {
+                _sparkTimer = SparkInterval;
+                StarPixel.Effects.Fx.Spray(transform.position, -_dir, new Color(1f, 0.78f, 0.35f),
+                    1, 2.4f, 0.22f, 0.24f, 0.5f, 3);
+            }
 
             TryHit();
         }
@@ -110,6 +135,8 @@ namespace StarPixel.Combat.Skill
 
         void Die()
         {
+            StarPixel.Effects.Fx.Flash(transform.position, new Color(1f, 0.7f, 0.3f), 0.6f, 0.16f, 3);
+            StarPixel.Effects.Fx.Burst(transform.position, new Color(1f, 0.55f, 0.25f), 3, 3.2f, 0.22f, 0.22f, 3);
             if (_template != null) PoolManager.Instance.Release(_template, gameObject);
             else gameObject.SetActive(false);
         }

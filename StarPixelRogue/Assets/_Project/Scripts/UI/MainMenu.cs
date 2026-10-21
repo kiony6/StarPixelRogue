@@ -84,13 +84,22 @@ namespace StarPixel.UI
             var canvas = Core.UIFactory.CreateCanvas("MainMenuCanvas");
             _root = canvas.gameObject;
 
+            // M53：背景星点与压暗层。
+            // 刻意**不**为它新建一个 Canvas——每多一块 Overlay 就多一次"谁压谁"的题，
+            // 而放进 MainMenuCanvas 里当第一个子节点，层级关系在代码里是看得见的。
+            BuildBackdrop(_root.transform);
+
             // 标题区
-            Core.UIFactory.CreateText(_root.transform, "Title", Core.Localization.T("app.title"),
-                new Vector2(0, 260), 56);
-            Core.UIFactory.CreateText(_root.transform, "Subtitle", Core.Localization.T("app.subtitle"),
-                new Vector2(0, 214), 20);
-            Core.UIFactory.CreateText(_root.transform, "Version", Core.VersionInfo.Display,
+            Core.UIFactory.CreateTitle(_root.transform, "Title",
+                Core.UIFactory.GradientRich(Core.Localization.T("app.title"),
+                    Core.UIFactory.Palette.Accent, Core.UIFactory.Palette.AccentAlt),
+                new Vector2(0, 262), 62, new Vector2(1000, 96));
+            var sub = Core.UIFactory.CreateText(_root.transform, "Subtitle", Core.Localization.T("app.subtitle"),
+                new Vector2(0, 210), 22);
+            sub.color = Core.UIFactory.Palette.TextDim;
+            var ver = Core.UIFactory.CreateText(_root.transform, "Version", Core.VersionInfo.Display,
                 new Vector2(0, -300), 16);
+            ver.color = Core.UIFactory.Palette.TextDim;
 
             // 提示行（默认空）：联机提示 / 青少年到点提示
             Core.UIFactory.CreateText(_root.transform, "Notice", "",
@@ -102,50 +111,110 @@ namespace StarPixel.UI
                 if (notice != null) notice.text = Core.Localization.T("menu.hint_net");
             }
 
-            // 战绩面板
-            var panel = Core.UIFactory.CreatePanel(_root.transform, "Records", new Vector2(300, 0),
-                new Vector2(380, 300), new Color(0.08f, 0.09f, 0.14f, 0.92f));
-            Core.UIFactory.CreateText(panel.transform, "RecordsTitle", Core.Localization.T("menu.records"),
-                new Vector2(0, 122), 24);
-            Core.UIFactory.CreateText(panel.transform, "BestWave",
-                Core.Localization.T("menu.best_wave") + "：-", new Vector2(0, 82), 18,
-                TextAnchor.MiddleCenter, new Vector2(340, 30));
-            Core.UIFactory.CreateText(panel.transform, "BestTime",
-                Core.Localization.T("menu.best_time") + "：-", new Vector2(0, 52), 18,
-                TextAnchor.MiddleCenter, new Vector2(340, 30));
-            Core.UIFactory.CreateText(panel.transform, "BestLevel",
-                Core.Localization.T("menu.best_level") + "：-", new Vector2(0, 22), 18,
-                TextAnchor.MiddleCenter, new Vector2(340, 30));
-            Core.UIFactory.CreateText(panel.transform, "TotalRuns",
-                Core.Localization.T("menu.total_runs") + "：-", new Vector2(0, -8), 18,
-                TextAnchor.MiddleCenter, new Vector2(340, 30));
-            Core.UIFactory.CreateText(panel.transform, "LastRun",
-                Core.Localization.T("menu.last_run") + "：-", new Vector2(0, -38), 18,
-                TextAnchor.MiddleCenter, new Vector2(340, 30));
+            // 战绩面板（M53：圆角框 + 标题下的分隔线，与左边的按钮列形成分组）
+            var panel = Core.UIFactory.CreateRoundPanel(_root.transform, "Records", new Vector2(300, 0),
+                new Vector2(380, 300), Core.UIFactory.Palette.Deep);
+            Core.UIFactory.CreateTitle(panel.transform, "RecordsTitle", Core.Localization.T("menu.records"),
+                new Vector2(0, 122), 26, new Vector2(340, 40), Core.UIFactory.Palette.Accent);
+            Core.UIFactory.CreateDivider(panel.transform, "RecordsRule", new Vector2(0, 104), 320,
+                Core.UIFactory.Tint(Core.UIFactory.Palette.Accent, 1f, 0.5f));
 
-            // 主按钮列
+            // 战绩行：左侧标签、右侧数值——原先挤在一行居中，数字混在文字里，
+            // 玩家扫一眼读不到"最好成绩是多少"。
+            var rows = new[]
+            {
+                new Row("BestWave", Core.Localization.T("menu.best_wave"), 74),
+                new Row("BestTime", Core.Localization.T("menu.best_time"), 40),
+                new Row("BestLevel", Core.Localization.T("menu.best_level"), 6),
+                new Row("TotalRuns", Core.Localization.T("menu.total_runs"), -28),
+                new Row("LastRun", Core.Localization.T("menu.last_run"), -62),
+            };
+            foreach (var row in rows)
+            {
+                var label = Core.UIFactory.CreateText(panel.transform, row.node + "Label", row.label,
+                    new Vector2(-76, row.y), 18, TextAnchor.MiddleLeft, new Vector2(160, 30));
+                label.color = Core.UIFactory.Palette.TextDim;
+                var value = Core.UIFactory.CreateText(panel.transform, row.node, "-",
+                    new Vector2(96, row.y), 18, TextAnchor.MiddleRight, new Vector2(190, 30));
+                value.color = Core.UIFactory.Palette.Text;
+            }
+
+            // 主按钮列（M53：每颗给一条语义强调色——开始的绿、查看的青、退出的红，
+            // 光看颜色就能把"推进"和"离场"分开）
             Core.UIFactory.CreateButton(_root.transform, "StartBtn", Core.Localization.T("menu.start"),
                 new Vector2(-160, 40), new Vector2(280, 64), OnStartGame, 24,
-                new Color(0.20f, 0.45f, 0.28f, 1f));
+                Core.UIFactory.Tint(Core.UIFactory.Palette.Vital, 0.42f, 0.95f),
+                Core.UIFactory.Palette.Vital);
             Core.UIFactory.CreateButton(_root.transform, "CharacterBtn", Core.Localization.T("menu.character"),
                 new Vector2(-160, -40), new Vector2(280, 56),
-                () => { CharacterSelectPanel.Ensure(); CharacterSelectPanel.Instance.Show(); });
+                () => { CharacterSelectPanel.Ensure(); CharacterSelectPanel.Instance.Show(); },
+                20, Core.UIFactory.Palette.Raised, Core.UIFactory.Palette.AccentAlt);
             Core.UIFactory.CreateButton(_root.transform, "CodexBtn", Core.Localization.T("menu.codex"),
                 new Vector2(-160, -110), new Vector2(280, 56),
-                () => { CodexPanel.Ensure(); CodexPanel.Instance.Show(); });
+                () => { CodexPanel.Ensure(); CodexPanel.Instance.Show(); },
+                20, Core.UIFactory.Palette.Raised, Core.UIFactory.Palette.Accent);
             Core.UIFactory.CreateButton(_root.transform, "SettingsBtn", Core.Localization.T("menu.settings"),
                 new Vector2(-160, -180), new Vector2(280, 56),
-                () => { SettingsPanel.Ensure(); SettingsPanel.Instance.Show(); });
+                () => { SettingsPanel.Ensure(); SettingsPanel.Instance.Show(); },
+                20, Core.UIFactory.Palette.Raised, Core.UIFactory.Palette.AccentAlt);
             Core.UIFactory.CreateButton(_root.transform, "QuitBtn", Core.Localization.T("menu.quit"),
-                new Vector2(-160, -250), new Vector2(280, 56), OnQuit);
+                new Vector2(-160, -250), new Vector2(280, 56), OnQuit,
+                20, Core.UIFactory.Palette.Raised, Core.UIFactory.Palette.Danger);
 
             // 当前角色提示（M6.2）
-            Core.UIFactory.CreateText(_root.transform, "CurrentCharacter",
+            // 注意：这一行的文本被 BuildProbe 的 CurrentCharacterText 逐字比对，
+            // 因此它保持**纯文本**——不做渐变染色、也不加任何包装。
+            var currentChar = Core.UIFactory.CreateText(_root.transform, "CurrentCharacter",
                 Core.Localization.T("menu.character") + "：" +
                 Core.Localization.T(Player.CharacterManager.Selected.nameKey),
-                new Vector2(160, 40), 18, TextAnchor.MiddleLeft, new Vector2(280, 40));
+                new Vector2(20, 268), 18, TextAnchor.MiddleLeft, new Vector2(320, 40));
+            currentChar.color = Core.UIFactory.Palette.TextDim;
 
             RefreshRecords();
+        }
+
+        /// <summary>战绩行的一段：[标签节点名, 标签文案, y 坐标]。</summary>
+        private struct Row
+        {
+            public string node;
+            public string label;
+            public float y;
+
+            public Row(string node, string label, float y)
+            {
+                this.node = node;
+                this.label = label;
+                this.y = y;
+            }
+        }
+
+        /// <summary>
+        /// M53：菜单背景。星场 + 一层压暗，两者都占满画布、
+        /// 都不接射线（它们是背景，不许吃掉按钮的点击——见 UIHitTest 的由来）。
+        /// </summary>
+        private static void BuildBackdrop(Transform canvasRoot)
+        {
+            var bg = new GameObject("StarfieldBG", typeof(RectTransform));
+            bg.transform.SetParent(canvasRoot, false);
+            var rt = (RectTransform)bg.transform;
+            rt.anchorMin = Vector2.zero;
+            rt.anchorMax = Vector2.one;
+            rt.offsetMin = Vector2.zero;
+            rt.offsetMax = Vector2.zero;
+            var field = bg.AddComponent<StarfieldUI>();
+            field.Build(110, new Color(0.72f, 0.84f, 1f));
+
+            // 压暗层：星点在标题底下继续闪很好看，在整屏文字底下就成了干扰。
+            var veilTrans = new GameObject("Veil", typeof(RectTransform));
+            veilTrans.transform.SetParent(canvasRoot, false);
+            var vrt = (RectTransform)veilTrans.transform;
+            vrt.anchorMin = Vector2.zero;
+            vrt.anchorMax = Vector2.one;
+            vrt.offsetMin = Vector2.zero;
+            vrt.offsetMax = Vector2.zero;
+            var veil = veilTrans.AddComponent<UnityEngine.UI.Image>();
+            veil.color = new Color(0.02f, 0.03f, 0.07f, 0.45f);
+            veil.raycastTarget = false;
         }
 
         /// <summary>刷新战绩文本（进入菜单/一局结束时调用）。</summary>

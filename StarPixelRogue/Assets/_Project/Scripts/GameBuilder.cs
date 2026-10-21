@@ -742,6 +742,12 @@ namespace StarPixel
             EnsureCameraShake();   // M14：补齐联机路径缺失的相机跟随/震屏组件
             SetupEventSystem();
 
+            // M53：程序化界面/特效贴图的唯一生成窗口。必须在任何 Probe 或界面构建之前——
+            // 详见 StarPixel.Core.SpriteFactory.PrecacheShapes 的注释：gpu_probe 的
+            // BURST / RESTART 是以"连放特效后纹理零增量"为判据的，纹理若在这些形状
+            // 的首次使用时才生成，就会被那条判据当成泄漏。
+            Core.SpriteFactory.PrecacheShapes();
+
             // M16 跨平台：部分移动设备默认锁 30 帧，弹幕玩法下手感会明显变差，故显式锁 60
             if (Core.PlayerInput.TouchPlatform) Application.targetFrameRate = 60;
         }
@@ -792,6 +798,9 @@ namespace StarPixel
             // 上一局的实体会整批漏到新世界：看得见却捡不起来的宝石、围着旧玩家坐标转的幽灵敌人。
             // ResetAll 处理"还在场上的"，DestroyAll 处理"已经归还到池里的"，两者缺一不可。
             Core.PoolManager.Instance?.DestroyAll();
+            // M53：池化粒子的本体由上面这一句收掉，这里清的是 Fx 自己的静态登记表
+            // （不清的话下一局的 ActiveCount 从上一局的残账起步，上限判定形同虚设）。
+            Effects.Fx.Reset();
             PickupManager.Instance?.ResetAll();
             // M42：联机掉落物账本是**静态**的（NetWorld 不随世界销毁），不清就会跨局残留
             // 一堆悬空引用，下一局的上限判定全建立在别人的残账上。
@@ -920,10 +929,16 @@ namespace StarPixel
             var boomerangTemplate = Track(CreateBoomerangTemplate());   // M6.1
             var homingTemplate = Track(CreateHomingTemplate());         // M6.1
             var mineTemplate = Track(CreateMineTemplate());             // M9
+            var fxTemplate = Track(CreateFxTemplate());                 // M53 显现特效池模板
+            Effects.Fx.SetTemplate(fxTemplate);
             var gemTemplate = Track(CreateGemTemplate());
             var healthTemplate = Track(CreateHealthTemplate());
             var bossTemplate = Track(CreateBossTemplate());
             var enemyProjectileTemplate = Track(CreateEnemyProjectileTemplate());
+
+            // M53：对局背景星场（相机视差）。它是"玩家正在移动"的唯一参照物。
+            var fieldSP = Track(new GameObject("Starfield").AddComponent<Core.StarfieldWorld>());
+            fieldSP.Build(150, 4);
 
             AttachCameraShake(player.transform);
             EnsureTouchJoystick();                      // M16 跨平台：触屏虚拟摇杆
@@ -969,8 +984,15 @@ namespace StarPixel
             Track(new GameObject("ComboManager").AddComponent<ComboManager>());
             Track(new GameObject("SfxManager").AddComponent<Core.SfxManager>());
             Track(new GameObject("DamageNumberManager").AddComponent<DamageNumberManager>());
+            // M18 教训：单机路径有的，联机路径也必须有一份——少了 PoolManager 时
+            // 房主 60 秒抛出 14 条 NullReferenceException。Fx 模板同理走这条线注入。
+            Effects.Fx.SetTemplate(Track(CreateFxTemplate()));
             Track(new GameObject("LevelUpManager").AddComponent<LevelUpManager>());
             Track(new GameObject("HitstopManager").AddComponent<Core.HitstopManager>());   // M8 手感：命中停顿/选卡暂停时间缩放
+
+            // M53：联机路径同样要有背景星场（与单机同一个生成形态，随世界一起拆）
+            var fieldNet = Track(new GameObject("Starfield").AddComponent<Core.StarfieldWorld>());
+            fieldNet.Build(150, 4);
 
             var hud = new GameObject("HUD").AddComponent<HUDController>();
             Track(hud);
@@ -1131,6 +1153,26 @@ namespace StarPixel
             return go;
         }
 
+        /// <summary>
+        /// M53：显现特效的池模板。
+        ///
+        /// 与其余模板同一个生成形态（工厂方法 + 调用方 Track），因此随世界一起拆。
+        /// 粒子实例本身不走这里——它们由 <see cref="Core.PoolManager"/> 按需克隆，
+        /// 拆世界时随那份池一起销毁，因此不需要第二次登记。
+        /// </summary>
+        private static GameObject CreateFxTemplate()
+        {
+            var go = new GameObject("FxTemplate");
+            var sr = go.AddComponent<SpriteRenderer>();
+            sr.sprite = Core.SpriteFactory.MakeSolidSprite();
+            sr.color = Color.white;                    // 颜色由每颗粒子自己覆盖
+            sr.sortingOrder = 4;
+            go.transform.localScale = Vector3.one;
+            go.AddComponent<StarPixel.Effects.FxSprite>();
+            go.SetActive(false);
+            return go;
+        }
+
         private static GameObject CreateGemTemplate()
         {
             var go = new GameObject("GemTemplate");
@@ -1212,13 +1254,14 @@ namespace StarPixel
             hud.modeText.color = new Color(0.7f, 0.85f, 1f, 0.9f);
             if (!Net.NetSession.IsNetworked) hud.modeText.gameObject.SetActive(false);
 
-            hud.hpSlider = CreateBar(canvasGO.transform, "HPBar",
+            // M53：HUD 三条进度条改走 UIFactory 的圆角发光条（同一批子节点名不变）。
+            hud.hpSlider = Core.UIFactory.CreateBar(canvasGO.transform, "HPBar",
                 new Vector2(0, 78), new Vector2(320, 18),
-                new Color(0.12f, 0.12f, 0.15f, 0.85f), new Color(0.92f, 0.24f, 0.30f), 1f, true);
+                Core.UIFactory.Palette.Deep, Core.UIFactory.Palette.Danger, 1f, true);
 
-            hud.xpSlider = CreateBar(canvasGO.transform, "XPBar",
+            hud.xpSlider = Core.UIFactory.CreateBar(canvasGO.transform, "XPBar",
                 new Vector2(0, 54), new Vector2(320, 12),
-                new Color(0.12f, 0.12f, 0.15f, 0.85f), new Color(0.30f, 0.62f, 1f), 0f, true);
+                Core.UIFactory.Palette.Deep, Core.UIFactory.Palette.Accent, 0f, true);
 
             // M14 观战：没有自己的角色，隐藏玩家专属的血量/经验条（波次/Boss 等全局信息仍显示）
             if (Net.NetSession.Spectator)
@@ -1227,9 +1270,9 @@ namespace StarPixel
                 hud.xpSlider.gameObject.SetActive(false);
             }
 
-            hud.bossSlider = CreateBar(canvasGO.transform, "BossBar",
+            hud.bossSlider = Core.UIFactory.CreateBar(canvasGO.transform, "BossBar",
                 new Vector2(0, 300), new Vector2(540, 22),
-                new Color(0.20f, 0.05f, 0.08f, 0.9f), new Color(1f, 0.28f, 0.38f), 1f, false);
+                new Color(0.20f, 0.05f, 0.08f, 0.9f), Core.UIFactory.Palette.Danger, 1f, false);
             hud.bossBarRoot = hud.bossSlider.gameObject;
 
             hud.zoneText = CreateText(canvasGO.transform, "", new Vector2(0, 250), 30);
@@ -1251,52 +1294,6 @@ namespace StarPixel
             wtRt.sizeDelta = new Vector2(360, 160);
         }
 
-        /// <summary>创建带背景与填充的进度条（可隐藏），返回 Slider。</summary>
-        private static Slider CreateBar(Transform parent, string name, Vector2 pos, Vector2 size,
-            Color bgColor, Color fillColor, float value, bool visible)
-        {
-            var root = new GameObject(name, typeof(RectTransform));
-            root.transform.SetParent(parent, false);
-            var rt = (RectTransform)root.transform;
-            rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
-            rt.anchoredPosition = pos;
-            rt.sizeDelta = size;
-
-            var bg = root.AddComponent<Image>();
-            bg.color = bgColor;
-
-            var slider = root.AddComponent<Slider>();
-
-            var fillArea = new GameObject("Fill Area", typeof(RectTransform));
-            fillArea.transform.SetParent(root.transform, false);
-            var faRt = (RectTransform)fillArea.transform;
-            faRt.anchorMin = new Vector2(0, 0);
-            faRt.anchorMax = new Vector2(1, 1);
-            faRt.offsetMin = new Vector2(2, 2);
-            faRt.offsetMax = new Vector2(-2, -2);
-
-            var fill = new GameObject("Fill", typeof(RectTransform));
-            fill.transform.SetParent(fillArea.transform, false);
-            var fillRt = (RectTransform)fill.transform;
-            fillRt.anchorMin = new Vector2(0, 0);
-            fillRt.anchorMax = new Vector2(1, 1);
-            fillRt.offsetMin = Vector2.zero;
-            fillRt.offsetMax = Vector2.zero;
-            var fillImg = fill.AddComponent<Image>();
-            fillImg.color = fillColor;
-
-            slider.fillRect = fillRt;
-            slider.targetGraphic = fillImg;
-            slider.direction = Slider.Direction.LeftToRight;
-            slider.minValue = 0f;
-            slider.maxValue = 1f;
-            slider.value = value;
-            slider.transition = Selectable.Transition.None;
-
-            root.SetActive(visible);
-            return slider;
-        }
-
         private static Text CreateText(Transform parent, string content, Vector2 anchoredPos, int size)
         {
             var go = new GameObject("Text", typeof(RectTransform));
@@ -1308,6 +1305,8 @@ namespace StarPixel
             t.alignment = TextAnchor.MiddleCenter;
             t.fontSize = size;
             t.horizontalOverflow = HorizontalWrapMode.Overflow;
+            // M53：HUD 是压在弹幕之上的，纯白字压在亮色特效上会糊成一团。
+            Core.UIFactory.ApplyOutline(t, Core.UIFactory.Palette.Outline, 2f);
             var rt = (RectTransform)go.transform;
             rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
             rt.anchoredPosition = anchoredPos;

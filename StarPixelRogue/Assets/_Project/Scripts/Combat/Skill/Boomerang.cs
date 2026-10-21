@@ -28,6 +28,12 @@ namespace StarPixel.Combat.Skill
         // 每趟（去/回）已命中的敌人实例 id：保证同一敌人单趟只受一次伤害
         private readonly HashSet<int> _hitThisPass = new HashSet<int>();
 
+        // M53：月刃的拖尾。它是唯一会在屏幕上折返两次的弹体，
+        // 拖尾在这里不只是好看——它是玩家判断"回程到哪了"的唯一线索。
+        private float _trailTimer;
+        private SpriteRenderer _sr;
+        private const float TrailInterval = 0.045f;
+
         public void Launch(Vector2 origin, Vector2 dir, float dmg, float spd, float range, GameObject template)
         {
             _template = template;
@@ -41,6 +47,8 @@ namespace StarPixel.Combat.Skill
             _life = 4f;
             applySlow = false;
             _hitThisPass.Clear();
+            _trailTimer = 0f;
+            if (_sr == null) _sr = GetComponent<SpriteRenderer>();
             transform.position = origin;
             gameObject.SetActive(true);
         }
@@ -81,6 +89,15 @@ namespace StarPixel.Combat.Skill
             transform.position = pos;
             transform.Rotate(0f, 0f, 720f * Time.deltaTime);   // 自旋表现
 
+            _trailTimer -= Time.deltaTime;
+            if (_trailTimer <= 0f)
+            {
+                _trailTimer = TrailInterval;
+                if (_sr == null) _sr = GetComponent<SpriteRenderer>();
+                StarPixel.Effects.Fx.Trail(pos,
+                    _sr != null ? _sr.color : new Color(0.85f, 0.95f, 1f), 0.75f, 0.3f, 3);
+            }
+
             TryHit(pos);
         }
 
@@ -118,6 +135,7 @@ namespace StarPixel.Combat.Skill
 
         void Die()
         {
+            StarPixel.Effects.Fx.Flash(transform.position, new Color(0.85f, 0.95f, 1f), 0.7f, 0.16f, 3);
             if (_template != null) PoolManager.Instance.Release(_template, gameObject);
             else gameObject.SetActive(false);
         }

@@ -20,6 +20,12 @@ namespace StarPixel.Combat.Skill
         private GameObject _template;
         private float _hitRadius = 0.35f;
 
+        // M53：拖尾。弹丸的速度是全项目最快的（14 单位/秒 ≈ 每帧四分之一屏），
+        // 没有拖尾时它在玩家眼里只是"每隔几帧换个位置"，读不出飞向哪儿。
+        private float _trailTimer;
+        private SpriteRenderer _sr;
+        private const float TrailInterval = 0.035f;
+
         public void Launch(Vector2 origin, Vector2 dir, float dmg, float spd, float pierceCount, GameObject template)
         {
             _template = template;
@@ -29,6 +35,8 @@ namespace StarPixel.Combat.Skill
             pierce = pierceCount;
             applySlow = false;
             _elapsed = 0f;
+            _trailTimer = 0f;
+            if (_sr == null) _sr = GetComponent<SpriteRenderer>();
             float angle = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
             transform.rotation = Quaternion.Euler(0, 0, angle);
             gameObject.SetActive(true);
@@ -38,6 +46,17 @@ namespace StarPixel.Combat.Skill
         {
             _elapsed += Time.deltaTime;
             transform.Translate(Vector2.right * speed * Time.deltaTime, Space.Self);
+
+            // 拖尾按时长而不是按帧：帧率一高就每帧留一颗，等于把上限直接吃满，
+            // 而玩家看到的密度是一样的（视觉由留存时间决定，不由帧数决定）。
+            _trailTimer -= Time.deltaTime;
+            if (_trailTimer <= 0f)
+            {
+                _trailTimer = TrailInterval;
+                if (_sr == null) _sr = GetComponent<SpriteRenderer>();
+                StarPixel.Effects.Fx.Trail(transform.position,
+                    _sr != null ? _sr.color : Color.yellow, 0.55f, 0.22f, 3);
+            }
 
             if (_elapsed >= lifeTime) { Die(); return; }
 
@@ -71,6 +90,11 @@ namespace StarPixel.Combat.Skill
 
         void Die()
         {
+            // M53：出膛要有交代。此前弹丸飞到生命尽头就凭空消失，
+            // 玩家分不清"打空了"还是"打到人了"；留一小团余晖表示该做的事做完了。
+            if (_sr == null) _sr = GetComponent<SpriteRenderer>();
+            StarPixel.Effects.Fx.Flash(transform.position,
+                _sr != null ? _sr.color : Color.yellow, 0.5f, 0.14f, 3);
             if (_template != null) Core.PoolManager.Instance.Release(_template, gameObject);
             else gameObject.SetActive(false);
         }

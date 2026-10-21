@@ -352,31 +352,128 @@ namespace StarPixel.UI
             brt.offsetMin = Vector2.zero;
             brt.offsetMax = Vector2.zero;
 
-            var title = CreateText(canvasGO.transform, Core.Localization.T("levelup.title"), new Vector2(0, 200), 32);
+            // M53：卡片背板。此前三张卡直接浮在半透明黑遮罩上——玩家看到的是
+            // "画面变暗了"，而看不出"弹出了一个界面"。垫一块圆角底板，
+            // 弹窗才有边界，卡片也才像"摆在盘子里"而不是"贴在屏幕上"。
+            // raycastTarget 必须关：它是全屏遮罩之后的第一个可命中对象，
+            // 留着会让卡片按钮在命中判定里排在它后面（顺序对了但白挡一层）。
+            var frame = Core.UIFactory.CreateRoundPanel(canvasGO.transform, "Frame",
+                new Vector2(0, 40), new Vector2(520, 430), Core.UIFactory.Palette.Deep);
+            frame.raycastTarget = false;
+
+            // 标题走渐变富文本：单一 Text.color 做不出"青到紫"的过渡
+            var title = Core.UIFactory.CreateTitle(canvasGO.transform, "Title",
+                Core.UIFactory.GradientRich(Core.Localization.T("levelup.title"),
+                    Core.UIFactory.Palette.Accent, Core.UIFactory.Palette.AccentAlt),
+                new Vector2(0, 200), 34, new Vector2(560, 60));
+            Core.UIFactory.CreateDivider(canvasGO.transform, "Divider", new Vector2(0, 166), 420,
+                Core.UIFactory.Palette.Accent);
 
             var cards = new List<RectTransform>();
             for (int i = 0; i < offers.Count; i++)
             {
                 var o = offers[i];
                 var idx = i;
-                var btnGO = new GameObject("Offer" + i);
-                btnGO.transform.SetParent(canvasGO.transform);
-                var btn = btnGO.AddComponent<Button>();
-                var bimg = btnGO.AddComponent<Image>();
-                bimg.color = new Color(0.2f, 0.4f, 0.7f);
-                var rt = btnGO.GetComponent<RectTransform>();
-                rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
-                rt.anchoredPosition = new Vector2(0, 90 - i * 95);
-                rt.sizeDelta = new Vector2(440, 80);
-
-                CreateText(btnGO.transform, o.title + "\n" + o.desc, Vector2.zero, 20);
-
-                btn.onClick.AddListener(() => Choose(idx, canvasGO));
+                var rt = BuildCard(canvasGO.transform, "Offer" + i, o,
+                    new Vector2(0, 90 - i * 95), () => Choose(idx, canvasGO));
                 cards.Add(rt);
             }
 
             // M8 手感：遮罩淡入 + 标题弹入 + 卡片依次缩放弹入（用 unscaledDeltaTime，暂停态也能播）
             StartCoroutine(AnimateIn(cards, img, title != null ? title.rectTransform : null));
+        }
+
+        /// <summary>卡片宽度与高度（纵向排三张，与标题/分隔线的位置换算耦合）。</summary>
+        private const float CardW = 460f, CardH = 84f;
+
+        /// <summary>
+        /// 单张选卡：圆角底 + 左侧稀有度色条 + 右上角稀有度标签 + 标题/描述两行。
+        ///
+        /// M53 之前它是一块 440×80 的<b>纯色方块</b>（<c>new Color(0.2f, 0.4f, 0.7f)</c>），
+        /// 三张卡长得一模一样：玩家升级时眼前是三条同色横杠，只能靠读字分辨，
+        /// "这一级拿到的到底是新武器还是属性"全靠逐行读完才知道。
+        /// 现在颜色本身就是信息——看一眼色条就知道这张属于哪一档。
+        ///
+        /// 为什么底色是"稀有度色 × 0.16"而不是直接铺稀有度色：
+        /// 卡上还有两行字要读，铺满高饱和色会把文字糊掉。压暗后既保留了色相区分，
+        /// 又让白字有对比度；色条和标签用满饱和度的同一色相补足辨识度。
+        /// </summary>
+        private static RectTransform BuildCard(Transform parent, string name, UpgradeOffer o,
+                                              Vector2 pos, System.Action onClick)
+        {
+            Color rarity = RarityColor(o.kind);
+            var body = Core.UIFactory.CreateRoundPanel(parent, name, pos,
+                new Vector2(CardW, CardH), Core.UIFactory.Tint(rarity, 0.16f));
+            var go = body.gameObject;
+
+            var btn = go.AddComponent<Button>();
+            btn.targetGraphic = body;               // 色条/文字都关了命中，底图是唯一靶面
+            // 与 UIFactory.CreateButton 同一套乘数：悬停必须"更亮"才像可点
+            var colors = btn.colors;
+            colors.normalColor = Color.white;
+            colors.highlightedColor = new Color(1.35f, 1.38f, 1.55f, 1f);
+            colors.pressedColor = new Color(0.72f, 0.74f, 0.86f, 1f);
+            colors.selectedColor = new Color(1.35f, 1.38f, 1.55f, 1f);
+            colors.fadeDuration = 0.08f;
+            btn.colors = colors;
+            if (onClick != null) btn.onClick.AddListener(() => onClick());
+
+            // 左侧稀有度色条
+            var barGO = new GameObject("RarityBar", typeof(RectTransform));
+            barGO.transform.SetParent(go.transform, false);
+            var barImg = barGO.AddComponent<Image>();
+            barImg.sprite = Core.SpriteFactory.MakeRoundPanel();
+            barImg.type = Image.Type.Sliced;
+            barImg.color = rarity;
+            barImg.raycastTarget = false;           // 装饰不许抢点击
+            var brt = (RectTransform)barGO.transform;
+            brt.anchorMin = brt.anchorMax = new Vector2(0f, 0.5f);
+            brt.pivot = new Vector2(0f, 0.5f);
+            brt.anchoredPosition = new Vector2(5f, 0f);
+            brt.sizeDelta = new Vector2(7f, CardH - 26f);
+
+            // 右上角稀有度标签：用本地化键取词，绝不写死中文（第 12 项）
+            var tag = Core.UIFactory.CreateText(go.transform, "Tag", RarityLabel(o.kind),
+                new Vector2(CardW * 0.5f - 48f, CardH * 0.5f - 16f), 13,
+                TextAnchor.MiddleRight, new Vector2(140, 26));
+            tag.color = Core.UIFactory.Tint(rarity, 1.05f);
+            tag.raycastTarget = false;
+            Core.UIFactory.ApplyOutline(tag, Core.UIFactory.Palette.Outline, 1f);
+
+            var head = Core.UIFactory.CreateText(go.transform, "Title", o.title,
+                new Vector2(6f, 16f), 21, TextAnchor.MiddleLeft, new Vector2(CardW - 108f, 30));
+            head.color = Core.UIFactory.Tint(rarity, 1.3f);
+            head.raycastTarget = false;
+            Core.UIFactory.ApplyOutline(head, Core.UIFactory.Palette.Outline, 2f);
+
+            var desc = Core.UIFactory.CreateText(go.transform, "Desc", o.desc,
+                new Vector2(6f, -15f), 15, TextAnchor.MiddleLeft, new Vector2(CardW - 108f, 26));
+            desc.color = Core.UIFactory.Palette.TextDim;
+            desc.raycastTarget = false;
+            Core.UIFactory.ApplyOutline(desc, Core.UIFactory.Palette.Outline, 1f);
+
+            return go.GetComponent<RectTransform>();
+        }
+
+        /// <summary>
+        /// 稀有度配色，与 <see cref="UpgradeCatalog.ApplyKind"/> 的三档分流一一对应：
+        /// 200+ 武器进阶（紫）/ 100+ 新武器解锁（金）/ 其余属性强化（青）。
+        /// 分档条件刻意不另写一套——和"这张卡到底会应用成什么"用同一个 kind 判据，
+        /// 免得视觉档位与逻辑档位哪天改一处漏一处。
+        /// </summary>
+        private static Color RarityColor(int kind)
+        {
+            if (kind >= 200) return Core.UIFactory.Palette.AccentAlt;
+            if (kind >= 100) return Core.UIFactory.Palette.Gold;
+            return Core.UIFactory.Palette.Accent;
+        }
+
+        /// <summary>稀有度标签文案（同样按 kind 三档；走本地化，不写死）。</summary>
+        private static string RarityLabel(int kind)
+        {
+            if (kind >= 200) return Core.Localization.T("upgrade.rarity.level");
+            if (kind >= 100) return Core.Localization.T("upgrade.rarity.unlock");
+            return Core.Localization.T("upgrade.rarity.stat");
         }
 
         /// <summary>选卡面板入场演出：遮罩淡入、标题放大弹入、卡片错峰缩放弹入。</summary>
@@ -442,34 +539,5 @@ namespace StarPixel.UI
             }
         }
 
-        private static Text CreateText(Transform parent, string content, Vector2 pos, int size)
-        {
-            var go = new GameObject("Text");
-            go.transform.SetParent(parent);
-            var t = go.AddComponent<Text>();
-            t.text = content;
-            t.font = GetUIFont();
-            t.color = Color.white;
-            t.alignment = TextAnchor.MiddleCenter;
-            t.fontSize = size;
-            t.horizontalOverflow = HorizontalWrapMode.Overflow;
-            var rt = go.GetComponent<RectTransform>();
-            rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
-            rt.anchoredPosition = pos;
-            rt.sizeDelta = new Vector2(420, 72);
-            return t;
-        }
-
-        /// <summary>兼容不同 Unity 版本的内置字体名（LegacyRuntime / Arial）。</summary>
-        private static Font GetUIFont()
-        {
-            Font f = null;
-            try { f = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf"); } catch { }
-            if (f == null)
-            {
-                try { f = Resources.GetBuiltinResource<Font>("Arial.ttf"); } catch { }
-            }
-            return f;
-        }
     }
 }

@@ -44,7 +44,9 @@ namespace StarPixel.Effects
         {
             var go = new GameObject("Ring");
             var sr = go.AddComponent<SpriteRenderer>();
-            sr.sprite = Core.SpriteFactory.MakeSolidSprite();
+            // M53：实心方块 → 空心环。此前它扩到一半就变成一块糊在屏幕上的雾，
+            // 看不出"一圈能量散开"；空心图的着色只落在那道圆环上，张力才出得来。
+            sr.sprite = Core.SpriteFactory.MakeRing();
             sr.color = color;
             sr.sortingOrder = 3;
             go.transform.position = pos;
@@ -60,7 +62,10 @@ namespace StarPixel.Effects
         {
             var go = new GameObject("Telegraph");
             var sr = go.AddComponent<SpriteRenderer>();
-            sr.sprite = Core.SpriteFactory.MakeSolidSprite();
+            // M53：Boss 前摇此前是一块直径两三个单位的**实心方块**——玩家看到的
+            // 是一大片半透明地板，而不是"攻击会落在这里"。换成空心环之后语义立刻
+            // 对上了：环内是危险区，环外安全。
+            sr.sprite = Core.SpriteFactory.MakeRing();
             sr.color = new Color(color.r, color.g, color.b, 0.2f);
             sr.sortingOrder = 1;   // 位于实体下方，避免遮挡
             go.transform.position = pos;

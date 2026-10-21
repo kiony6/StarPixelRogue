@@ -26,6 +26,7 @@ namespace StarPixel.Combat.Skill
         private bool _exploded;
         private GameObject _template;
         private SpriteRenderer _sr;
+        private float _chargeTimer;      // M53：待引爆状态的脉冲/蓄力采样节奏
 
         public void Launch(Vector2 origin, float dmg, float radius, float arm, float trigger, float life, GameObject template)
         {
@@ -39,6 +40,7 @@ namespace StarPixel.Combat.Skill
             _elapsed = 0f;
             _armed = false;
             _exploded = false;
+            _chargeTimer = 0f;
             applySlow = false;
             gameObject.SetActive(true);
 
@@ -73,6 +75,15 @@ namespace StarPixel.Combat.Skill
                 transform.localScale = Vector3.one * 0.5f * pulse;
             }
 
+            // M53：每隔一小段就在脚底垫一圈微光——"这颗雷醒着"。
+            // 与上面的呼吸错位分布比起只用缩放更易察觉，因为它覆盖了地雷周围那片地面。
+            _chargeTimer -= Time.deltaTime;
+            if (_chargeTimer <= 0f)
+            {
+                _chargeTimer = 0.32f;
+                StarPixel.Effects.Fx.Glow(transform.position, new Color(1f, 0.72f, 0.25f), 1.1f, 0.3f, 1);
+            }
+
             // 超时自动引爆
             if (_elapsed >= life) { Explode(); return; }
 
@@ -104,7 +115,16 @@ namespace StarPixel.Combat.Skill
                 }
             });
 
-            Effects.TempEffect.SpawnRing(transform.position, radius, new Color(1f, 0.5f, 0.2f));
+            // M53：爆炸由三层组成——外推的冲击环、中心的白热闪光、四散的火星。
+            // 此前只有一个实心方块缩放，扩到一半就变成一块雾，"炸"的力度全丢在里头。
+            var hot = new Color(1f, 0.72f, 0.28f);
+            var ember = new Color(1f, 0.45f, 0.15f);
+            float waveR = radius * 1.15f;
+            StarPixel.Effects.Fx.Shockwave(transform.position, radius * 0.35f, waveR, hot, 0.32f, 4);
+            StarPixel.Effects.Fx.Shockwave(transform.position, radius * 0.2f, waveR * 0.7f, Color.white, 0.22f, 5);
+            StarPixel.Effects.Fx.Flash(transform.position, new Color(1f, 0.9f, 0.6f), radius * 1.4f, 0.22f, 5);
+            StarPixel.Effects.Fx.Burst(transform.position, ember, 12, waveR * 2.2f, 0.3f, 0.4f, 5);
+            StarPixel.Effects.Fx.Glow(transform.position, hot, waveR * 1.5f, 0.3f, 1);
             Core.EventBus.RaiseShake(0.18f, 0.15f);   // M8 手感：轻微震屏反馈
             Die();
         }

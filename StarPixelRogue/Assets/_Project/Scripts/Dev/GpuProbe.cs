@@ -156,11 +156,29 @@ namespace StarPixel.Dev
         }
 
         /// <summary>场上 SpriteRenderer 数量：用来证明特效对象真的造出来了。</summary>
-        private static int CountRenderers()
+        /// <summary>
+        /// 只数 <see cref="DropEffects"/> 自己放的那三种：爆发环 / 警示圈（TempEffect）
+        /// 与链闪电的段和闪光。
+        ///
+        /// M53 之前护栏直接数**全部 SpriteRenderer**——那时这两帧里唯一会新增渲染器的
+        /// 就是 DropEffects 那一批，宽口径碰巧也对。M53 之后对局随时在放池化粒子
+        /// （<see cref="Effects.FxSprite"/> 同样带 SpriteRenderer），宽口径于是把
+        /// 这些**合法且零泄漏**的粒子一起数了进来：末局从 9 个涨到 19 个，
+        /// 那条护栏因此假红——它红的原因是"画面上多了东西"，而那是本轮要的效果。
+        /// 收窄之后，它数的才是它声称在数的那三种来源。
+        /// </summary>
+        private static int CountEffectObjects()
         {
             int n = 0;
+            foreach (var t in Resources.FindObjectsOfTypeAll<TempEffect>())
+                if (t != null) n++;
+            // 链闪电的段与闪光是普通 GameObject（不是 TempEffect），按名字认
             foreach (var r in Resources.FindObjectsOfTypeAll<SpriteRenderer>())
-                if (r != null) n++;
+            {
+                if (r == null) continue;
+                string nm = r.gameObject.name;
+                if (nm == "BoltSeg" || nm == "BoltFlash") n++;
+            }
             return n;
         }
 
@@ -275,12 +293,14 @@ namespace StarPixel.Dev
             // 护栏：必须真的造出了特效对象。"没泄漏"和"压根没生成"长得一模一样，
             // 没有这条，一个什么都没跑的重开局照样能报 +0。
             // 数的是**对象**不是纹理——修好之后本来就不该新建纹理，数纹理会恒为 0。
-            int n0 = CountRenderers();
+            // M53：改用窄口径（详见 CountEffectObjects 注释）——宽口径会把对局里
+            // 同时在放的池化粒子算进来，护栏会因为它本该允许的产出而假红
+            int n0 = CountEffectObjects();
             DropEffects();
             yield return null;
             yield return null;
-            int made = CountRenderers() - n0;
-            if (made >= 6) _reSpawned++;   // 环 1 + 圈 1 + 电弧 2 段 + 闪光 2
+            int made = CountEffectObjects() - n0;
+            if (made >= 4) _reSpawned++;   // 环 1 + 圈 1 + 电弧若干段 + 闪光 2
             if (_reLastMade == 0) _reLastMade = made;
             yield return WaitReal(1.2f);
         }
