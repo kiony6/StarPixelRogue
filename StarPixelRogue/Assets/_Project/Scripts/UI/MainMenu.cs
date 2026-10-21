@@ -111,8 +111,8 @@ namespace StarPixel.UI
                 if (notice != null) notice.text = Core.Localization.T("menu.hint_net");
             }
 
-            // 战绩面板（M53：圆角框 + 标题下的分隔线，与左边的按钮列形成分组）
-            var panel = Core.UIFactory.CreateRoundPanel(_root.transform, "Records", new Vector2(300, 0),
+            // 战绩面板（M53：圆角框 + 标题下的分隔线；M54 挪到左半区，把右半区整个让给四颗主按钮）
+            var panel = Core.UIFactory.CreateRoundPanel(_root.transform, "Records", new Vector2(-330, 0),
                 new Vector2(380, 300), Core.UIFactory.Palette.Deep);
             Core.UIFactory.CreateTitle(panel.transform, "RecordsTitle", Core.Localization.T("menu.records"),
                 new Vector2(0, 122), 26, new Vector2(340, 40), Core.UIFactory.Palette.Accent);
@@ -139,27 +139,24 @@ namespace StarPixel.UI
                 value.color = Core.UIFactory.Palette.Text;
             }
 
-            // 主按钮列（M53：每颗给一条语义强调色——开始的绿、查看的青、退出的红，
-            // 光看颜色就能把"推进"和"离场"分开）
-            Core.UIFactory.CreateButton(_root.transform, "StartBtn", Core.Localization.T("menu.start"),
-                new Vector2(-160, 40), new Vector2(280, 64), OnStartGame, 24,
+            // —— M54：主按钮收敛为四颗 ——
+            // 单人模式 / 联机大厅 / 排行榜 / 设置。此前是五颗（还带了角色、图鉴、退出），
+            // 「角色」「图鉴」挪进了单人模式的二级页，「退出」交给窗口右上角——
+            // 主菜单上摆七颗按钮的结果是：玩家第一眼找不到"开始"。
+            // 这四颗每一颗都挂了真回调（见下方四个 On*），没有占位。
+            Core.UIFactory.CreateButton(_root.transform, "SoloBtn", Core.Localization.T("menu.solo"),
+                new Vector2(180, 70), new Vector2(320, 68), OnSolo, 24,
                 Core.UIFactory.Tint(Core.UIFactory.Palette.Vital, 0.42f, 0.95f),
                 Core.UIFactory.Palette.Vital);
-            Core.UIFactory.CreateButton(_root.transform, "CharacterBtn", Core.Localization.T("menu.character"),
-                new Vector2(-160, -40), new Vector2(280, 56),
-                () => { CharacterSelectPanel.Ensure(); CharacterSelectPanel.Instance.Show(); },
-                20, Core.UIFactory.Palette.Raised, Core.UIFactory.Palette.AccentAlt);
-            Core.UIFactory.CreateButton(_root.transform, "CodexBtn", Core.Localization.T("menu.codex"),
-                new Vector2(-160, -110), new Vector2(280, 56),
-                () => { CodexPanel.Ensure(); CodexPanel.Instance.Show(); },
-                20, Core.UIFactory.Palette.Raised, Core.UIFactory.Palette.Accent);
+            Core.UIFactory.CreateButton(_root.transform, "LobbyBtn", Core.Localization.T("menu.lobby"),
+                new Vector2(180, -14), new Vector2(320, 58), OnLobby, 21,
+                Core.UIFactory.Palette.Raised, Core.UIFactory.Palette.Accent);
+            Core.UIFactory.CreateButton(_root.transform, "RankBtn", Core.Localization.T("menu.rank"),
+                new Vector2(180, -88), new Vector2(320, 58), OnRank, 21,
+                Core.UIFactory.Palette.Raised, Core.UIFactory.Palette.Gold);
             Core.UIFactory.CreateButton(_root.transform, "SettingsBtn", Core.Localization.T("menu.settings"),
-                new Vector2(-160, -180), new Vector2(280, 56),
-                () => { SettingsPanel.Ensure(); SettingsPanel.Instance.Show(); },
-                20, Core.UIFactory.Palette.Raised, Core.UIFactory.Palette.AccentAlt);
-            Core.UIFactory.CreateButton(_root.transform, "QuitBtn", Core.Localization.T("menu.quit"),
-                new Vector2(-160, -250), new Vector2(280, 56), OnQuit,
-                20, Core.UIFactory.Palette.Raised, Core.UIFactory.Palette.Danger);
+                new Vector2(180, -162), new Vector2(320, 58), OnSettings, 21,
+                Core.UIFactory.Palette.Raised, Core.UIFactory.Palette.AccentAlt);
 
             // 当前角色提示（M6.2）
             // 注意：这一行的文本被 BuildProbe 的 CurrentCharacterText 逐字比对，
@@ -167,8 +164,15 @@ namespace StarPixel.UI
             var currentChar = Core.UIFactory.CreateText(_root.transform, "CurrentCharacter",
                 Core.Localization.T("menu.character") + "：" +
                 Core.Localization.T(Player.CharacterManager.Selected.nameKey),
-                new Vector2(20, 268), 18, TextAnchor.MiddleLeft, new Vector2(320, 40));
+                new Vector2(-330, -196), 18, TextAnchor.MiddleLeft, new Vector2(360, 40));
             currentChar.color = Core.UIFactory.Palette.TextDim;
+
+            // 当前登录账号（M54）。同样保持纯文本：它是"我是谁"的答案，不是按钮——
+            // 退出登录不在这里，因为主菜单上只允许存在上面那四颗按钮。
+            var accountLine = Core.UIFactory.CreateText(_root.transform, "AccountInfo",
+                Core.Localization.T("menu.account") + "：" + UI.AccountGate.Account,
+                new Vector2(520, 268), 18, TextAnchor.MiddleRight, new Vector2(340, 40));
+            accountLine.color = Core.UIFactory.Palette.Accent;
 
             RefreshRecords();
         }
@@ -227,6 +231,7 @@ namespace StarPixel.UI
 
             SetText("CurrentCharacter", Core.Localization.T("menu.character") + "：" +
                 Core.Localization.T(Player.CharacterManager.Selected.nameKey));
+            SetText("AccountInfo", Core.Localization.T("menu.account") + "：" + UI.AccountGate.Account);
             SetText("BestWave", Core.Localization.T("menu.best_wave") + "：" +
                 (d.bestWave > 0 ? d.bestWave.ToString() : Core.Localization.T("menu.none")));
             SetText("BestTime", Core.Localization.T("menu.best_time") + "：" +
@@ -246,23 +251,56 @@ namespace StarPixel.UI
             if (t != null) t.text = content;
         }
 
-        private void OnStartGame()
+        /// <summary>单人模式（M54）：进二级页选角色 / 看图鉴 / 开局。</summary>
+        private void OnSolo()
         {
-            Core.Telemetry.Log(Core.Telemetry.EvRunStart,
-                "mode", Net.NetSession.ModeLabel());
-            Hide();
-            GameBuilder.TeardownWorld();
-            GameBuilder.Build();
+            SoloPanel.Ensure();
+            SoloPanel.Instance.Show();
         }
 
-        private void OnQuit()
+        /// <summary>
+        /// 联机大厅（M54）。没有联机模块的构建里这颗按钮<b>不会变成摆设</b>：
+        /// 它如实说明"这个版本没有联机"，而不是点了没反应——
+        /// 没反应会被当成卡死，而谎称"正在连接"更糟。
+        /// </summary>
+        private void OnLobby()
         {
-            Debug.Log("[MainMenu] 退出游戏");
-#if UNITY_EDITOR
-            UnityEditor.EditorApplication.isPlaying = false;
-#else
-            Application.Quit();
-#endif
+            if (Net.NetBackend.Instance != null)
+            {
+                Hide();
+                GameBuilder.OpenLobby();
+                return;
+            }
+            ShowNotice(Core.Localization.T("net.unavailable"));
+        }
+
+        private void OnRank()
+        {
+            RankPanel.Ensure();
+            RankPanel.Instance.Show();
+        }
+
+        private void OnSettings()
+        {
+            SettingsPanel.Ensure();
+            SettingsPanel.Instance.Show();
+        }
+
+        /// <summary>一次性说明弹窗（联机不可用等）。</summary>
+        private void ShowNotice(string text)
+        {
+            // CreateModal 返回 (画布根, 全屏遮罩)：要拆就拆画布根。
+            var (canvasRoot, maskRoot) = Core.UIFactory.CreateModal("MainMenuNotice",
+                new Color(0f, 0f, 0f, 0.55f));
+            var box = Core.UIFactory.CreateRoundPanel(maskRoot.transform, "Box",
+                new Vector2(0, 0), new Vector2(520, 200), Core.UIFactory.Palette.Deep);
+            var msg = Core.UIFactory.CreateText(box.transform, "Message", text,
+                new Vector2(0, 28), 19, TextAnchor.MiddleCenter, new Vector2(460, 90));
+            msg.color = Core.UIFactory.Palette.Text;
+            Core.UIFactory.CreateButton(box.transform, "OkBtn", Core.Localization.T("net.unavailable_ok"),
+                new Vector2(0, -52), new Vector2(200, 50),
+                () => Core.UIFactory.Destroy(canvasRoot), 20,
+                Core.UIFactory.Palette.Raised, Core.UIFactory.Palette.Accent);
         }
     }
 }

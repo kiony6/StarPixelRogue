@@ -73,6 +73,9 @@ namespace StarPixel.Net
             CreateButton(_root.transform, Core.Localization.T("net.host"), new Vector2(0, 80), OnHost);
             CreateButton(_root.transform, Core.Localization.T("net.join"), new Vector2(260, 80), OnJoin);
             CreateButton(_root.transform, Core.Localization.T("net.spectate"), new Vector2(0, -70), OnSpectate);
+            // M54：返回主菜单。大厅此前是单向门——进来只能选一种模式开局，
+            // 主菜单成了唯一入口之后，没有这颗按钮就等于把玩家关在半路上。
+            CreateButton(_root.transform, Core.Localization.T("net.back"), new Vector2(260, -70), OnBack, "BackBtn");
 
             // 地址输入（加入房间用；同一局域网填房主 IP）
             CreateText(_root.transform, Core.Localization.T("net.address"), new Vector2(0, 20), 18);
@@ -95,6 +98,15 @@ namespace StarPixel.Net
             rt.anchoredPosition = new Vector2(0, -20);
             rt.sizeDelta = new Vector2(300, 36);
             input.onValueChanged.AddListener(v => _address = v);
+        }
+
+        /// <summary>M54：退出大厅回到主菜单（主菜单进来时才有意义）。</summary>
+        private void OnBack()
+        {
+            Core.UIFactory.Destroy(_root);
+            _root = null;
+            Destroy(gameObject);            // 组件一并拆掉：OnDestroy 会退订语言切换
+            UI.MainMenu.Instance?.Show();
         }
 
         // —— 模式选择 ——
@@ -214,9 +226,12 @@ namespace StarPixel.Net
             return t;
         }
 
-        private static GameObject CreateButton(Transform parent, string label, Vector2 pos, UnityEngine.Events.UnityAction onClick)
+        private static GameObject CreateButton(Transform parent, string label, Vector2 pos,
+            UnityEngine.Events.UnityAction onClick, string nodeName = null)
         {
-            var go = new GameObject(label, typeof(RectTransform));
+            // 默认用文案当节点名（历史行为，既有探针按名字找这几颗）；
+            // 新增按钮一律显式传 nodeName——靠中文文案定位在切语言后必然失效。
+            var go = new GameObject(nodeName ?? label, typeof(RectTransform));
             go.transform.SetParent(parent, false);
             var img = go.AddComponent<Image>();
             img.color = new Color(0.20f, 0.42f, 0.72f, 1f);

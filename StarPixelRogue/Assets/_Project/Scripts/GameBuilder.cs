@@ -131,23 +131,13 @@ namespace StarPixel
             bool agreed = Core.SettingsManager.Instance != null &&
                 Core.SettingsManager.Instance.TermsAgreed(Core.VersionInfo.ComplianceVersion);
 
-            if (Net.NetBackend.Instance != null)
-            {
-                // 具备联机能力：合规通过后进入大厅，由用户选择单人 / 建房 / 加入
-                Compliance.ComplianceGate.OnPassed = OpenLobby;
-                if (agreed)
-                {
-                    OpenLobby();
-                    Core.UIFactory.Destroy(gate.gameObject);   // 已同意：拆掉空门
-                }
-                return;
-            }
-
-            // 单机：合规门（首次/协议更新时）→ 主菜单
-            Compliance.ComplianceGate.OnPassed = () => UI.MainMenu.Instance.Show();
+            // M54：无论单机还是联机，合规门之后都是**先登录再进主菜单**。
+            // 联机版原本在这里直接进大厅，主菜单上的「联机大厅」按钮因此形同虚设——
+            // 现在两条路都过同一个闸门，主菜单是唯一的入口。
+            Compliance.ComplianceGate.OnPassed = UI.AccountGate.ShowMenu;
             if (agreed)
             {
-                UI.MainMenu.Instance.Show();
+                UI.AccountGate.ShowMenu();
                 Core.UIFactory.Destroy(gate.gameObject);       // 已同意：拆掉空门
             }
         }
@@ -730,7 +720,8 @@ namespace StarPixel
             StarPixel.Dev.SubProbe.Start(ArgValue("-subScene", "BASE"));
         }
 
-        private static void OpenLobby()
+        /// <summary>打开联机大厅（M54：由主菜单的「联机大厅」按钮调用）。</summary>
+        public static void OpenLobby()
         {
             new GameObject("NetLobby").AddComponent<Net.NetLobby>();   // @owner: stage
         }

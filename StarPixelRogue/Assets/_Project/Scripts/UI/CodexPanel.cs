@@ -48,6 +48,9 @@ namespace StarPixel.UI
             if (_root != null) _root.SetActive(false);
         }
 
+        /// <summary>M54：面板当前是否可见（SoloPanel 让位后靠它判断子面板何时关掉）。</summary>
+        public bool IsVisible => _root != null && _root.activeSelf;
+
         private void Rebuild()
         {
             Build();

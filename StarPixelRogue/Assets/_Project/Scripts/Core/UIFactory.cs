@@ -440,6 +440,72 @@ namespace StarPixel.Core
             return btn;
         }
 
+        /// <summary>
+        /// 输入框（M54）：圆角底 + 占位提示 + 文本子节点，返回 InputField。
+        /// 密码模式只改 <c>contentType</c>（回显星号），不改存储与校验——那是 AccountStore 的事。
+        /// </summary>
+        /// <remarks>
+        /// 文本与占位提示做成<b>子节点</b>而不是塞在同一物体上：InputField 要求
+        /// textComponent / placeholder 各自是一个 Graphic，共用一块 RectTransform 会让
+        /// 两者叠在同一格里互相挤压。节点名固定为 "Text" / "Placeholder"，
+        /// 无头探针靠它们读出输入框里当前写着什么。
+        /// </remarks>
+        public static InputField CreateInputField(Transform parent, string name, string placeholder,
+            Vector2 pos, Vector2 size, bool password = false)
+        {
+            var bg = CreateRoundPanel(parent, name, pos, size, new Color(0.05f, 0.06f, 0.11f, 0.96f), gloss: false);
+            var go = bg.gameObject;
+            bg.raycastTarget = true;                 // 输入框是要点进去的，不能像背景那样关掉射线
+
+            var input = go.AddComponent<InputField>();
+            input.targetGraphic = bg;
+            input.contentType = password
+                ? InputField.ContentType.Password
+                : InputField.ContentType.Standard;
+            input.lineType = InputField.LineType.SingleLine;
+            input.caretBlinkRate = 0.85f;
+
+            var text = AddChild<Text>(go.transform, "Text");
+            text.font = UIFont;
+            text.fontSize = 20;
+            text.color = Palette.Text;
+            text.alignment = TextAnchor.MiddleLeft;
+            text.horizontalOverflow = HorizontalWrapMode.Overflow;
+            text.supportRichText = false;
+            Stretch(text.rectTransform, new Vector4(14, 4, 14, 4));   // 左右留边，字不贴框
+
+            var ph = AddChild<Text>(go.transform, "Placeholder");
+            ph.font = UIFont;
+            ph.fontSize = 20;
+            ph.color = Tint(Palette.TextDim, 1f, 0.55f);
+            ph.alignment = TextAnchor.MiddleLeft;
+            ph.horizontalOverflow = HorizontalWrapMode.Overflow;
+            ph.supportRichText = false;
+            ph.text = placeholder;
+            Stretch(ph.rectTransform, new Vector4(14, 4, 14, 4));
+
+            input.textComponent = text;
+            input.placeholder = ph;
+            return input;
+        }
+
+        /// <summary>建一个铺满父节点的子节点（用于 InputField 的文本层/占位层）。</summary>
+        private static T AddChild<T>(Transform parent, string name) where T : Component
+        {
+            var go = new GameObject(name, typeof(RectTransform));
+            go.transform.SetParent(parent, false);
+            return go.AddComponent<T>();
+        }
+
+        /// <summary>按 (左, 下, 右, 上) 内缩量铺满父节点。</summary>
+        private static void Stretch(RectTransform rt, Vector4 inset)
+        {
+            rt.anchorMin = Vector2.zero;
+            rt.anchorMax = Vector2.one;
+            rt.offsetMin = new Vector2(inset.x, inset.y);
+            rt.offsetMax = new Vector2(-inset.z, -inset.w);
+        }
+
         /// <summary>模态根：全屏半透明遮罩 + 居中容器。返回 (遮罩, 容器)。</summary>
         public static (GameObject mask, GameObject root) CreateModal(string name, Color maskColor)
         {

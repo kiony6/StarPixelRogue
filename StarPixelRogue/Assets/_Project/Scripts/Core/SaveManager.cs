@@ -164,6 +164,14 @@ namespace StarPixel.Core
             }
 
             Save();
+
+            // M54：同一局同时进本机榜单。放在这里而不是结算面板里，
+            // 是因为"提交一局战绩"只有这一个入口——分散到 UI 上迟早漏掉某条路径
+            // （例如青少年模式强制结算）。未登录时 RankStore 自己会拒收（不记匿名条目）。
+            var rank = RankStore.Instance;
+            if (rank != null) rank.Submit(AccountStore.Instance != null ? AccountStore.Instance.Account : "",
+                wave, level, time);
+
             return newRecord;
         }
 

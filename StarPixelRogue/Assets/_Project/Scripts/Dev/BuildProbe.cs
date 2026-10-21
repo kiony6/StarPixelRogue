@@ -101,16 +101,43 @@ namespace StarPixel.Dev
         // 主菜单上那几颗玩家最先按下的按钮反而没人碰过。这一组就是来收它们的。
         private int _menuBtnTotal, _menuBtnOk;
         private string _menuBtnBad = "";
-        private bool _codexBuilt;
-        private int _codexTotal, _codexOk;
-        private string _codexBad = "";
-        private bool _codexClosed;
+        // M54：主菜单只剩四颗按钮，二级页各归其位——原先的「图鉴」面板换成「排行榜」。
+        private bool _rankBuilt;
+        private int _rankTotal, _rankOk;
+        private string _rankBad = "";
+        private bool _rankClosed;
         private bool _settBuilt;
         private int _settTotal, _settOk;
         private string _settBad = "";
         private bool _settClosed;
+        // 「联机大厅」：没有联机模块时它必须弹说明并关得掉——点了没反应等于没挂回调
+        private bool _lobbyResponded;
+        private bool _noticeClosed;
+        // 单人模式二级页 → 开始游戏
+        private bool _soloBuilt;
         private bool _startClicked;
         private bool _startWorld;
+
+        // —— AUTH（M54）——
+        // 登录注册是玩家遇到的第一个界面，此前没有任何探针碰过它。
+        // 这里把它当"入口"来测：未登录进不去主菜单、四种填法都被挡下、
+        // 记住的密码能回填并自动登录。
+        private bool _authBuilt;        // 登录页建出来了
+        private bool _authBlocked;      // 未登录时主菜单进不去
+        private bool _authFirstReg;     // 本机无账号时首屏是注册页
+        private int _authChecked, _authOk;
+        private string _authBad = "";
+        private bool _authSubmitHit;    // 提交按钮真的点得到
+        private bool _authRegistered;   // 注册后进了主菜单
+        private bool _authRemembered;   // 记住的账号密码已回填
+        private bool _authAuto;         // 自动登录成功
+        private bool _authLoggedOut;    // 退出登录后回到登录页
+        // 这两条单列：它们各自对应一类"看着像成功"的坏法——
+        // 注册完没登录（按钮写着"注册并登录"）、以及密码根本没比对。
+        // 只靠"断点通过 N/N"是分不出这两者的，必须各有一条自己的判据。
+        private bool _authRegLogged;    // 注册后真的处于登录态
+        private bool _authWrongPwd;     // 密码错误真的被挡下
+        private bool _lastRejectBlocked;
 
         private static readonly string[] CombatVisuals = { "AuraRing", "OrbitBlade", "BoltSeg", "BoltFlash" };
 
@@ -168,6 +195,7 @@ namespace StarPixel.Dev
                 case "APPLY": yield return Apply(); break;
                 case "PROGRESSION": yield return Progression(); break;
                 case "MENU": yield return Menu(); break;
+                case "AUTH": yield return Auth(); break;
                 default: yield return Select(); break;
             }
 
@@ -188,15 +216,27 @@ namespace StarPixel.Dev
 
             _selRunsBefore = RunsFor(1, save);
 
-            // 1) 从主菜单点「角色」按钮——真实入口，不是直接 Ensure
+            // 1) 从主菜单点「单人模式」→ 在二级页点「角色」——真实入口，不是直接 Ensure。
+            //    M54 起主菜单只留四颗按钮，角色收进了单人模式的二级页；
+            //    入口变了，探针就得跟着走新的那条路，不能图省事直接 Ensure 面板。
             var menuRoot = MenuRoot();
-            var charBtn = menuRoot != null ? menuRoot.Find("CharacterBtn") : null;
-            if (charBtn == null) { Fail("主菜单找不到「角色」按钮"); yield break; }
+            var soloBtn = BtnIn(menuRoot, "SoloBtn");
+            if (soloBtn == null) { Fail("主菜单找不到「单人模式」按钮"); yield break; }
+            string whySolo;
+            if (!UIHitTest.Click(soloBtn, out whySolo))
+                Fail("主菜单「单人模式」按钮点不到：" + whySolo);
+            yield return null;
+
+            var soloCanvas = GameObject.Find("SoloCanvas");
+            if (soloCanvas == null) { Fail("单人模式二级页未建出"); yield break; }
+            var charBtn = soloCanvas.transform.Find("Panel/CharacterBtn");
+            var charComp = charBtn != null ? charBtn.GetComponent<Button>() : null;
+            if (charComp == null) { Fail("二级页找不到「角色」按钮"); yield break; }
             // M51：走真实点击那条路（先 raycast），点不到直接算失败——
             // 否则"按钮被全屏遮罩盖住"在探针里永远看不见。
             string why;
-            if (!UIHitTest.Click(charBtn.GetComponent<Button>(), out why))
-                Fail("主菜单「角色」按钮点不到：" + why);
+            if (!UIHitTest.Click(charComp, out why))
+                Fail("二级页「角色」按钮点不到：" + why);
             yield return null;
 
             var panel = CharacterSelectPanelNode();
@@ -287,9 +327,9 @@ namespace StarPixel.Dev
             var root = MenuRoot();
             if (root == null) { Fail("主菜单未建出"); yield break; }
 
-            // 1) 主菜单五颗：只做命中测试，不做点击。
-            //    退出那颗点了进程就没了；开始游戏留到最后一步单独点。
-            string[] mains = { "StartBtn", "CharacterBtn", "CodexBtn", "SettingsBtn", "QuitBtn" };
+            // 1) 主菜单四颗（M54：单人 / 联机大厅 / 排行榜 / 设置）——只做命中测试，不做点击。
+            //    联机那颗点了会弹模态，留到第 4 步；单人那颗按下就换世界，留到最后。
+            string[] mains = { "SoloBtn", "LobbyBtn", "RankBtn", "SettingsBtn" };
             var bad = new List<string>();
             foreach (var n in mains)
             {
@@ -303,10 +343,10 @@ namespace StarPixel.Dev
             _menuBtnBad = bad.Count == 0 ? "<无>" : string.Join(" | ", bad.ToArray());
             yield return null;
 
-            // 2) 图鉴：真点进去 → 面板里每颗按钮都测一遍 → 真点「关闭」退出
-            yield return StepIntoPanel(root, "CodexBtn", "CodexCanvas");
-            _codexBuilt = _panel.Built; _codexTotal = _panel.Total;
-            _codexOk = _panel.Ok; _codexBad = _panel.Bad; _codexClosed = _panel.Closed;
+            // 2) 排行榜：真点进去 → 面板里每颗按钮都测一遍 → 真点「关闭」退出
+            yield return StepIntoPanel(root, "RankBtn", "RankCanvas");
+            _rankBuilt = _panel.Built; _rankTotal = _panel.Total;
+            _rankOk = _panel.Ok; _rankBad = _panel.Bad; _rankClosed = _panel.Closed;
             yield return null;
 
             // 3) 设置：同上。导出诊断日志那颗只测不点——
@@ -316,18 +356,276 @@ namespace StarPixel.Dev
             _settOk = _panel.Ok; _settBad = _panel.Bad; _settClosed = _panel.Closed;
             yield return null;
 
-            // 4) 最后才点「开始游戏」——按下去世界就换了，
-            //    放最后是为了前面几步都还站在主菜单上。
-            var startBtn = BtnIn(root, "StartBtn");
+            // 4) 联机大厅：这颗按钮"挂载了"的证据不是"点了不报错"，
+            //    而是"点了有回应"。单机构建里没有联机模块，回应就是那句如实说明，
+            //    且它必须能关掉——关不掉就把整个菜单锁死了。
+            var lobbyBtn = BtnIn(root, "LobbyBtn");
+            string whyLobby = "";
+            if (lobbyBtn != null && UIHitTest.Click(lobbyBtn, out whyLobby))
+            {
+                yield return null;
+                if (Net.NetBackend.Instance != null)
+                {
+                    var lobby = GameObject.Find("NetLobbyCanvas");
+                    _lobbyResponded = lobby != null;
+                    if (lobby == null) Fail("点了「联机大厅」但大厅没建出来");
+                    else
+                    {
+                        // 大厅必须出得去。它原本是单向门（进来只能选模式开局），
+                        // 主菜单成了唯一入口之后那等于把玩家关在半路上。
+                        var back = lobby.transform.Find("BackBtn");
+                        var backBtn = back != null ? back.GetComponent<Button>() : null;
+                        string whyBack = "";
+                        if (backBtn == null || !UIHitTest.Click(backBtn, out whyBack))
+                            Fail("大厅「返回主菜单」点不到：" + (backBtn == null ? "缺失" : whyBack));
+                        else
+                        {
+                            yield return null;
+                            _noticeClosed = GameObject.Find("NetLobbyCanvas") == null
+                                            && MainMenu.Instance != null && MainMenu.Instance.IsVisible;
+                            if (!_noticeClosed) Fail("点了「返回主菜单」但没回到主菜单");
+                        }
+                    }
+                }
+                else
+                {
+                    var notice = GameObject.Find("MainMenuNotice");
+                    _lobbyResponded = notice != null;
+                    if (notice == null) Fail("点了「联机大厅」没有任何回应（按钮可能是空壳）");
+                    else
+                    {
+                        var okBtn = notice.GetComponentInChildren<Button>(true);
+                        string whyOk = "";
+                        if (okBtn != null && UIHitTest.Click(okBtn, out whyOk))
+                        {
+                            yield return null;
+                            _noticeClosed = GameObject.Find("MainMenuNotice") == null;
+                        }
+                        else Fail("说明弹窗的「知道了」点不到：" + (okBtn == null ? "按钮缺失" : whyOk));
+                    }
+                }
+            }
+            else Fail("主菜单「联机大厅」点不到：" + (lobbyBtn == null ? "按钮缺失" : whyLobby));
+            yield return null;
+
+            // 5) 最后才走单人模式：二级页 → 「开始游戏」。放最后是因为按下去世界就换了。
+            var soloBtn = BtnIn(root, "SoloBtn");
+            string whySolo = "";
+            if (soloBtn == null || !UIHitTest.Click(soloBtn, out whySolo))
+            {
+                Fail("主菜单「单人模式」点不到：" + (soloBtn == null ? "按钮缺失" : whySolo));
+                yield break;
+            }
+            yield return null;
+            var solo = GameObject.Find("SoloCanvas");
+            _soloBuilt = solo != null;
+            if (!_soloBuilt) { Fail("点了「单人模式」但二级页没建出来"); yield break; }
+
+            var startBtn = solo.transform.Find("Panel/StartBtn");
+            var startComp = startBtn != null ? startBtn.GetComponent<Button>() : null;
             string whyStart = "";
-            if (startBtn != null && UIHitTest.Click(startBtn, out whyStart))
+            if (startComp != null && UIHitTest.Click(startComp, out whyStart))
             {
                 _startClicked = true;
                 yield return new WaitForSeconds(0.3f);
                 _startWorld = GameObject.Find("HUDCanvas") != null;
                 if (!_startWorld) Fail("点了「开始游戏」但世界没建出来（HUDCanvas 缺失）");
             }
-            else Fail("主菜单「开始游戏」点不到：" + (startBtn == null ? "按钮缺失" : whyStart));
+            else Fail("二级页「开始游戏」点不到：" + (startComp == null ? "按钮缺失" : whyStart));
+        }
+
+        // =====================================================================================
+        //  AUTH（M54）：登录注册这条链路，从"未登录进不去"到"记住密码自动登录"
+        //
+        //  为什么单独开一个场景：登录页是玩家开机看到的第一屏，而它此前一个判据都没有。
+        //  更要紧的是它属于"看着对"最危险的一类——填错账号弹一句提示就算完事，
+        //  可如果那句提示背后其实已经登录成功了，没有任何自动化测试会发现。
+        //  所以这里的每一条都断言"被挡住了"而不是"弹了提示"。
+        // =====================================================================================
+
+        private IEnumerator Auth()
+        {
+            var store = Core.AccountStore.Instance;
+            if (store == null) { Fail("账号库缺失"); yield break; }
+            store.ResetForProbe();
+            UI.AccountGate.Ensure();
+
+            // 1) 未登录：走真实入口（AccountGate.ShowMenu）不该进到主菜单
+            UI.AccountGate.ShowMenu();
+            yield return null;
+            var panel = UI.AccountGate.Panel;
+            _authBuilt = panel != null && panel.IsVisible;
+            if (!_authBuilt) { Fail("未登录时登录页没有出现"); yield break; }
+            _authBlocked = !(MainMenu.Instance != null && MainMenu.Instance.IsVisible);
+            if (!_authBlocked) Fail("未登录却进了主菜单——登录闸门没起作用");
+
+            // 本机一个账号都没有：首屏应当是注册页，而不是让人先吃一次"账号不存在"
+            _authFirstReg = panel.IsRegisterMode;
+            if (!_authFirstReg) Fail("本机无账号时首屏不是注册页");
+
+            Check(_authFirstReg, "首屏为注册页");
+
+            // 2) 提交按钮必须真点得到（否则后面每一条"被拒"都可能是"压根没点到"）
+            var submit = SubmitButton();
+            string whySubmit = "";
+            _authSubmitHit = submit != null && UIHitTest.Probe(submit).Reachable;
+            if (!_authSubmitHit)
+                Fail("登录页提交按钮点不到：" + (submit == null ? "按钮缺失" : UIHitTest.Describe(UIHitTest.Probe(submit))));
+            Check(_authSubmitHit, "提交按钮可达");
+
+            // 3) 四种错误填法：每一种都必须**仍然未登录**，且提示的是对应的那一条
+            yield return Reject("空账号", "", "abc123", "abc123", true, "login.err.name_empty");
+            yield return Reject("非法账号", "ab", "abc123", "abc123", true, "login.err.name_format");
+            yield return Reject("弱密码", "taken_later", "123", "123", true, "login.err.pwd_format");
+            yield return Reject("两次不一致", "taken_later", "abc123", "abc124", true, "login.err.pwd_mismatch");
+
+            // 4) 正常注册 → 必须进主菜单（不是"弹了成功提示"就算数）
+            yield return Fill("probe_user", "abc123", "abc123", true, true);
+            yield return ClickSubmit();
+            _authRegistered = MainMenu.Instance != null && MainMenu.Instance.IsVisible;
+            if (!_authRegistered) Fail("注册成功后没有进入主菜单");
+            Check(_authRegistered, "注册后进入主菜单");
+            _authRegLogged = store.IsLoggedIn;
+            Check(_authRegLogged, "注册后处于登录态");
+
+            // 5) 重名必须被挡下（退到登录态再注册一次同名）
+            UI.AccountGate.SignOut();
+            yield return null;
+            yield return Reject("重名", "probe_user", "abc123", "abc123", true, "login.err.name_taken");
+
+            // 6) 密码错误 / 账号不存在：登录态下同样必须被挡下
+            yield return Reject("密码错误", "probe_user", "wrongpwd", null, false, "login.err.wrong_pwd");
+            _authWrongPwd = _lastRejectBlocked;
+            yield return Reject("账号不存在", "no_such_user", "abc123", null, false, "login.err.no_account");
+
+            // 7) 记住密码：登录时勾上 → 退出登录 → 首屏应当已回填。
+            //    **退出之前必须先把两个框清空**——不清的话，输入框里本来就有上一次填的内容，
+            //    "回填了"这条永远绿，它读到的只是"上次填过"，跟记住密码一点关系都没有。
+            yield return Fill("probe_user", "abc123", null, false, true);
+            yield return ClickSubmit();
+            var p1 = UI.AccountGate.Panel;
+            if (p1 != null) { p1.AccountText = ""; p1.PasswordText = ""; }
+            UI.AccountGate.SignOut();
+            yield return null;
+            var p2 = UI.AccountGate.Panel;
+            _authRemembered = p2 != null && p2.IsVisible
+                              && p2.AccountText == "probe_user" && p2.PasswordText == "abc123";
+            if (!_authRemembered)
+                Fail("记住的账号/密码没有回填（账号=" + (p2 != null ? p2.AccountText : "<无面板>") + "）");
+            Check(_authRemembered, "记住密码已回填");
+
+            // 8) 自动登录：走完整校验，不是"文件里有就算过"
+            _authAuto = store.TryAutoLogin();
+            if (!_authAuto) Fail("记住密码后无法自动登录");
+            Check(_authAuto, "自动登录成功");
+
+            // 9) 退出登录：会话必须真的断掉
+            UI.AccountGate.SignOut();
+            yield return null;
+            _authLoggedOut = !store.IsLoggedIn
+                             && !(MainMenu.Instance != null && MainMenu.Instance.IsVisible);
+            if (!_authLoggedOut) Fail("退出登录后仍处于登录态或仍停在主菜单");
+            Check(_authLoggedOut, "退出登录已生效");
+
+            store.ResetForProbe();
+        }
+
+        /// <summary>取登录页当前的提交按钮。</summary>
+        private static Button SubmitButton()
+        {
+            var p = UI.AccountGate.Panel;
+            var root = p != null ? p.PanelRoot : null;
+            var t = root != null ? root.transform.Find("Panel/SubmitBtn") : null;
+            return t != null ? t.GetComponent<Button>() : null;
+        }
+
+        private static Button SwitchButton()
+        {
+            var p = UI.AccountGate.Panel;
+            var root = p != null ? p.PanelRoot : null;
+            var t = root != null ? root.transform.Find("Panel/SwitchBtn") : null;
+            return t != null ? t.GetComponent<Button>() : null;
+        }
+
+        /// <summary>填表（走属性赋值，不走键盘——无头环境没有键盘）。</summary>
+        private IEnumerator Fill(string account, string pwd, string confirm, bool register, bool remember)
+        {
+            var p = UI.AccountGate.Panel;
+            if (p == null) { Fail("登录页缺失（填表阶段）"); yield break; }
+
+            if (p.IsRegisterMode != register)
+            {
+                var sw = SwitchButton();
+                string whySw = "";
+                if (sw == null || !UIHitTest.Click(sw, out whySw))
+                {
+                    Fail("登录/注册切换按钮点不到：" + (sw == null ? "按钮缺失" : whySw));
+                    yield break;
+                }
+                yield return null;
+            }
+
+            // 「记住密码」也是真点的：它是一颗 Toggle，勾没勾上只有点了才知道。
+            // 直接改内存里的布尔值，等于替玩家把这一下跳过去。
+            if (p.RememberValue != remember)
+            {
+                var root2 = p.PanelRoot;
+                var tog = root2 != null ? root2.transform.Find("Panel/RememberToggle") : null;
+                var togBtn = tog != null ? tog.GetComponent<Button>() : null;
+                string whyTog = "";
+                if (togBtn == null || !UIHitTest.Click(togBtn, out whyTog))
+                    Fail("「记住密码」开关点不到：" + (togBtn == null ? "缺失" : whyTog));
+                yield return null;
+            }
+
+            p.AccountText = account;
+            p.PasswordText = pwd;
+            if (confirm != null) p.ConfirmText = confirm;
+            yield return null;
+        }
+
+        private IEnumerator ClickSubmit()
+        {
+            var btn = SubmitButton();
+            string why = "";
+            if (btn == null || !UIHitTest.Click(btn, out why))
+            {
+                Fail("提交按钮点不到：" + (btn == null ? "按钮缺失" : why));
+                yield break;
+            }
+            yield return null;
+            yield return null;
+        }
+
+        /// <summary>
+        /// 填一组**应当被拒**的输入，断言：没登录 + 提示的是对应的那一条。
+        /// 只断言"弹了提示"是不够的——提示可以弹，人也可以同时被放进去。
+        /// </summary>
+        private IEnumerator Reject(string what, string account, string pwd, string confirm,
+            bool register, string expectKey)
+        {
+            yield return Fill(account, pwd, confirm, register, false);
+            yield return ClickSubmit();
+
+            var p = UI.AccountGate.Panel;
+            var store = Core.AccountStore.Instance;
+            bool blocked = store != null && !store.IsLoggedIn;
+            _lastRejectBlocked = blocked;
+            string msg = p != null ? p.MessageText : "";
+            bool said = msg == Localization.T(expectKey);
+            bool ok = blocked && said;
+
+            if (!blocked) Fail(what + "：竟然登录/注册成功了");
+            if (!said) Fail(what + "：提示不是「" + Localization.T(expectKey) + "」（实际「" + msg + "」）");
+            Check(ok, what);
+        }
+
+        /// <summary>记一条断点：通过数与总数一起走，报表明细里看得见是哪一条。</summary>
+        private void Check(bool ok, string what)
+        {
+            _authChecked++;
+            if (ok) _authOk++;
+            else _authBad += (_authBad.Length == 0 ? "" : " | ") + what;
         }
 
         /// <summary>
@@ -829,9 +1127,14 @@ namespace StarPixel.Dev
                 pass = pass && _weaponsDamaged == _weaponsFired && _combosOk == _combosChecked &&
                        _statsOk == _statsChecked && _capOk && _noMaxedOffer;
             if (_scene == "MENU")
-                pass = pass && _menuBtnOk == _menuBtnTotal && _codexBuilt && _codexOk == _codexTotal &&
-                       _codexClosed && _settBuilt && _settOk == _settTotal && _settClosed &&
+                pass = pass && _menuBtnOk == _menuBtnTotal && _rankBuilt && _rankOk == _rankTotal &&
+                       _rankClosed && _settBuilt && _settOk == _settTotal && _settClosed &&
+                       _lobbyResponded && _noticeClosed && _soloBuilt &&
                        _startClicked && _startWorld;
+            if (_scene == "AUTH")
+                pass = pass && _authBuilt && _authBlocked && _authFirstReg && _authSubmitHit &&
+                       _authOk == _authChecked && _authRegistered && _authRemembered &&
+                       _authAuto && _authLoggedOut && _authRegLogged && _authWrongPwd;
 
             Debug.Log("[SMOKE] ===== 选角/成长链路实测结果 =====");
             Debug.Log("[SMOKE] 场景              " + _scene);
@@ -848,16 +1151,33 @@ namespace StarPixel.Dev
                 case "MENU":
                     Debug.Log("[SMOKE] 主菜单按钮可达    " + _menuBtnOk + "/" + _menuBtnTotal);
                     Debug.Log("[SMOKE] 不可达明细        " + _menuBtnBad);
-                    Debug.Log("[SMOKE] 图鉴面板已建出    " + Yn(_codexBuilt));
-                    Debug.Log("[SMOKE] 图鉴按钮可达      " + _codexOk + "/" + _codexTotal);
-                    Debug.Log("[SMOKE] 图鉴不可达明细    " + _codexBad);
-                    Debug.Log("[SMOKE] 图鉴关闭已收      " + Yn(_codexClosed));
+                    Debug.Log("[SMOKE] 排行榜已建出      " + Yn(_rankBuilt));
+                    Debug.Log("[SMOKE] 排行榜按钮可达    " + _rankOk + "/" + _rankTotal);
+                    Debug.Log("[SMOKE] 排行榜不可达明细  " + _rankBad);
+                    Debug.Log("[SMOKE] 排行榜关闭已收    " + Yn(_rankClosed));
                     Debug.Log("[SMOKE] 设置面板已建出    " + Yn(_settBuilt));
                     Debug.Log("[SMOKE] 设置按钮可达      " + _settOk + "/" + _settTotal);
                     Debug.Log("[SMOKE] 设置不可达明细    " + _settBad);
                     Debug.Log("[SMOKE] 设置关闭已收      " + Yn(_settClosed));
+                    Debug.Log("[SMOKE] 联机按钮有回应    " + Yn(_lobbyResponded));
+                    Debug.Log("[SMOKE] 联机入口已退出    " + Yn(_noticeClosed));
+                    Debug.Log("[SMOKE] 单人二级页已建出  " + Yn(_soloBuilt));
                     Debug.Log("[SMOKE] 开始游戏已点击    " + Yn(_startClicked));
                     Debug.Log("[SMOKE] 开局世界已建出    " + Yn(_startWorld));
+                    break;
+                case "AUTH":
+                    Debug.Log("[SMOKE] 登录页已建出      " + Yn(_authBuilt));
+                    Debug.Log("[SMOKE] 未登录已拦截      " + Yn(_authBlocked));
+                    Debug.Log("[SMOKE] 首屏为注册页      " + Yn(_authFirstReg));
+                    Debug.Log("[SMOKE] 提交按钮可达      " + Yn(_authSubmitHit));
+                    Debug.Log("[SMOKE] 注册后进主菜单    " + Yn(_authRegistered));
+                    Debug.Log("[SMOKE] 注册后已登录      " + Yn(_authRegLogged));
+                    Debug.Log("[SMOKE] 密码错误被挡      " + Yn(_authWrongPwd));
+                    Debug.Log("[SMOKE] 记住密码已回填    " + Yn(_authRemembered));
+                    Debug.Log("[SMOKE] 自动登录成功      " + Yn(_authAuto));
+                    Debug.Log("[SMOKE] 退出登录已生效    " + Yn(_authLoggedOut));
+                    Debug.Log("[SMOKE] 断点通过          " + _authOk + "/" + _authChecked);
+                    Debug.Log("[SMOKE] 被挡下明细        " + (_authBad.Length == 0 ? "<无>" : _authBad));
                     break;
                 case "PROGRESSION":
                     Debug.Log("[SMOKE] 武器开火覆盖      " + _weaponsFired + "/10");
