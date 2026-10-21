@@ -16,6 +16,29 @@ namespace StarPixel.Net
         private string _address = "127.0.0.1";
 
         /// <summary>
+        /// M55：玩家输入的加入目标。可以是组队码（<c>K7M-2QX</c>），也可以直接是 IP。
+        /// <para>保留 IP 这条老路不是偷懒——局域网里有固定地址的朋友、以及自动化联机探针
+        /// （<c>net_longrun_probe --address</c>）都依赖它。码是给**人**用的便捷路径，不是唯一路径。</para>
+        /// </summary>
+        private string _codeInput = "";
+
+        private InputField _codeField;
+        private Text _myCodeText;
+
+        /// <summary>输入框里的当前内容（探针用：写进来 = 模拟玩家输入）。</summary>
+        public string CodeText
+        {
+            get { return _codeInput; }
+            set { _codeInput = value ?? ""; if (_codeField != null) _codeField.text = _codeInput; }
+        }
+
+        /// <summary>本机作为房主时的组队码（未开房为空串）。</summary>
+        public string MyCode => RoomDirectory.LocalCode ?? "";
+
+        /// <summary>大厅上展示给房主的码文案（探针用：确认码真的上屏了，而不只是生成了）。</summary>
+        public string MyCodeText => _myCodeText != null ? _myCodeText.text : "";
+
+        /// <summary>
         /// 当前大厅 UI 根（M18 续四：为无头 UI 探针提供定位入口）。
         /// 与 <see cref="UI.SettingsPanel.PanelRoot"/> 同理——不能用 GameObject.Find("NetLobbyCanvas")：
         /// 语言切换 / 断线重建后旧画布要等帧末才真正销毁，Find 会命中旧的，读到切换前的文案。
@@ -77,9 +100,9 @@ namespace StarPixel.Net
             // 主菜单成了唯一入口之后，没有这颗按钮就等于把玩家关在半路上。
             CreateButton(_root.transform, Core.Localization.T("net.back"), new Vector2(260, -70), OnBack, "BackBtn");
 
-            // 地址输入（加入房间用；同一局域网填房主 IP）
-            CreateText(_root.transform, Core.Localization.T("net.address"), new Vector2(0, 20), 18);
-            var inputGO = new GameObject("AddressInput", typeof(RectTransform));
+            // 加入目标输入：优先当组队码解析，解析不了再看是不是 IP（见 CodeText 注释）
+            CreateText(_root.transform, Core.Localization.T("net.room_code"), new Vector2(0, 20), 18);
+            var inputGO = new GameObject("CodeInput", typeof(RectTransform));
             inputGO.transform.SetParent(_root.transform, false);
             var inputImg = inputGO.AddComponent<Image>();
             inputImg.color = new Color(0.15f, 0.17f, 0.22f, 1f);
@@ -90,19 +113,37 @@ namespace StarPixel.Net
             t.font = GameBuilderLegacyFont();
             t.color = Color.white;
             t.fontSize = 20;
-            t.alignment = TextAnchor.MiddleLeft;
+            t.alignment = TextAnchor.MiddleCenter;   // 码短且居中，居中比左对齐更像"填码"
             input.textComponent = t;
-            input.text = _address;
             var rt = (RectTransform)inputGO.transform;
             rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
             rt.anchoredPosition = new Vector2(0, -20);
             rt.sizeDelta = new Vector2(300, 36);
-            input.onValueChanged.AddListener(v => _address = v);
+            input.onValueChanged.AddListener(v => _codeInput = v);
+            _codeField = input;
+            if (!string.IsNullOrEmpty(_codeInput)) input.text = _codeInput;
+
+            // 房主的码展示区。建房成功后才填内容——
+            // 空着不显示是因为"房间 K7M-2QX"这种行在还没建房时是句谎话。
+            _myCodeText = CreateText(_root.transform, "", new Vector2(0, -150), 22);
+            _myCodeText.color = Core.UIFactory.Palette.Gold;
+            RefreshMyCode();
+        }
+
+        /// <summary>把本机的码刷到界面上（未开房则留空）。</summary>
+        private void RefreshMyCode()
+        {
+            if (_myCodeText == null) return;
+            string code = MyCode;
+            _myCodeText.text = string.IsNullOrEmpty(code)
+                ? ""
+                : Core.Localization.T("net.my_code", RoomCode.Format(code));
         }
 
         /// <summary>M54：退出大厅回到主菜单（主菜单进来时才有意义）。</summary>
         private void OnBack()
         {
+            JoinTarget.Unhost();            // M55：离开大厅时撤掉本机房间与广播应答
             Core.UIFactory.Destroy(_root);
             _root = null;
             Destroy(gameObject);            // 组件一并拆掉：OnDestroy 会退订语言切换
@@ -130,24 +171,27 @@ namespace StarPixel.Net
             var backend = NetBackend.Instance;
             if (backend == null) { SetStatus(Core.Localization.T("net.err_no_fishnet")); return; }
             if (!CheckNetScene()) return;
+
+            // M55：先生成码、先开始广播应答，**再** StartHost。
+            // 顺序反了会有一个真实的窗口：服务已起但还没人应答，队友此刻问过来必然扑空，
+            // 表现是"码是对的却搜不到房间"——这种偶发最难查，靠顺序消除。
+            var code = JoinTarget.Host(NetSession.PlayerName, NetProtocol.DefaultPort);
+            RefreshMyCode();
+            if (string.IsNullOrEmpty(code)) SetStatus(Core.Localization.T("net.err_no_code"));
+
             backend.Ready -= OnBackendReady;
             backend.Ready += OnBackendReady;
             backend.StartHost();
             SetStatus(Core.Localization.T("net.creating"));
         }
 
+        /// <summary>
+        /// M55：加入改成协程。原因很实际——组队码找不到时要在局域网广播等两秒，
+        /// 同步版本会把整个界面冻住，玩家只会看到"点了没反应"。
+        /// </summary>
         private void OnJoin()
         {
-            var backend = NetBackend.Instance;
-            if (backend == null) { SetStatus(Core.Localization.T("net.err_no_fishnet")); return; }
-            if (!CheckNetScene()) return;
-            if (string.IsNullOrEmpty(_address)) _address = "127.0.0.1";
-            NetSession.RemoteAddress = _address;
-            NetSession.SetSpectator(false);   // M14：普通加入=参战，清除可能的观战态
-            backend.Ready -= OnBackendReady;
-            backend.Ready += OnBackendReady;
-            backend.StartClient(_address);
-            SetStatus(Core.Localization.T("net.connecting", _address));
+            StartCoroutine(JoinCo(false));
         }
 
         /// <summary>
@@ -157,16 +201,77 @@ namespace StarPixel.Net
         /// </summary>
         private void OnSpectate()
         {
+            StartCoroutine(JoinCo(true));
+        }
+
+        private System.Collections.IEnumerator JoinCo(bool spectator)
+        {
             var backend = NetBackend.Instance;
-            if (backend == null) { SetStatus(Core.Localization.T("net.err_no_fishnet")); return; }
-            if (!CheckNetScene()) return;
-            if (string.IsNullOrEmpty(_address)) _address = "127.0.0.1";
-            NetSession.RemoteAddress = _address;
-            NetSession.SetSpectator(true);
+            if (backend == null) { SetStatus(Core.Localization.T("net.err_no_fishnet")); yield break; }
+            if (!CheckNetScene()) yield break;
+
+            string raw = string.IsNullOrEmpty(_codeInput) ? _address : _codeInput;
+
+            // ① 直接填了 IP：老路径，零延迟，不走发现
+            string ip; int port;
+            if (JoinTarget.TryParseDirectAddress(raw, out ip, out port))
+            {
+                DoConnect(ip, port, ip, spectator);
+                yield break;
+            }
+
+            // ② 组队码先查本地目录：已经发现过的房间不必再等两秒
+            var cached = JoinTarget.ResolveCached(raw);
+            if (cached.Ok)
+            {
+                DoConnect(cached.Address, cached.Port, cached.HostName, spectator);
+                yield break;
+            }
+            // 码本身就不合法（位数/校验位不对）——没必要再去搜，直接告诉玩家输错了
+            if (cached.ReasonKey != "net.err_no_room")
+            {
+                SetStatus(Core.Localization.T(cached.ReasonKey));
+                yield break;
+            }
+
+            // ③ 目录里没有：广播问一次。放到线程池里跑，主线程只轮询完成标志，
+            //    否则这 2 秒会把渲染和输入一起冻住。
+            SetStatus(Core.Localization.T("net.searching"));
+            string code = RoomCode.Normalize(raw);
+            var task = System.Threading.Tasks.Task.Run(() => RoomDiscovery.Query(code));
+            float deadline = Time.unscaledTime + RoomDiscovery.QueryTimeout + 2f;
+            while (!task.IsCompleted && Time.unscaledTime < deadline) yield return null;
+
+            if (!task.IsCompleted) { SetStatus(Core.Localization.T("net.err_discover_failed")); yield break; }
+
+            var replies = task.Result;
+            if (replies == null || replies.Count == 0)
+            {
+                // 搜不到和搜索失败要分开报：前者是"没这个房间"，后者是"网络不让广播"，
+                // 玩家能采取的补救完全不同（前者查码，后者查防火墙/网络权限）。
+                SetStatus(Core.Localization.T(string.IsNullOrEmpty(RoomDiscovery.LastError)
+                    ? "net.err_no_room" : "net.err_discover_failed"));
+                yield break;
+            }
+
+            var best = replies[0];
+            var entry = RoomDirectory.Put(best.RoomKey, best.Address, best.Port, best.HostName, best.Players, false);
+            DoConnect(entry.Address, entry.Port, entry.HostName, spectator);
+        }
+
+        /// <summary>真正发起连接（解析完的最后一公里）。</summary>
+        private void DoConnect(string address, int port, string label, bool spectator)
+        {
+            _address = address;
+            NetSession.RemoteAddress = address;
+            NetSession.SetSpectator(spectator);
+            var backend = NetBackend.Instance;
+            if (backend == null) return;
             backend.Ready -= OnBackendReady;
             backend.Ready += OnBackendReady;
-            backend.StartClient(_address);
-            SetStatus(Core.Localization.T("net.connecting_spectate", _address));
+            backend.StartClient(address);
+            SetStatus(Core.Localization.T(spectator ? "net.connecting_spectate" : "net.connecting",
+                string.IsNullOrEmpty(label) ? address : label));
         }
 
         private void OnBackendReady()

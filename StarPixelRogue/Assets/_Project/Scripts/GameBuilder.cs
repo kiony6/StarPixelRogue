@@ -83,6 +83,9 @@ namespace StarPixel
             // M28：新建对象归属（链闪电 / Boss / 场景根兜底）无头实测（正常启动不受影响）
             if (HasArg("-orphanProbe")) { StartOrphanProbe(); return; }
 
+            // M55：组队码（码的校验位 / 发现报文 / 房间目录与解析）无头实测
+            if (HasArg("-roomProbe")) { StartRoomProbe(); return; }
+
             // M29：静态事件总线订阅对称性（反射自检 / 重开累积 / 升级面板重复）无头实测
             if (HasArg("-subProbe")) { StartSubProbe(); return; }
 
@@ -630,6 +633,23 @@ namespace StarPixel
             Application.targetFrameRate = 60;
             PrepareStage();
             StarPixel.Dev.PoolProbe.Start(ArgValue("-poolScene", "POOL"));
+        }
+
+        /// <summary>
+        /// M55 无头实测入口：交给 <see cref="Dev.RoomProbe"/> 验证组队码三层。
+        /// 参数：-roomScene CODE|WIRE|ROOM（默认 CODE）
+        ///
+        /// 组队码是**口头传递**的，它的失败模式不是崩溃而是"连不上"——
+        /// 而"连不上"在一个还没跑通公网的联机功能里几乎无法与"网络本来就不通"区分。
+        /// 所以这一层必须在无头环境里被完整断言，不能留到实机联调再说。
+        /// </summary>
+        private static void StartRoomProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;
+            PrepareStage();
+            StarPixel.Dev.RoomProbe.Start(ArgValue("-roomScene", "CODE"));
         }
 
         private static void StartOrphanProbe()
@@ -1244,6 +1264,18 @@ namespace StarPixel
             hud.modeText = CreateText(canvasGO.transform, Net.NetSession.ModeLabel(), new Vector2(0, 230), 18);
             hud.modeText.color = new Color(0.7f, 0.85f, 1f, 0.9f);
             if (!Net.NetSession.IsNetworked) hud.modeText.gameObject.SetActive(false);
+
+            // M55：房主的组队码要显示在**游戏里**，不能只显示在大厅。
+            // 建房成功后大厅立刻销毁、世界马上建起来，房主是"边玩边等队友"的——
+            // 码若只在那消失的大厅里出现过，就等于生成了一个没人看得见的东西。
+            if (Net.NetSession.IsHost && !string.IsNullOrEmpty(Net.RoomDirectory.LocalCode))
+            {
+                var roomCode = Core.UIFactory.CreateText(canvasGO.transform, "RoomCodeText",
+                    Net.RoomCode.Format(Net.RoomDirectory.LocalCode),
+                    new Vector2(0, -250), 16, TextAnchor.MiddleCenter, new Vector2(420, 28));
+                roomCode.color = Core.UIFactory.Palette.Gold;
+                Core.UIFactory.ApplyOutline(roomCode, Core.UIFactory.Palette.Outline, 2f);
+            }
 
             // M53：HUD 三条进度条改走 UIFactory 的圆角发光条（同一批子节点名不变）。
             hud.hpSlider = Core.UIFactory.CreateBar(canvasGO.transform, "HPBar",
