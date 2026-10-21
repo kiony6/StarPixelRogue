@@ -42,6 +42,7 @@ namespace StarPixel.Net
             if (_nm == null) return;
             _intentHost = true;
             _intentionalStop = false;
+            _stopHandled = false;
             NetSession.GenerateReconnectToken();
             NetReconnectStore.ClearAll();         // 房主：清空上一局残留的进度快照
             NetReconnect.Ensure()?.ResetState();
@@ -58,6 +59,7 @@ namespace StarPixel.Net
             if (_nm == null) return;
             _intentHost = false;
             _intentionalStop = false;
+            _stopHandled = false;
             NetSession.GenerateReconnectToken();
             NetReconnect.Ensure()?.ResetState();
 
@@ -102,12 +104,40 @@ namespace StarPixel.Net
             }
         }
 
-        public void Stop()
+        /// <summary>
+        /// 停止当前会话。
+        ///
+        /// M50 修复（两处，都由这条链路暴露）：
+        ///
+        /// ① **不再先退订 <see cref="OnClientConnectionState"/>**。旧实现第一件事是
+        ///    `_nm.ClientManager.OnClientConnectionState -= OnClientConnectionState;`，
+        ///    然后才 StopConnection——于是 `_intentionalStop` 那条分支**永远走不到**：
+        ///    · <c>NetSession.Mode</c> 停在 Host/Client（`IsNetworked` 恒为真）；
+        ///    · 联机大厅不重建。
+        ///    结算面板上的「离开对局」正好走这条路（<see cref="UI.GameOverPanel"/>），
+        ///    结果玩家点了之后世界还在、面板关了、大厅没有、模式还是联机——
+        ///    卡在一个谁都不会再刷新的画面前。注释写着"触发断线回调 → 重建联机大厅"，
+        ///    而代码做的恰好是让那个回调不可能触发。
+        ///
+        /// ② 新增 <paramref name="returnToLobby"/>。断开之后去哪儿不是后端该猜的事：
+        ///    「离开对局」要回大厅，青少年模式到点要回主菜单（今天不能再玩了，
+        ///    丢进大厅是个死胡同）。
+        /// </summary>
+        public void Stop(bool returnToLobby = true)
         {
             _intentionalStop = true;
+            _returnToLobbyOnStop = returnToLobby;
+            _stopHandled = false;
             NetReconnect.Ensure()?.Cancel();
-            if (_nm == null) return;
-            try { _nm.ClientManager.OnClientConnectionState -= OnClientConnectionState; } catch { }
+
+            if (_nm == null)
+            {
+                // 从未联机（或已经停过一次）：没有回调可等，只能在这里把静态状态归零。
+                // 少了这一步，调用方以为"停干净了"，而 IsNetworked 还是真。
+                NetSession.ResetToOffline();
+                return;
+            }
+
             try { if (_nm.IsServerStarted) _nm.ServerManager.StopConnection(true); }
             catch (Exception e) { Debug.LogWarning("[Net] 停止服务端失败: " + e.Message); }
             try { if (_nm.IsClientStarted) _nm.ClientManager.StopConnection(); }
@@ -116,6 +146,12 @@ namespace StarPixel.Net
             // 否则二次建房/加入将收不到连接就绪事件（Ready 永远不触发）。
             _nm = null;
         }
+
+        /// <summary>M50：本次停止是"主动离开"，且断开后要去哪儿（=false 时不重建大厅）。</summary>
+        private bool _returnToLobbyOnStop = true;
+
+        /// <summary>M50：一次 Stop 可能收到多个 Stopped（服务端与本地客户端各一个），只处理第一个。</summary>
+        private bool _stopHandled;
 
         /// <summary>确保场景中存在 NetworkManager（编辑器装配脚本会生成带完整配置的场景；此处为兜底）。</summary>
         private void EnsureNetworkManager()
@@ -230,11 +266,14 @@ namespace StarPixel.Net
                     break;
 
                 case LocalConnectionState.Stopped:
-                    // 主动离开（回大厅/退出）：回到单机态并通知大厅重建 UI
+                    // 主动离开（回大厅/退出/到点强退）：回到单机态，并按调用方的意图决定
+                    // 是否重建大厅（M50：这里是唯一处理"主动离开"的地方，别处不许再各自收尾）
                     if (_intentionalStop)
                     {
+                        if (_stopHandled) break;      // 服务端与本地客户端会各发一次
+                        _stopHandled = true;
                         NetSession.ResetToOffline();
-                        NetLobby.NotifyDisconnected();
+                        if (_returnToLobbyOnStop) NetLobby.NotifyDisconnected();
                         break;
                     }
 

@@ -21,8 +21,15 @@ namespace StarPixel.Net
         /// <summary>以客户端身份连接目标地址。</summary>
         void StartClient(string address);
 
-        /// <summary>停止当前会话。</summary>
-        void Stop();
+        /// <summary>
+        /// 停止当前会话。
+        /// <para><paramref name="returnToLobby"/> = true（默认）：断开后重建联机大厅，
+        /// 玩家可以再建房/加入——「离开对局」这类主动退出走这条。</para>
+        /// <para>= false：断开后**不回大厅**。只有一个调用方用得到：青少年模式当日时长到点的
+        /// 强制退出——那一刻玩家今天不能再玩了，把他丢进大厅是个死胡同，
+        /// 主菜单 + 「今日时长已达上限」才是该去的地方（M50）。</para>
+        /// </summary>
+        void Stop(bool returnToLobby = true);
 
         /// <summary>本地客户端连接就绪（房主启动成功或客户端连上）——触发世界构建。</summary>
         event Action Ready;

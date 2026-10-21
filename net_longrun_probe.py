@@ -80,9 +80,33 @@ RESTART_JUDGES = (
     "全程零异常",
 )
 
+# M50：到点被踢。两端判据**完全不同**——这正是这个场景的意义：
+#   客户端问"我走了吗"（本地能看到：主菜单、提示、会话闭合、玩家被清）；
+#   房主问"他走了吗"（只有房主能回答：扫场的玩家数 2 → 1）。
+# 只在一端断言会怎样：旧实现（只拆世界不断连）在客户端那侧几乎全绿——
+# 本地世界确实拆干净了，主菜单也确实弹了，唯一的症状在**别人眼里**。
+EXIT_HOST_JUDGES = (
+    "开局对端在场",
+    "对端到点后已离开",
+    "房主世界继续推进",
+    "房主自身不受影响",
+    "全程零异常",
+)
+EXIT_CLIENT_JUDGES = (
+    "青少年模式且对局计时在走",
+    "到点前弹出一次预警",
+    "到点恰好强制退出一次",
+    "强制退出后已离开会话",
+    "强制退出后世界已拆",
+    "强制退出后本端玩家已清",
+    "强制退出后主菜单可见且有提示",
+    "全程零异常",
+)
+# 共同键排前面，两边的专属键各自跟在后——表格按这个顺序打，一眼看出哪一侧缺东西
+EXIT_JUDGES = EXIT_HOST_JUDGES + tuple(k for k in EXIT_CLIENT_JUDGES
+                                       if k not in EXIT_HOST_JUDGES)
+
 PROBE_RE = re.compile(r"\[SMOKE\]\s*(.+?)\s{2,}(.+?)\s*$")
-
-
 def probe_results(path, judges):
     """抽出探针判据 -> 是/否/不适用，以及信息行。"""
     judges_map, info = {}, {}
@@ -131,8 +155,9 @@ def last_int(info, key, default=-1):
 
 def main():
     ap = argparse.ArgumentParser(description="联机长局 / 重开局实测（房主 + 客户端双开）")
-    ap.add_argument("--scene", default="GROWTH", choices=("GROWTH", "RESTART"),
-                    help="GROWTH=长局堆积；RESTART=长局后重开一局（验证反生成与重建）")
+    ap.add_argument("--scene", default="GROWTH", choices=("GROWTH", "RESTART", "EXIT"),
+                    help="GROWTH=长局堆积；RESTART=长局后重开一局（验证反生成与重建）；"
+                         "EXIT=M50 客户端到点被踢（验证真的离开房间、房主看得见他消失）")
     ap.add_argument("--seconds", type=int, default=300, help="房主运行时长（真实秒）")
     ap.add_argument("--speed", type=float, default=6.0,
                     help="加速倍率（只作用于房主；客户端保持 1x 跟随权威同步）")
@@ -150,7 +175,8 @@ def main():
                     help="单端日志体积上限（MB），超过即熔断")
     args = ap.parse_args()
 
-    judges = GROWTH_JUDGES if args.scene == "GROWTH" else RESTART_JUDGES
+    judges = {"GROWTH": GROWTH_JUDGES, "RESTART": RESTART_JUDGES,
+              "EXIT": EXIT_JUDGES}[args.scene]
 
     exe = args.exe
     if not os.path.exists(exe):
@@ -174,12 +200,17 @@ def main():
             os.remove(p)
 
     print("=" * 68)
-    print("联机%s实测（M45）" % ("长局稳定性" if args.scene == "GROWTH" else "重开局"))
+    print("联机%s实测" % {"GROWTH": "长局稳定性（M45）", "RESTART": "重开局（M45）",
+                          "EXIT": "到点强制退出（M50）"}[args.scene])
     print("  产物   %s" % rel(exe))
     print("  场景   %s" % args.scene)
     print("  人数   %d 人局（1 房主 + %d 客户端）" % (n_clients + 1, n_clients))
     print("  房主   %ds（%sx 加速 + 保活）   客户端 1x 跟随" % (args.seconds, args.speed))
-    print("  预期   游戏内约 %ds 的权威世界演化" % int(args.seconds * args.speed))
+    if args.scene == "EXIT":
+        print("  预期   客户端推到 60 分钟上限 → 真实 ForceExitMinor → 离开房间；"
+              "房主侧应看见他消失")
+    else:
+        print("  预期   游戏内约 %ds 的权威世界演化" % int(args.seconds * args.speed))
     print("=" * 68)
 
     # 1) 房主：加速 + 保活 + 长局探针
@@ -268,7 +299,13 @@ def main():
     multi("判据", ["房主"] + ["客户端%d" % (i + 1) for i in range(n_clients)])
     print("-" * (16 + width * (n_clients + 1)))
     for k in judges:
-        multi(k, [h_judges.get(k, "?")] + [cj.get(k, "?") for cj, _ in c_all])
+        # M50：EXIT 两端判据不同，缺的那几格打 "—"（这一端本来就不该有），
+        # 而不是 "?"（看起来像"没采到"）。
+        row = []
+        for got in [h_judges] + [cj for cj, _ in c_all]:
+            v = got.get(k)
+            row.append(v if v is not None else ("—" if args.scene == "EXIT" else "?"))
+        multi(k, row)
     print("-" * (16 + width * (n_clients + 1)))
 
     def info_row(label, fn):
@@ -283,6 +320,22 @@ def main():
         info_row("末次账本", lambda i: i.get("末次账本", "?"))
         info_row("快照/帧数", lambda i: i.get("快照重建/帧数", "?"))
         info_row("场上玩家", lambda i: i.get("场上玩家", "?"))
+    elif args.scene == "EXIT":
+        # 两端的信息键**不重叠**：房主只打人数与波次，客户端只打自己的时长与会话。
+        # 打不出来的那几格显示 "—"（这一端本来就不该有这一项），
+        # 不用 "?"——那看起来像"没采到"，会让人去查一个不存在的问题。
+        def opt(key):
+            return lambda i: i.get(key, "—")
+        info_row("开局玩家", opt("开局场上玩家"))
+        info_row("离开后玩家", opt("对端离开后玩家"))
+        # 键名是"波次轨迹"不是"波次"：SmokeTest 收尾也会打一行「波次 N」，
+        # 按最后一条取会把轨迹覆盖成单个数字（M46 踩过同一个键名冲突）。
+        info_row("波次轨迹", opt("波次轨迹"))
+        info_row("房主timeScale", opt("房主 timeScale"))
+        info_row("时长轨迹", opt("时长轨迹"))
+        info_row("会话", opt("强制退出后会话"))
+        info_row("主菜单", opt("强制退出后主菜单"))
+        info_row("玩家", opt("强制退出后玩家"))
     else:
         info_row("重开前波次", lambda i: as_int(i, "重开前波次"))
         info_row("重开后波次", lambda i: as_int(i, "重开后波次"))
@@ -305,27 +358,42 @@ def main():
     problems = []
 
     # —— 每一端：探针自己的判据必须全过（"不适用"表示该判据在本端不成立，不算失败） ——
-    for k in judges:
-        for side, got in [("房主", h_judges)] + \
-                [("客户端%d" % (i + 1), cj) for i, (cj, _) in enumerate(c_all)]:
-            v = got.get(k)
-            if v != "是" and v != "不适用":
-                problems.append("%s侧判据「%s」= %s" % (side, k, v))
+    #
+    # M50：EXIT 场景两端的判据**不是同一张表**——客户端关心"我走了吗"，
+    # 房主关心"他走了吗"。拿同一张表去核，另一端必然全是 "?" 而报一堆假失败。
+    if args.scene == "EXIT":
+        per_side = [("房主", EXIT_HOST_JUDGES, h_judges)] + \
+                   [("客户端%d" % (i + 1), EXIT_CLIENT_JUDGES, cj)
+                    for i, (cj, _) in enumerate(c_all)]
+        for side, keys, got in per_side:
+            for k in keys:
+                v = got.get(k)
+                if v != "是" and v != "不适用":
+                    problems.append("%s侧判据「%s」= %s" % (side, k, v))
+    else:
+        for k in judges:
+            for side, got in [("房主", h_judges)] + \
+                    [("客户端%d" % (i + 1), cj) for i, (cj, _) in enumerate(c_all)]:
+                v = got.get(k)
+                if v != "是" and v != "不适用":
+                    problems.append("%s侧判据「%s」= %s" % (side, k, v))
 
     # —— M45：人数是多人局的成色前提 ——
     #
     # 少一个人时，其余所有判据（掉落物有界 / 波次推进 / 双端一致）都是绿的：
     # 世界照样转，只是少了个玩家。**必须**先确认人齐了，否则整轮都是假通过。
+    # M50：EXIT 场景**跳过**这条——那里少一个人正是被测的行为本身。
     expect_players = n_clients + 1
-    pkey = "场上玩家" if args.scene == "GROWTH" else "重开后玩家"
-    for i, ci in enumerate([h_info] + [x for _, x in c_all]):
-        side = "房主" if i == 0 else "客户端%d" % i
-        got = first_int(ci, pkey, -1) if args.scene == "GROWTH" else as_int(ci, pkey)
-        if got >= 0 and got != expect_players:
-            problems.append(
-                "%s侧%s = %d（%d 人局期望 %d）——有人没连上或被踢了；"
-                "少人时世界照样推进，其余判据会一路假绿，所以这条必须单独判"
-                % (side, pkey, got, expect_players, expect_players))
+    if args.scene != "EXIT":
+        pkey = "场上玩家" if args.scene == "GROWTH" else "重开后玩家"
+        for i, ci in enumerate([h_info] + [x for _, x in c_all]):
+            side = "房主" if i == 0 else "客户端%d" % i
+            got = first_int(ci, pkey, -1) if args.scene == "GROWTH" else as_int(ci, pkey)
+            if got >= 0 and got != expect_players:
+                problems.append(
+                    "%s侧%s = %d（%d 人局期望 %d）——有人没连上或被踢了；"
+                    "少人时世界照样推进，其余判据会一路假绿，所以这条必须单独判"
+                    % (side, pkey, got, expect_players, expect_players))
 
     if args.scene == "GROWTH":
         # —— 交叉核对（联机独有的失败面）——
@@ -388,7 +456,7 @@ def main():
 
         verdict = ("%d 人局掉落物有界、上限真的生效、每端计数与房主一致、全程零异常"
                    % (n_clients + 1))
-    else:
+    elif args.scene == "RESTART":
         # —— 重开局的多端核对 ——
         # 每端的单端判据已经覆盖了"清没清干净"，这里只查每端各自的判据管不到的事。
         # M45：逐端核对（理由同 GROWTH——只核对一个客户端时，另外两个漏了也没人知道）。
@@ -479,6 +547,52 @@ def main():
 
         verdict = ("%d 人局联机实体真被反生成、新世界每端一致重建、玩家齐全、零残留零异常"
                    % (n_clients + 1))
+    else:
+        # —— M50：到点被踢的多端核对 ——
+        #
+        # 这一段的全部价值在**跨端**：单看客户端，"主菜单弹了 / 世界拆了"在
+        # 旧实现（只拆世界不断连）下也是全绿的——本地确实干净了。
+        # 唯一的症状在房主那边：他还认为那个人在场。
+        h_before = as_int(h_info, "开局场上玩家")
+        h_after = as_int(h_info, "对端离开后玩家")
+        h_wave_txt = str(h_info.get("波次轨迹", ""))
+
+        if h_before < 2:
+            problems.append(
+                "房主侧开局场上玩家 %d（期望 2）——客户端从一开始就没连上，"
+                "\"他后来走了\"在这种情形下是平凡成立，整轮白测" % h_before)
+
+        if h_after != h_before - 1:
+            problems.append(
+                "房主侧对端离开后场上玩家 %d（开局 %d）——**他还在房间里**。"
+                "这正是 M50 要修的形态：客户端到点只拆了本地世界、没有断线，"
+                "房主仍在为一个再也不会响应的角色刷怪、算伤害、掉宝石"
+                % (h_after, h_before))
+
+        # 房主自己的世界不能被别人的退房带停：波次两个数都要有，且后 > 前
+        m = re.search(r"(-?\d+)\s*→\s*(-?\d+)", h_wave_txt)
+        if not m:
+            problems.append("房主侧波次信息缺失（%r）——无法判断世界是否继续推进" % h_wave_txt)
+        elif int(m.group(2)) <= int(m.group(1)):
+            problems.append(
+                "房主侧波次 %s 没有推进——客户端退房把房主的世界也带停了"
+                "（退房不是解散房间）" % h_wave_txt)
+
+        # 客户端必须**真的**断开。探针自己的「强制退出后已离开会话」已经判了一次，
+        # 这里再从驱动脚本这一侧独立核对一遍：探针那条判据是读 IsNetworked，
+        # 万一有人把 ResetToOffline 写成"只在探针里为真"的形态，两边一起判才拦得住。
+        for idx, (_, ci) in enumerate(c_all):
+            side = "客户端%d" % (idx + 1)
+            session = str(ci.get("强制退出后会话", "?"))
+            if session != "已断开":
+                problems.append("%s 到点后会话状态 = %s（期望 已断开）" % (side, session))
+            menu = str(ci.get("强制退出后主菜单", ""))
+            if not menu.startswith("可见"):
+                problems.append("%s 到点后没有回到主菜单（%s）——玩家不知道发生了什么"
+                                % (side, menu))
+
+        verdict = ("客户端到点后真的离开了房间（房主侧看见他消失）、"
+                   "房主世界继续推进、双方零异常")
 
     if h_exc or c_exc:
         problems.append("存在运行时异常（房主 %d / 客户端 %d），详见日志" % (h_exc, c_exc))

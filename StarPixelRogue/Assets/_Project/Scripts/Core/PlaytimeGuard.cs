@@ -270,6 +270,26 @@ namespace StarPixel.Core
             // ① 主菜单被这层遮罩盖住；② _hintShowing 一直为真，下一局完全不计时。
             CloseHint();
             Debug.Log("[Playtime] 青少年模式达到每日时长上限，强制返回主菜单");
+
+            // M50：**联机会话下必须先离开房间**，只拆世界是不够的。
+            //
+            // 旧实现（M47 起）到这里只调 TeardownWorld()：世界没了，连接还在。
+            // 两种身份各有各的难看：
+            //   · 客户端：本地镜像拆了，房主那边**还认为他在场**——敌人照样追着
+            //     那个再也不会响应的角色打，房主还在为他刷怪、算伤害、掉宝石；
+            //     而这位玩家坐在主菜单上，屏幕后面还有一整个世界在替他跑。
+            //   · 房主：权威世界被自己拆空了，客户端却仍连着——他们看到的是一张
+            //     不再刷新的空地图，没有任何解释，也不知道该退房。
+            // 「到点不能再玩」这件事本身就已经是离开房间，不是"留在房间里看着"。
+            //
+            // 顺序是刻意 teardown → Stop 的：拆世界那一刻还是房主，
+            // DespawnAllWorldObjects 的反生成才广播得出去（先 Stop 就只能本地销毁，
+            // 客户端副本变僵尸——M43 立下的规矩）。Stop 传 false：
+            // 断开后回**主菜单**，不回联机大厅（今天已经不能再玩了，大厅是死胡同）。
+            bool networked = Net.NetSession.IsNetworked;
+            GameBuilder.TeardownWorld();
+            if (networked) LeaveSession();
+
             // M47：主菜单必须先 **Ensure** 再提示，不能写成 `if (Instance != null)`。
             // 那样写的后果是：任何没建过主菜单的启动路径（无头实测入口、将来可能的
             // 快捷开局/续玩入口）一旦到点，玩家会被**静默**踢出——世界拆了、菜单没有、
@@ -278,7 +298,26 @@ namespace StarPixel.Core
             // （PlaytimeProbe 自己会先 MainMenu.Ensure()，恰好把这条静默路径遮住了）。
             UI.MainMenu.Ensure();
             UI.MainMenu.Instance.ShowWithNotice(Localization.T("playtime.force_exit"));
-            GameBuilder.TeardownWorld();
+        }
+
+        /// <summary>
+        /// M50：真正挂断联机会话。任何一步失败都不许阻断"回主菜单"——
+        /// 合规退出路径上，玩家看到解释比网络状态干净更重要；
+        /// 但失败要留痕，否则下次又变成一条安静的死路。
+        /// </summary>
+        private static void LeaveSession()
+        {
+            try
+            {
+                var backend = Net.NetBackend.Instance;
+                if (backend != null) backend.Stop(false);   // false = 不重建大厅，直接回主菜单
+                else Net.NetSession.ResetToOffline();       // 后端不在（纯单机编译）：只把模式归零
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning("[Playtime] 离开联机会话失败: " + e.Message);
+                Net.NetSession.ResetToOffline();
+            }
         }
 
         /// <summary>

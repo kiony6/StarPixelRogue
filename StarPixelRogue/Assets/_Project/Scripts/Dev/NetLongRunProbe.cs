@@ -1,6 +1,7 @@
 #if FISHNET_ENABLED
 using System;
 using System.Collections.Generic;
+using StarPixel.Enemy;
 using StarPixel.Net;
 using StarPixel.Pickups;
 using UnityEngine;
@@ -113,6 +114,27 @@ namespace StarPixel.Dev
 
         private bool _rsWaveOk, _rsPickupOk, _rsStateOk, _rsEnemyOk, _rsLeakGemOk, _rsLeakStateOk;
 
+        // —— M50 EXIT：联机侧到点强制退出 ——
+        //
+        // 单机那条链 M47 已经走通了（预警 → 死在面板上 → 到点被踢 → 回主菜单）。
+        // 联机这条**从没被走过**，而它多出一个单机根本没有的后果：
+        // 到点时世界拆了，**连接还在**。
+        //   · 客户端：房主仍认为他在场——敌人继续追着那个再也不会响应的角色，
+        //     房主还在为他刷怪、算伤害、掉宝石；
+        //   · 房主：权威世界被自己拆空，客户端却还连着，看到的是一张不会再刷新的空地图。
+        // 判据因此分两侧，而且**必须分两侧**：
+        //   客户端侧问"我走了吗"（IsNetworked 归零 / 玩家对象被清）；
+        //   房主侧问"他走了吗"（扫场的玩家数 2 → 1）——后者是唯一能证明
+        //   "真的挂断了"而不是"只在本地拆了世界"的证据。只在自己这一端断言，
+        //   旧实现（只拆世界不断连）会一路全绿：本地世界确实干净了。
+        private bool _exPrepped, _exForced, _exSampled, _exRestored;
+        private bool _exMinorOn, _exStartOk, _exHintAtWarn;
+        private int _exWarnCount, _exForceCount, _exPlayersBefore = -1, _exPlayersAfter = -1;
+        private int _exWaveBefore = -1, _exWaveAfter = -1, _exPlayersAfterSelf = -1;
+        private float _exSecAtWarn, _exSecAtForce, _exScaleHost = -1f;
+        private bool _exMenuVisible, _exNetworkedAfter, _exWorldGone, _exRunningAfter, _exLocalAlive;
+        private string _exNotice = "";
+
         private const int SEGMENTS = 6;
         private readonly List<Sample> _samples = new List<Sample>();
         private int _done;
@@ -188,6 +210,12 @@ namespace StarPixel.Dev
             if (_scene == "RESTART")
             {
                 TickRestart();
+                return;
+            }
+
+            if (_scene == "EXIT")
+            {
+                TickExit();
                 return;
             }
 
@@ -617,6 +645,196 @@ namespace StarPixel.Dev
             Line("首次异常", _firstError);
             Line("结论", (_errors == 0 && _fail.Count == 0 && _ok == _checked) ? "通过" : "不通过");
             foreach (var f in _fail) Line("失败项", f);
+        }
+
+        // =====================================================================================
+        //  EXIT：到点被踢的那一端必须真的离开房间，另一端必须看见他消失
+        // =====================================================================================
+
+        /// <summary>
+        /// 两端跑同一个场景，但做的事完全不同：
+        ///   客户端 —— 打开青少年模式 → 推到预警 → 跨过上限（**真实的** ForceExitMinor）
+        ///            → 采样：主菜单 / 提示 / 会话是否真的闭合 / 世界是否拆了；
+        ///   房主   —— 只旁观：开局记一次人数与波次，等客户端走掉之后再记一次。
+        ///
+        /// 为什么把"到点"放在**客户端**而不是房主：
+        ///   房主到点会把整间房带走（服务端停止），客户端那边是"被断线"而不是"到点"，
+        ///   两条链会缠在一起，红了一条分不清是谁的错。客户端到点则干净得多——
+        ///   房主侧只需要回答"他还在不在"，而这个问题恰好就是旧实现的缺陷所在。
+        /// </summary>
+        private void TickExit()
+        {
+            float L = _limit;
+
+            if (_isHost)
+            {
+                // 0.25：客户端早已连上（房主 Ready 早于客户端连接，故要给足余量）
+                if (_exPlayersBefore < 0 && _t >= L * 0.25f)
+                {
+                    _exPlayersBefore = PlayerCount();
+                    _exWaveBefore = Wave();
+                }
+                // 0.65：客户端在 0.36 就走掉了，这里差着二十多秒，够广播跑完
+                if (_exPlayersAfter < 0 && _t >= L * 0.65f)
+                {
+                    _exPlayersAfter = PlayerCount();
+                    _exWaveAfter = Wave();
+                    var lp = NetPlayerRegistry.Local;
+                    _exLocalAlive = lp != null && (lp.Damageable == null || !lp.Damageable.isDead);
+                    _exScaleHost = Time.timeScale;
+                }
+            }
+            else
+            {
+                if (!_exPrepped && _t >= L * 0.20f) { _exPrepped = true; ExitPrep(); }
+                if (!_exForced && _t >= L * 0.36f) { _exForced = true; ExitForce(); }
+                // 让出几帧：TeardownWorld 走的是 Object.Destroy（延迟到帧末），
+                // 当场采样会读到还没清掉的引用（M49 §5.2 同一类错）。
+                if (!_exSampled && _t >= L * 0.40f) { _exSampled = true; ExitSample(); }
+                if (!_exRestored && _t >= L * 0.46f) { _exRestored = true; ExitRestore(); }
+            }
+
+            if (_t >= L)
+            {
+                ReportExit();
+                enabled = false;
+            }
+        }
+
+        private void ExitPrep()
+        {
+            Core.SettingsManager.Instance?.SetMinorMode(true);
+            Core.PlaytimeGuard.ResetToday();
+            Core.PlaytimeGuard.ResetCounters();
+
+            var g = Core.PlaytimeGuard.Instance;
+            _exStartOk = g != null && Core.PlaytimeGuard.GameRunning;
+            _exMinorOn = Core.SettingsManager.Instance != null &&
+                         Core.SettingsManager.Instance.Current.minorMode;
+
+            // 推到"预警已弹、还没到点"的位置。60 秒一档：预警在 55 分钟，
+            // 这里停到 59 分钟，正好跨过预警、没碰上限。
+            AdvancePlaytimeTo(Core.PlaytimeGuard.MinorDailyLimitSeconds - 60f);
+            if (g != null)
+            {
+                _exSecAtWarn = g.TodaySeconds;
+                _exWarnCount = g.WarnCount;
+                _exHintAtWarn = g.HintShowing;    // 故意不关：真实玩家常常就这么晾着它
+            }
+        }
+
+        private void ExitForce()
+        {
+            var g = Core.PlaytimeGuard.Instance;
+            if (g == null) return;
+            // 跨过上限：**真实的** ForceExitMinor 在这一步发生（探针不自己拆世界）
+            AdvancePlaytimeTo(Core.PlaytimeGuard.MinorDailyLimitSeconds + 60f);
+            _exSecAtForce = g.TodaySeconds;
+            _exForceCount = g.ForceExitCount;
+        }
+
+        private void ExitSample()
+        {
+            var mm = UI.MainMenu.Instance;
+            _exMenuVisible = mm != null && mm.IsVisible;
+            _exNotice = mm != null ? mm.NoticeText : "";
+            _exNetworkedAfter = NetSession.IsNetworked;
+            _exWorldGone = EnemyManager.Instance == null;
+            _exRunningAfter = !Core.PlaytimeGuard.GameRunning;
+            _exPlayersAfterSelf = PlayerCount();
+        }
+
+        private void ExitRestore()
+        {
+            // 绝不把青少年模式与已累计时长留在用户的 settings.json / playtime.json 里。
+            // 两端共用一个数据目录，不恢复的话下一轮回归一开局就是"已到点"。
+            Core.SettingsManager.Instance?.SetMinorMode(false);
+            Core.PlaytimeGuard.ResetToday();
+        }
+
+        private void ReportExit()
+        {
+            if (_exForced && !_exSampled) ExitSample();     // 时长余量不足时的兜底
+
+            Debug.Log("[SMOKE] ===== 联机到点强制退出实测结果 =====");
+            Line("场景", _scene);
+            Line("角色", _isHost ? "房主" : "客户端");
+
+            if (_isHost)
+            {
+                // 1) 前置：开局对端真在场。恒假的话"他走了"是平凡成立。
+                Check("开局对端在场", _exPlayersBefore >= 2);
+                // 2) 【核心】对端到点后必须真的从房主的世界里消失。
+                //    旧实现只拆了客户端本地镜像：这一条会停在 2——房主还在替一个
+                //    再也不会响应的角色刷怪、算伤害、掉宝石。
+                Check("对端到点后已离开", _exPlayersAfter == _exPlayersBefore - 1);
+                // 3) 房主自己的世界不许被带停（客户端退房不是房间解散）
+                Check("房主世界继续推进", _exWaveBefore >= 1 && _exWaveAfter > _exWaveBefore);
+                // 4) 房主自身完好：角色活着、时间没被冻住
+                Check("房主自身不受影响", _exLocalAlive && _exScaleHost > 0.0001f);
+                Check("全程零异常", _errors == 0);
+
+                Line("断点通过", _ok + "/" + _checked);
+                Line("开局对端在场", Yn(_exPlayersBefore >= 2));
+                Line("对端到点后已离开", Yn(_exPlayersAfter == _exPlayersBefore - 1));
+                Line("房主世界继续推进", Yn(_exWaveBefore >= 1 && _exWaveAfter > _exWaveBefore));
+                Line("房主自身不受影响", Yn(_exLocalAlive && _exScaleHost > 0.0001f));
+                Line("全程零异常", Yn(_errors == 0));
+                Line("开局场上玩家", _exPlayersBefore.ToString());
+                Line("对端离开后玩家", _exPlayersAfter.ToString());
+                // 键名不能叫"波次"：SmokeTest 收尾也会打一行「波次 N」，
+                // 驱动脚本按最后一条取，会把轨迹覆盖成单个数字（M46 踩过同一个坑）。
+                Line("波次轨迹", _exWaveBefore + " → " + _exWaveAfter);
+                Line("房主 timeScale", _exScaleHost.ToString("F2"));
+                Line("首次异常", _firstError);
+            }
+            else
+            {
+                Check("青少年模式且对局计时在走", _exMinorOn && _exStartOk);
+                Check("到点前弹出一次预警", _exWarnCount == 1 && _exHintAtWarn);
+                Check("到点恰好强制退出一次", _exForceCount == 1);
+                // 【核心】会话必须真的闭合。旧实现只拆世界：这一条红，而其余全绿——
+                // 本地世界确实干净了，只有"还连着"这件事没有本地症状。
+                Check("强制退出后已离开会话", !_exNetworkedAfter);
+                Check("强制退出后世界已拆", _exWorldGone && _exRunningAfter);
+                Check("强制退出后本端玩家已清", _exPlayersAfterSelf == 0);
+                Check("强制退出后主菜单可见且有提示",
+                      _exMenuVisible && !string.IsNullOrEmpty(_exNotice) &&
+                      !_exNotice.StartsWith("playtime."));
+                Check("全程零异常", _errors == 0);
+
+                Line("断点通过", _ok + "/" + _checked);
+                Line("青少年模式且对局计时在走", Yn(_exMinorOn && _exStartOk));
+                Line("到点前弹出一次预警", Yn(_exWarnCount == 1 && _exHintAtWarn));
+                Line("到点恰好强制退出一次", Yn(_exForceCount == 1));
+                Line("强制退出后已离开会话", Yn(!_exNetworkedAfter));
+                Line("强制退出后世界已拆", Yn(_exWorldGone && _exRunningAfter));
+                Line("强制退出后本端玩家已清", Yn(_exPlayersAfterSelf == 0));
+                Line("强制退出后主菜单可见且有提示",
+                     Yn(_exMenuVisible && !string.IsNullOrEmpty(_exNotice) &&
+                        !_exNotice.StartsWith("playtime.")));
+                Line("全程零异常", Yn(_errors == 0));
+                Line("时长轨迹", Mathf.RoundToInt(_exSecAtWarn) + "（预警）→ " +
+                                Mathf.RoundToInt(_exSecAtForce) + "（到点）");
+                Line("强制退出后会话", _exNetworkedAfter ? "仍连接" : "已断开");
+                Line("强制退出后主菜单", _exMenuVisible ? ("可见，提示「" + _exNotice + "」") : "不可见");
+                Line("强制退出后玩家", _exPlayersAfterSelf.ToString());
+                Line("首次异常", _firstError);
+            }
+
+            Line("结论", (_errors == 0 && _fail.Count == 0 && _ok == _checked) ? "通过" : "不通过");
+            foreach (var f in _fail) Line("失败项", f);
+        }
+
+        /// <summary>按 60 秒一档把当日时长推到目标（线上由 Update 逐帧推进，这里只是压缩时间）。</summary>
+        private static void AdvancePlaytimeTo(float target)
+        {
+            var g = Core.PlaytimeGuard.Instance;
+            if (g == null) return;
+            float remain = target - g.TodaySeconds;
+            if (remain <= 0f) return;
+            int steps = Mathf.CeilToInt(remain / 60f);
+            for (int i = 0; i < steps; i++) g.Tick(60f);
         }
 
         private Sample Take()
