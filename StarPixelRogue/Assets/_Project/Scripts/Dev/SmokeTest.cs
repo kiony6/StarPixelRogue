@@ -152,6 +152,15 @@ namespace StarPixel.Dev
         /// </summary>
         public static bool Immortal { get; set; }
 
+        /// <summary>
+        /// M49：是否代玩家点掉升级选卡。默认开——无头下没人点，面板会把 timeScale 压到 0 卡死。
+        ///
+        /// 长局探针的 CARD 场景会把它关掉：那一场景要测的正是
+        /// "玩家**停在**选卡面板上时被强制踢出"，有人代点的话面板连一帧都立不住。
+        /// 它只影响无头实测（Dev 目录），产品代码对这个开关一无所知。
+        /// </summary>
+        public static bool AutoPickCards = true;
+
         /// <summary>由 GameBuilder 调用，开始一轮实测。</summary>
         public static void Start(float seconds)
         {
@@ -302,7 +311,13 @@ namespace StarPixel.Dev
             // 「房主选卡 5 次 / 客户端 0 次」，看起来像是客户端没升级，其实是探针瞎了。
             // 真正的缺陷（面板占用期间推来的卡被静默丢弃）就藏在这个盲区里，藏了很久。
             // 改法：别猜，直接问面板自己——AutoChooseFirst 未处于选卡态时返回 false。
-            if (!_died)
+            //
+            // M49：可被 LongRunProbe 的 CARD 场景关掉。那个场景要测的正是
+            // "玩家**停在**选卡面板上时被踢"——一旦有人代他选，面板连一帧都立不住，
+            // 全部判据会变成"测了一个不存在的面板"（实测撞到：面板 0 / 卡片 0 / 射线 0）。
+            // 这个开关只属于无头实测：它让"代玩家点"这件事能被按场景关掉，
+            // 而不是让产品代码知道有人在替它点。
+            if (!_died && AutoPickCards)
             {
                 var lum = LevelUpManager.Instance;
                 if (lum != null && lum.AutoChooseFirst()) _cardsPicked++;

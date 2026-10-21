@@ -30,12 +30,17 @@ namespace StarPixel.Dev
     ///   RESTART  长局之后拆世界重开一局：根对象回落、掉落物清零、波次回到 1、全程零异常
     ///   PANEL    M46：走**玩家真实操作路径**重开——结算面板弹出 → 冻结 → 点「重新开始」按钮
     ///            → 时间恢复 / 面板消失 / HUD 唯一 / 波次回落 / 玩家可控 / 全程零异常
-    ///   EXIT     M47：青少年模式当日时长到点的**强制退出**走真实路径
-    ///            —— 预警弹出 → 死在结算面板上（时长照走）→ 面板挂起期间跨过上限 →
-    ///            PlaytimeGuard.ForceExitMinor 真的执行 → 面板被收 / 主菜单可见且有提示 /
-    ///            世界已拆 / 再点「开始游戏」被拦。M46 只模拟了 TeardownWorld 那一行，
-    ///            「踢回主菜单 + 二次开局拦截」这两步从未被走到过。
-    ///
+        ///   EXIT     M47：青少年模式当日时长到点的**强制退出**走真实路径
+        ///            —— 预警弹出 → 死在结算面板上（时长照走）→ 面板挂起期间跨过上限 →
+        ///            PlaytimeGuard.ForceExitMinor 真的执行 → 面板被收 / 主菜单可见且有提示 /
+        ///            世界已拆 / 再点「开始游戏」被拦。M46 只模拟了 TeardownWorld 那一行，
+        ///            「踢回主菜单 + 二次开局拦截」这两步从未被走到过。
+        ///   CARD     M49：到点的**另一种姿势**——玩家停在选卡面板上（而非结算面板）时被踢。
+        ///            姿势不同，被清理的东西就不同：这条路径上要收的是 LevelUpCanvas，
+        ///            要解冻的是 SetPaused(true)；且它此前从未被走到过。
+        ///            它还补了 M48 §7 第 4 条要的那一侧：预警遮罩弹出后卡片**必须点不到**
+        ///            ——有了这条反向判据，"命中测试恒判可点"那种最宽容的坏法才会被发现。
+        ///
     /// 判据的区分力：
     ///   1) "后半程不加速堆积"比"最终值有上限"更狠：只加上限的话，堆到上限就不再涨，
     ///      最终值判据照样绿——但前半程早就一路涨上去了，玩家在涨的那段时间里已经卡了。
@@ -120,6 +125,26 @@ namespace StarPixel.Dev
         //   _exHitDead2 第二次死亡（遮罩已收）→ 按钮应可点
         private UIHitTest.Hit _exHitDead1, _exHitDead2, _exScreenHit;
         private bool _exHit1Ok, _exHit2Ok, _exScreenClear;
+
+        // —— CARD（M49：玩家停在选卡面板上时到点 —— 另一种"到点姿势"）——
+        private bool _cdF1, _cdF2, _cdF3, _cdF4, _cdF5, _cdF7, _cdF8;
+        private bool _cdMinorOn, _cdStartOk, _cdIsShowing;
+        private int _cdWarn = -1, _cdForce = -1, _cdBlocked = -1;
+        private float _cdSecWarn = -1f, _cdSecHang = -1f, _cdSecEnd = -1f;
+        private int _cdPanelOpen = -1, _cdCardCount = -1;
+        private int _cdPanelAfterHint = -1, _cdPanelAfterForce = -1;
+        private int _cdCanvasAfterForce = -1, _cdHudAfterForce = -1;
+        private float _cdScaleOpen = -1f, _cdScaleAfterForce = -1f;
+        private bool _cdHintAtWarn, _cdHintAfterDismiss, _cdDismissClicked;
+        private bool _cdWorldGone, _cdRunningFalse, _cdSecondBlocked, _cdNoErrOk, _cdMenuVisible;
+        private string _cdNotice = "", _cdScaleLine = "?", _cdSecLine = "?", _cdMenuLine = "?";
+        private string _cdCanvasAtWarn = "?", _cdCanvasAtCard = "?";
+        // M49：命中测试三条，分工见 ReportCard 的判据说明：
+        //   _cdHitCard  选卡面板刚弹开、还没有任何遮罩时 → 卡片必须可点（正向对照）
+        //   _cdHitMask  预警遮罩弹出后 → 卡片必须**点不到**（M48 §7 第 4 条要的那一侧）
+        //   _cdHitBack  玩家点掉提示后 → 卡片必须恢复可点（否则玩家处理完提示也选不了卡）
+        private UIHitTest.Hit _cdHitCard, _cdHitMask, _cdHitBack;
+        private bool _cdHitCardOk, _cdHitMaskOk, _cdHitBackOk;
 
         private struct Sample
         {
@@ -215,11 +240,25 @@ namespace StarPixel.Dev
                 if (!_exF8 && _t >= _limit * 0.90f) { _exF8 = true; ExitRestore(); }
             }
 
+            // M49：选卡面板上的到点姿势。分段与 EXIT 同构，但玩家停在的是**选卡**面板，
+            // 且序列是先弹面板、再弹预警——顺序反过来的话，遮罩就挡不住卡片了（见判据 6）。
+            if (_scene == "CARD")
+            {
+                if (!_cdF1 && _t >= _limit * 0.10f) { _cdF1 = true; CardSetup(); }
+                if (!_cdF2 && _t >= _limit * 0.18f) { _cdF2 = true; StartCoroutine(CardOpenPanel()); }
+                if (!_cdF3 && _t >= _limit * 0.34f) { _cdF3 = true; StartCoroutine(CardAdvanceToWarn()); }
+                if (!_cdF4 && _t >= _limit * 0.46f) { _cdF4 = true; StartCoroutine(CardDismissHint()); }
+                if (!_cdF5 && _t >= _limit * 0.58f) { _cdF5 = true; StartCoroutine(CardAdvanceToLimit()); }
+                if (!_cdF7 && _t >= _limit * 0.82f) { _cdF7 = true; CardSecondRun(); }
+                if (!_cdF8 && _t >= _limit * 0.90f) { _cdF8 = true; CardRestore(); }
+            }
+
             if (_t >= _limit)
             {
                 if (_scene == "RESTART") FinishRestart();
                 else if (_scene == "PANEL") ReportPanel();
                 else if (_scene == "EXIT") ReportExit();
+                else if (_scene == "CARD") ReportCard();
                 else Report();
                 enabled = false;
             }
@@ -530,6 +569,29 @@ namespace StarPixel.Dev
             _pnTearLine = "画布 " + _pnTearCanvasBefore + " → " + _pnTearCanvasAfter +
                           "，timeScale " + _pnTearScalePaused.ToString("F2") + " → " +
                           _pnTearScaleAfter.ToString("F2");
+        }
+
+        /// <summary>
+        /// 列出此刻场上所有画布（含停用标记）。
+        ///
+        /// M49：命中测试报"射线 0"时，光看那个 0 无法区分"真的没有 UI"和
+        /// "有 UI 但没被 raycaster 接住"——这两者的结果都是卡片点不到，
+        /// 但后者是环境塌了，判据因此假红。故把清单一起打进日志。
+        /// </summary>
+        private static string ListCanvases()
+        {
+            var sb = new System.Text.StringBuilder();
+            int n = 0;
+            foreach (var c in Resources.FindObjectsOfTypeAll<Canvas>())
+            {
+                if (c == null) continue;
+                var go = c.gameObject;
+                if (!go.scene.IsValid()) continue;
+                if (n > 0) sb.Append(",");
+                sb.Append(go.name).Append(go.activeInHierarchy ? "" : "(隐)");
+                n++;
+            }
+            return n == 0 ? "（无画布）" : sb.ToString();
         }
 
         /// <summary>按名字找场景里的 UI 按钮（只认激活的、在场景里的）。</summary>
@@ -979,6 +1041,269 @@ namespace StarPixel.Dev
             // 键名同样要避开 SmokeTest 的收尾报告：本场景故意以"世界已拆"收尾
             Line("EXIT结论", (_errors == 0 && _fail.Count == 0 && _ok == _checked) ? "通过" : "不通过");
             foreach (var f in _fail) Line("EXIT失败项", f);
+        }
+
+        // =====================================================================================
+        //  CARD（M49）：到点的另一种姿势 —— 玩家停在**选卡面板**上时到点
+        //
+        //  为什么必须单独有一条：M47/M48 的 EXIT 场景里，玩家是被踢在**结算面板**上的。
+        //  那条的清理链条早已被 M46 修过（TeardownWorld 收面板）。换成选卡面板，
+        //  要收的是 LevelUpCanvas、要解冻的是 SetPaused(true)，是另一条链——
+        //  而它此前从未被任何测试走到过（M48 §7 第 1 条）。
+        //
+        //  更关键的是**顺序**：本场景刻意让选卡面板**先**弹（几级时）、预警遮罩**后**弹
+        //  （55 分钟）。反过来就测不到东西了——M48 §5.3 实测过，
+        //  overlay 画布同 sortOrder 时后建的在上，故这条顺序下盖住卡片的是**遮罩**。
+        //  这正是 M48 §7 第 4 条要的那一侧：只有"应当点得到"的判据时，
+        //  命中测试恒判可点会让全部判据平凡绿（Q5 全绿），那一侧永远是盲的。
+        // =====================================================================================
+
+        private void CardSetup()
+        {
+            Core.SettingsManager.Ensure();
+            Core.PlaytimeGuard.Ensure();
+            Core.SettingsManager.Instance.SetMinorMode(true);   // 走真实开关（会写设置，收尾还原）
+            Core.PlaytimeGuard.ResetToday();                    // 从 0 起算，避免上一场景串味
+            Core.PlaytimeGuard.ResetCounters();
+            UI.MainMenu.Ensure();                               // 同 M47：无头入口跳过了合规门
+            // M49：本场景要的是"玩家**停在**选卡面板上"，故关掉冒烟的代玩家选卡。
+            // 不关的话面板每帧都被代选掉（M37 之后是每帧问一次 AutoChooseFirst），
+            // 测到的是一块根本不存在的面板——首次试跑就撞到这个：
+            // "面板 0 / 卡片 0 / 射线 0"，四条判据一起假红，而它们红的理由全是环境塌了。
+            SmokeTest.AutoPickCards = false;
+            var em = EnemyManager.Instance;
+            _cdStartOk = em != null && Core.PlaytimeGuard.GameRunning;
+            _cdMinorOn = Core.SettingsManager.Instance.Current.minorMode;
+        }
+
+        private System.Collections.IEnumerator CardOpenPanel()
+        {
+            var lum0 = UI.LevelUpManager.Instance;
+            // 玩家自然升级的那一组如果已经开着，就直接用它；否则走**真实的**升级入口弹一组
+            // ——不是直接调 BuildPanel，那样会把"升级事件 → 排队 → 弹面板"这一串绕过，
+            // 测到的就不是玩家会遇到的那条路。
+            if (lum0 == null || !lum0.IsShowing) Core.EventBus.RaiseLevelUp(2);
+
+            // 入场动画把卡片从 localScale 0 弹到 1（0.34s，用 unscaledDeltaTime）。
+            // 缩放为 0 时 raycast 打不到卡片，必须等它弹完再测——否则"卡片点不到"
+            // 会是动画没播完，而不是被遮罩挡住（又是同一类假象）。
+            yield return new WaitForSecondsRealtime(0.5f);
+
+            var lum = UI.LevelUpManager.Instance;
+            _cdIsShowing = lum != null && lum.IsShowing;
+            _cdPanelOpen = CountNamed<Canvas>("LevelUpCanvas");
+            _cdCardCount = CountNamed<UnityEngine.UI.Button>("Offer0") +
+                           CountNamed<UnityEngine.UI.Button>("Offer1") +
+                           CountNamed<UnityEngine.UI.Button>("Offer2");
+            _cdScaleOpen = Time.timeScale;
+            // M49：卡片此刻必须点得到。没有这条，下面第 6 条的"点不到"就无法与
+            // "命中测试本身塌了（raycast 无命中）"区分开——两条是一对，缺一不可。
+            _cdHitCard = UIHitTest.Probe(FindButton("Offer0"));
+            _cdHitCardOk = _cdHitCard.Found && _cdHitCard.Reachable;
+            _cdCanvasAtCard = ListCanvases();
+        }
+
+        private System.Collections.IEnumerator CardAdvanceToWarn()
+        {
+            var g = Core.PlaytimeGuard.Instance;
+            if (g == null) yield break;
+            AdvancePlaytimeTo(Core.PlaytimeGuard.MinorDailyLimitSeconds -
+                              Core.PlaytimeGuard.MinorWarnBeforeSeconds + 60f);
+            _cdSecWarn = g.TodaySeconds;
+            _cdWarn = g.WarnCount;
+            _cdHintAtWarn = g.HintShowing;
+
+            // 【无头关键】遮罩是**本帧**刚 new 出来的。无头下 Canvas 的首次布局重建
+            // 发生在下一帧，同帧内它那块全屏 Mask 的 RectTransform 还停在 0x0，
+            // raycast 打不到它——于是命中测试会说"卡片没被挡住"，而遮罩明明就摆在那儿。
+            // （`Probe` 里的 `Canvas.ForceUpdateCanvases()` 救不了新建画布的第一次布局。）
+            // 让出两帧再测。这不是迁就环境：真实玩家也绝不可能在同一帧里
+            // 既收到提示、又去点卡片。
+            yield return null;
+            yield return null;
+
+            // M49【核心 · "应当被挡住"方向】：预警遮罩是 55 分钟时才 new 出来的，
+            // 比这张卡片（几级时就建好了）晚得多——overlay 画布同 sortOrder 时后建的在上，
+            // 于是此刻盖在卡片位置上的是**遮罩**，玩家点不到卡片。这是模态该有的行为
+            // （玩家必须先处理提示），也是本条真正的作用：把"命中测试恒判可点"那种
+            // 最宽容的坏法堵死。M48 的 Q5 注入下全部判据平凡绿，就是因为缺这一侧。
+            _cdHitMask = UIHitTest.Probe(FindButton("Offer0"));
+            _cdHitMaskOk = _cdHitMask.Found && !_cdHitMask.Reachable;
+            _cdPanelAfterHint = CountNamed<Canvas>("LevelUpCanvas");
+            _cdCanvasAtWarn = ListCanvases();
+        }
+
+        private System.Collections.IEnumerator CardDismissHint()
+        {
+            // 玩家点掉提示：走弹窗自己的「关闭」按钮（不是直接调 DismissHint——
+            // 那样会绕过"按钮点得着"这件事本身，与 M46 之前的老路子没区别）
+            _cdDismissClicked = ClickButton("OK");
+
+            // 同上：Destroy 延迟到帧末，同帧内那块遮罩还在场上（且还在挡着）。
+            // 不让出两帧的话这条判据会**假绿**——它绿是因为遮罩还没消失，
+            // 而不是因为遮罩收掉了。等两帧，它才有牙：遮罩没真的收掉就必须红。
+            yield return null;
+            yield return null;
+
+            var g = Core.PlaytimeGuard.Instance;
+            _cdHintAfterDismiss = g != null && g.HintShowing;
+            // 遮罩关掉后卡片必须恢复可点——否则玩家处理完提示也选不了卡，卡死在选卡态
+            _cdHitBack = UIHitTest.Probe(FindButton("Offer0"));
+            _cdHitBackOk = _cdHitBack.Found && _cdHitBack.Reachable;
+        }
+
+        private System.Collections.IEnumerator CardAdvanceToLimit()
+        {
+            var g = Core.PlaytimeGuard.Instance;
+            if (g != null)
+            {
+                // 选卡面板挂起期间：时长必须照走（Tick 吃 unscaledDeltaTime，与 timeScale=0 无关）。
+                AdvancePlaytimeTo(Core.PlaytimeGuard.MinorDailyLimitSeconds - 60f);
+                _cdSecHang = g.TodaySeconds;
+
+                // 跨过上限：**真实的** ForceExitMinor 在这一刻发生
+                AdvancePlaytimeTo(Core.PlaytimeGuard.MinorDailyLimitSeconds + 60f);
+                _cdSecEnd = g.TodaySeconds;
+                _cdForce = g.ForceExitCount;
+            }
+
+            // 销毁延迟到帧末，必须让出两帧再看残留
+            yield return null;
+            yield return null;
+
+            var mm = UI.MainMenu.Instance;
+            _cdPanelAfterForce = CountNamed<Canvas>("LevelUpCanvas");
+            _cdCanvasAfterForce = CountNamed<Canvas>("HUDCanvas");
+            _cdHudAfterForce = CountNamed<UI.HUDController>(null);
+            _cdScaleAfterForce = Time.timeScale;
+            _cdMenuVisible = mm != null && mm.IsVisible;
+            _cdNotice = mm != null ? mm.NoticeText : "";
+            _cdWorldGone = EnemyManager.Instance == null;
+            _cdRunningFalse = !Core.PlaytimeGuard.GameRunning;
+        }
+
+        private void CardSecondRun()
+        {
+            var g = Core.PlaytimeGuard.Instance;
+            GameBuilder.Build();                 // 就是主菜单「开始游戏」按的同一个入口
+            if (g != null) _cdBlocked = g.BlockedStartCount;
+            _cdSecondBlocked = !Core.PlaytimeGuard.GameRunning && EnemyManager.Instance == null;
+        }
+
+        private void CardRestore()
+        {
+            // 绝不把青少年模式与已累计时长留在用户的 settings.json / playtime.json 里
+            Core.SettingsManager.Instance?.SetMinorMode(false);
+            Core.PlaytimeGuard.ResetToday();
+            SmokeTest.AutoPickCards = true;     // 还原：别的场景还要靠它代玩家选卡
+        }
+
+        private void ReportCard()
+        {
+            _cdScaleLine = _cdScaleOpen.ToString("F2") + " → " + _cdScaleAfterForce.ToString("F2");
+            _cdSecLine = Mathf.RoundToInt(_cdSecWarn) + "（预警）→ " +
+                         Mathf.RoundToInt(_cdSecHang) + "（选卡挂起）→ " +
+                         Mathf.RoundToInt(_cdSecEnd) + "（到点）";
+            _cdMenuLine = _cdMenuVisible ? ("可见，提示「" + _cdNotice + "」") : "不可见";
+
+            // 1) 前置：青少年模式真的开着、对局真的在计时。恒假的话下面全是假绿。
+            Check("青少年模式且对局计时在走", _cdMinorOn && _cdStartOk);
+
+            // 2) 玩家真的停在选卡面板上（否则本场景测的是另一条路径，后面全是假的）
+            Check("玩家停在选卡面板上", _cdIsShowing && _cdPanelOpen == 1 && _cdCardCount == 3);
+
+            // 3) 选卡时世界冻结——这是"强退后时间解冻"的前提（不冻就无所谓解冻）
+            Check("选卡时世界冻结", _cdScaleOpen <= 0.0001f);
+
+            // 4) 【正向对照】卡片此刻必须点得到。没有它，第 6 条的"点不到"就可能只是
+            //    命中测试自己塌了（raycast 无命中）；有它，"可点/不可点"才是一对。
+            Check("卡片可被点到", _cdHitCardOk);
+
+            // 5) 到点前 5 分钟弹一次预警，且遮罩真的挂起了（后面第 6 条要它挡住卡片）
+            Check("到点前弹出一次预警", _cdWarn == 1 && _cdHintAtWarn);
+
+            // 6) 【M49 · 核心】预警遮罩弹出后，卡片**必须点不到**——这块屏幕归遮罩。
+            //    理由与"为什么先弹卡片后弹遮罩"见本区块头部注释。
+            //    这条存在的意义是堵住 M48 Q5 暴露的宽容边界：只有"应当点得到"的判据时，
+            //    命中测试恒判可点会让全部判据平凡绿，那一侧永远是盲的。
+            Check("预警遮罩挡住选卡卡片", _cdHitMaskOk);
+
+            // 7) 玩家点掉提示后，卡片必须恢复可点（否则玩家处理完提示也选不了卡，卡死在选卡态）
+            Check("关掉提示后卡片恢复可点", _cdDismissClicked && !_cdHintAfterDismiss && _cdHitBackOk);
+
+            // 8) 选卡面板挂起期间时长仍在累计（timeScale=0，但 Tick 吃的是 unscaledDeltaTime）
+            Check("选卡挂起期间时长仍在累计", _cdSecHang > _cdSecWarn + 60f);
+
+            // 9) 强制退出恰好触发一次（不是靠探针自己调 TeardownWorld）
+            Check("到点恰好强制退出一次", _cdForce == 1);
+
+            // 10) 【核心】强制退出后选卡面板必须被收——否则它整块盖在主菜单上
+            Check("强制退出后选卡面板被收", _cdPanelAfterForce == 0);
+
+            // 11) 【核心】强制退出后时间必须解冻（否则主菜单动画卡着、下一局也跑不动）
+            float expect = Core.HitstopManager.BaseScale;
+            Check("强制退出后时间解冻",
+                  _cdScaleAfterForce > 0.0001f && Mathf.Abs(_cdScaleAfterForce - expect) < 0.01f);
+
+            // 12) HUD 必须随世界一起清零
+            Check("强制退出后 HUD 清零", _cdHudAfterForce == 0 && _cdCanvasAfterForce == 0);
+
+            // 13) 玩家必须看到"为什么被踢"
+            Check("强制退出后主菜单可见且有提示",
+                  _cdMenuVisible && !string.IsNullOrEmpty(_cdNotice) && !_cdNotice.StartsWith("playtime."));
+
+            // 14) 世界确实被拆了、计时也停了（不是只收了个面板）
+            Check("强制退出后世界已拆", _cdWorldGone && _cdRunningFalse);
+
+            // 15) 回主菜单再点「开始游戏」必须被拦下
+            Check("二次开局被拦下", _cdBlocked >= 1 && _cdSecondBlocked);
+
+            _cdNoErrOk = _errors == 0;
+            Check("全程零异常", _cdNoErrOk);
+
+            bool thaw = _cdScaleAfterForce > 0.0001f && Mathf.Abs(_cdScaleAfterForce - expect) < 0.01f;
+            bool noticeOk = !string.IsNullOrEmpty(_cdNotice) && !_cdNotice.StartsWith("playtime.");
+
+            Debug.Log("[SMOKE] ===== 选卡面板上被踢实测结果 =====");
+            Line("场景", _scene);
+            Line("断点通过", _ok + "/" + _checked);
+            Line("青少年模式且对局计时在走", (_cdMinorOn && _cdStartOk) ? "是" : "否");
+            Line("玩家停在选卡面板上", (_cdIsShowing && _cdPanelOpen == 1 && _cdCardCount == 3) ? "是"
+                 : ("否（展示 " + Yn(_cdIsShowing) + " / 面板 " + _cdPanelOpen + " / 卡片 " + _cdCardCount + "）"));
+            Line("选卡时世界冻结", _cdScaleOpen <= 0.0001f ? "是" : ("否（" + _cdScaleOpen.ToString("F2") + "）"));
+            Line("卡片可被点到", _cdHitCardOk ? "是" : ("否（" + UIHitTest.Describe(_cdHitCard) + "）"));
+            Line("到点前弹出一次预警", _cdWarn == 1 ? Yn(_cdHintAtWarn) : ("否（次数 " + _cdWarn + "）"));
+            Line("预警遮罩挡住选卡卡片", _cdHitMaskOk ? "是"
+                 : ("否（" + UIHitTest.Describe(_cdHitMask) + "）"));
+            Line("关掉提示后卡片恢复可点", (_cdDismissClicked && !_cdHintAfterDismiss && _cdHitBackOk) ? "是"
+                 : ("否（点到按钮 " + Yn(_cdDismissClicked) + " / 遮罩已收 " + Yn(!_cdHintAfterDismiss) +
+                    " / " + UIHitTest.Describe(_cdHitBack) + "）"));
+            Line("选卡挂起期间时长仍在累计", _cdSecHang > _cdSecWarn + 60f ? "是"
+                 : ("否（" + Mathf.RoundToInt(_cdSecWarn) + " → " + Mathf.RoundToInt(_cdSecHang) + "）"));
+            Line("到点恰好强制退出一次", _cdForce == 1 ? "是" : ("否（" + _cdForce + "）"));
+            Line("强制退出后选卡面板被收", _cdPanelAfterForce == 0 ? "是" : ("否（残留 " + _cdPanelAfterForce + "）"));
+            Line("强制退出后时间解冻", thaw ? "是" : ("否（" + _cdScaleAfterForce.ToString("F2") + "）"));
+            Line("强制退出后 HUD 清零", (_cdHudAfterForce == 0 && _cdCanvasAfterForce == 0) ? "是"
+                 : ("否（HUD " + _cdHudAfterForce + " / 画布 " + _cdCanvasAfterForce + "）"));
+            Line("强制退出后主菜单可见且有提示", (_cdMenuVisible && noticeOk) ? "是"
+                 : (_cdMenuVisible ? "否（提示为空或裸键）" : "否（菜单不可见）"));
+            Line("强制退出后世界已拆", (_cdWorldGone && _cdRunningFalse) ? "是"
+                 : ("否（已拆 " + Yn(_cdWorldGone) + " / 计时已停 " + Yn(_cdRunningFalse) + "）"));
+            Line("二次开局被拦下", (_cdBlocked >= 1 && _cdSecondBlocked) ? "是" : ("否（拦截 " + _cdBlocked + " 次）"));
+            Line("全程零异常", Yn(_cdNoErrOk));
+            // —— 详情（驱动脚本不判，仅供人读）——
+            Line("时长轨迹", _cdSecLine);
+            Line("timeScale", _cdScaleLine);
+            Line("强退后主菜单", _cdMenuLine);
+            Line("遮罩弹出后面板", _cdPanelAfterHint.ToString());
+            Line("当时画布", _cdCanvasAtCard + " → " + _cdCanvasAtWarn);
+            // 命中测试的环境诊断：这三项不参与判定，但决定了上面三条命中判据能不能被相信
+            Line("命中测试环境", "屏幕 " + _cdHitMask.Screen + " / 射线 " + _cdHitMask.Raycasters +
+                                 " / 命中 " + _cdHitMask.Hits + " / 卡片中心 " + _cdHitMask.At);
+            Line("首个异常", _firstError);
+            // 键名同样要避开 SmokeTest 的收尾报告：本场景故意以"世界已拆"收尾
+            Line("CARD结论", (_errors == 0 && _fail.Count == 0 && _ok == _checked) ? "通过" : "不通过");
+            foreach (var f in _fail) Line("CARD失败项", f);
         }
 
         // =====================================================================================
