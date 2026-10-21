@@ -80,6 +80,7 @@
 | `longrun_m50.md` | M50 报告（联机到点：世界拆了人还在房间里 / 顺手挖出「离开对局」也断了 / 两端判据不是同一张表 / 非确定性的后果不能进期望） |
 | `m51_inject.py` | M51 区分力注入：4 组（离开对局但 Stop 先退订回调 / 结算按钮被全屏遮罩盖住 / 客户端重连永不放弃 / 对照组）——Q2 与 Q3 的失败面**刻意只差一条**（点了没用 vs 根本点不到），用来验证「按钮点得到」这条判据不是摆设 |
 | `longrun_m51.md` | M51 报告（选角/结算两颗按钮点不到 / 房主永远留着一把空椅子 / 一条从头到尾没红过的假判据「世界已拆」/ 静态第 27–30 项） |
+| `longrun_m52.md` | M52 报告（交付可玩的 Windows 程序 / 真实点击覆盖率盘点：9 处盲区含「开始游戏」/ `MENU` 场景 / 两次注入证明判据有牙 / 还剩四堆） |
 > | `push_safe.py` | git 推送自愈入口：推送前预检凭据链路（gh 登录 / credential helper 是否指向 gh / 端到端能否真取到令牌），缺失时自动跑 `gh auth setup-git`，撞 403·401 自动重接后重试一次，其余失败归入 6 类并给出对应动作；`--check` 只体检、`--selftest` 8 个夹具反向验证分类判据互不串扰 |
 > | `balance_sim.py` + `balance_*.md` / `balance_*.txt` | 数值平衡模拟器与实验报告 |
 > | `gen_assets.py` | 像素精灵 / 音效资源生成脚本 |
@@ -117,6 +118,25 @@
    并自动注册 SpawnablePrefabs、指定玩家预制体、配置各预制体 NetworkTransform 权威模式。
    若个别 Fish-Net 版本成员名不同导致自动注册失败，Console 会给出警告，此时按检视面板手动拖拽即可（预制体都已生成）。
 4. **开玩**：打开 `NetBootstrap` 场景按 Play → 大厅选 **创建房间（房主）**；另一位玩家（可同机双开/另一台电脑）选 **加入房间** 并填入房主 IP（同局域网为房主内网 IP，同机测试用 `127.0.0.1`）。
+
+### 出可执行程序（Windows）
+
+给探针跑的是无头包（不显示画面）；**要一个能双击玩的程序**用下面三种方式之一：
+
+- **菜单**：`StarPixel > Build > Windows (Mono)`，出 `StarPixelRogue/Build/Windows/StarPixelRogue.exe`。
+- **命令行**：
+
+```bash
+"E:/Unity/Hub/Editor/2022.3.62f3c1/Editor/Unity.exe" -batchmode -nographics -quit \
+  -projectPath StarPixelRogue \
+  -executeMethod StarPixel.EditorTools.BuildScript.BuildMono \
+  -logFile "$(pwd -W)/unity_build_release.log"
+```
+
+- **`BuildIl2Cpp`**：同一入口的 IL2CPP 版本（需装 IL2CPP 模块，包体更大、运行更快）。
+
+产物：`StarPixelRogue.exe` + `StarPixelRogue_Data/` + `UnityPlayer.dll` + `MonoBleedingEdge/`。
+`/Build/` 在 `.gitignore` 里——**产物不入库是对的**，源码入库即可，任何人构建一遍得到同样的 exe。
 
 ## 操作方式
 
@@ -2700,6 +2720,63 @@ M51 把 `UIHitTest` 的真实点击铺到 `BuildProbe` / `SettingsProbe` / `UISe
 
 回归：单机 18 探针分 3 次调用全绿、单机长局五场景 7/7·4/4·12/12·20/20·16/16、
 联机五场景（EXIT / LEAVE / HOSTEXIT / GROWTH / RESTART）双端全绿且双方零异常。
+
+### M52 · 交付一个双击能玩的程序，顺便回答"还剩多少"（本次新增）
+
+起因是一句很不客气的提问：**"游戏还有多少问题需要修改，我需要完整的程序。"**
+前半句能答，后半句暴露了一件更尴尬的事——
+
+> 干了 51 个里程碑的质量加固，仓库里却没有一个可以双击运行的带画面程序。
+> 只有 `Build/Smoke` 与 `Build/SmokeNet` 两套无头产物（`-nographics -batchmode`，不出画面），
+> 它们是给探针跑的，不是给玩家玩的。
+
+**本次交付**（`BuildScript.BuildMono`，入口一直在，只是从来没被调用过）：
+
+```
+StarPixelRogue/Build/Windows/StarPixelRogue.exe     v0.5.0 · Mono 后端
+├── StarPixelRogue_Data/   32 MB
+├── UnityPlayer.dll        31 MB
+└── MonoBleedingEdge/      Mono 运行时
+```
+
+实跑取证（`Player.log`）：Direct3D 11 起起来、RTX 3060 上完成 Assembly 加载与 Input 初始化、
+`UnloadTime 0.88ms`，全程无异常无崩溃。（原本想附一张主菜单截图，但那需要在运行时动态编译
+.NET 去调 Win32 接口，被本机安全策略拦了——没绕，改用日志与进程事实作证。）
+
+**顺便清掉一处覆盖盲区。** 把所有面板的 `Button` 列一遍，再看 `UIHitTest`
+（唯一会走 `GraphicRaycaster` 的真实点击入口）真的点过哪些：
+
+```
+按钮总数 16        实际点过 7        从未被测 9
+```
+
+未经真实点击的清单里排第一的是 **`StartBtn`（开始游戏）**——全游戏曝光量最高的那颗按钮，
+M51 却刚刚证明过"两块画布同层 → 谁压谁听 Unity 内部排序"能把一颗按钮变成摆设。
+其余八颗：主菜单的图鉴/设置/退出、结算面板的「返回主菜单」、设置面板的「导出诊断日志」、
+合规门的三颗法务文本按钮。
+
+`BuildProbe` 因此新增 **`MENU` 场景**：主菜单五颗逐个射线测试，
+再真点进图鉴与设置、把面板里**每一颗** `Button` 都测一遍、真点「关闭」退出，
+**最后**才真点「开始游戏」并断言世界真的建出来。
+实测：主菜单 5/5、图鉴 6/6、设置 13/13、开始游戏 → 世界已建，全绿。
+
+**"从来没红过的判据不是判据"**（M51 刚因为信了这种判据吃亏），所以做了区分力注入：
+
+| 注入 | 结果 | 结论 |
+|---|---|---|
+| A：摘掉 `SettingsCanvas` 的层级声明 | **仍然全绿**，但静态第 30 项立刻报错 | 改动生效了，是注入不对——设置面板与主菜单**不重叠**，层乱了也压不住。这类缺陷生效的前提是"两块东西落在同一个框里" |
+| B：塞一张全屏透明底图（`alpha 0`，`raycastTarget` 默认开） | 13 颗按钮**全部点不到（0/13）**，明细点名挡路者 `BG`，并连带拉红后续三步 | 判据有牙，且诊断精确到某一层上的某个对象 |
+
+### 还剩多少
+
+诚实拆成四堆（详见 `longrun_m52.md` §6）：
+
+- **要动手的遗留**：4 人局下的 LEAVE/HOSTEXIT（判据按 2 人局写死）；离开后再开局的独立场景；
+  静态第 27 项尚未覆盖 `ExecuteEvents.Execute` 那类同样绕过 raycast 的形式。
+- **上线合规而非可玩性**：实名认证 SDK、Telemetry 网络上报——代码里是 TODO，只留了接入缝。
+- **设计上不做**（Out-of-Scope）：专用服务器、跨平台匹配、PvP、UGC、MOD、正式美术音效、版号送审。
+- **最大的那一条**：到今天为止，这个游戏**一次也没有被人的眼睛看过**——
+  全部验证都在 `-nographics` 下完成。好不好看、好不好玩、手感如何，这三件事自动测试永远答不了。
 
 ## 架构与目录
 

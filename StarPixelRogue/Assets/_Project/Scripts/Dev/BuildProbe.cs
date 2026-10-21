@@ -96,6 +96,22 @@ namespace StarPixel.Dev
         private bool _capOk;
         private bool _noMaxedOffer;
 
+        // —— MENU（M52）——
+        // M51 把真实点击铺进了五个探针，但铺的是"探针原本就在点的地方"；
+        // 主菜单上那几颗玩家最先按下的按钮反而没人碰过。这一组就是来收它们的。
+        private int _menuBtnTotal, _menuBtnOk;
+        private string _menuBtnBad = "";
+        private bool _codexBuilt;
+        private int _codexTotal, _codexOk;
+        private string _codexBad = "";
+        private bool _codexClosed;
+        private bool _settBuilt;
+        private int _settTotal, _settOk;
+        private string _settBad = "";
+        private bool _settClosed;
+        private bool _startClicked;
+        private bool _startWorld;
+
         private static readonly string[] CombatVisuals = { "AuraRing", "OrbitBlade", "BoltSeg", "BoltFlash" };
 
         public static void Start(string scene)
@@ -151,6 +167,7 @@ namespace StarPixel.Dev
             {
                 case "APPLY": yield return Apply(); break;
                 case "PROGRESSION": yield return Progression(); break;
+                case "MENU": yield return Menu(); break;
                 default: yield return Select(); break;
             }
 
@@ -253,6 +270,151 @@ namespace StarPixel.Dev
                 _selClose = p4 == null || !p4.gameObject.activeInHierarchy;
                 if (!_selClose) Fail("点关闭后面板仍可见");
             }
+        }
+
+        // =====================================================================================
+        //  MENU：主菜单上每一颗玩家真的会去按的按钮，逐个用射线点一条出来
+        //
+        //  为什么要单开一个场景：M51 铺真实点击时，铺的是"探针原本就在点"的那几处——
+        //  选卡、关闭、云存档开关。主菜单这几颗（开始/图鉴/设置/角色/退出）是另一回事：
+        //  它们是玩家按下次数最多的东西，却因为没有任何探针去按，一直没人替它们说话。
+        //  M51 已经亲眼见过"两块画布同层 → 谁压谁听 Unity 内部排序"能害成什么样，
+        //  所以这里一颗一颗单独报明细，不合成一个总数——合成总数就看不见是哪一颗坏了。
+        // =====================================================================================
+
+        private IEnumerator Menu()
+        {
+            var root = MenuRoot();
+            if (root == null) { Fail("主菜单未建出"); yield break; }
+
+            // 1) 主菜单五颗：只做命中测试，不做点击。
+            //    退出那颗点了进程就没了；开始游戏留到最后一步单独点。
+            string[] mains = { "StartBtn", "CharacterBtn", "CodexBtn", "SettingsBtn", "QuitBtn" };
+            var bad = new List<string>();
+            foreach (var n in mains)
+            {
+                var b = BtnIn(root, n);
+                _menuBtnTotal++;
+                if (b == null) { bad.Add(n + "(按钮缺失)"); continue; }
+                var h = UIHitTest.Probe(b);
+                if (h.Reachable) _menuBtnOk++;
+                else bad.Add(n + "：" + UIHitTest.Describe(h));
+            }
+            _menuBtnBad = bad.Count == 0 ? "<无>" : string.Join(" | ", bad.ToArray());
+            yield return null;
+
+            // 2) 图鉴：真点进去 → 面板里每颗按钮都测一遍 → 真点「关闭」退出
+            yield return StepIntoPanel(root, "CodexBtn", "CodexCanvas");
+            _codexBuilt = _panel.Built; _codexTotal = _panel.Total;
+            _codexOk = _panel.Ok; _codexBad = _panel.Bad; _codexClosed = _panel.Closed;
+            yield return null;
+
+            // 3) 设置：同上。导出诊断日志那颗只测不点——
+            //    它要写文件、要看产物，都不是本场景问的事，SettingsProbe 另有覆盖。
+            yield return StepIntoPanel(root, "SettingsBtn", "SettingsCanvas");
+            _settBuilt = _panel.Built; _settTotal = _panel.Total;
+            _settOk = _panel.Ok; _settBad = _panel.Bad; _settClosed = _panel.Closed;
+            yield return null;
+
+            // 4) 最后才点「开始游戏」——按下去世界就换了，
+            //    放最后是为了前面几步都还站在主菜单上。
+            var startBtn = BtnIn(root, "StartBtn");
+            string whyStart = "";
+            if (startBtn != null && UIHitTest.Click(startBtn, out whyStart))
+            {
+                _startClicked = true;
+                yield return new WaitForSeconds(0.3f);
+                _startWorld = GameObject.Find("HUDCanvas") != null;
+                if (!_startWorld) Fail("点了「开始游戏」但世界没建出来（HUDCanvas 缺失）");
+            }
+            else Fail("主菜单「开始游戏」点不到：" + (startBtn == null ? "按钮缺失" : whyStart));
+        }
+
+        /// <summary>
+        /// 从主菜单真点一颗按钮进面板 → 把面板里每颗 Button 都命中测试一遍 → 真点「关闭」退出。
+        /// 三个面共用一条路径：图鉴、设置、选角走的是同一套进出规矩，
+        /// 分开写三遍的结果一定是某一遍慢慢漏掉其中一步。
+        /// </summary>
+        private PanelResult _panel;
+
+        /// <summary>
+        /// 从主菜单真点一颗按钮进面板 → 把面板里每颗 Button 都命中测试一遍 → 真点「关闭」退出。
+        /// 三个面共用一条路径：图鉴、设置、选角走的是同一套进出规矩，
+        /// 抄三遍的结果一定是某一遍慢慢漏掉其中一步。
+        /// 结果落在 <see cref="_panel"/> 上——迭代器不能带 ref/out 参数（CS1623）。
+        /// </summary>
+        private IEnumerator StepIntoPanel(Transform menuRoot, string btnName, string canvasName)
+        {
+            _panel = new PanelResult();
+
+            var open = BtnIn(menuRoot, btnName);
+            string whyOpen = "";
+            if (open == null || !UIHitTest.Click(open, out whyOpen))
+            {
+                Fail("主菜单「" + btnName + "」点不到：" + (open == null ? "按钮缺失" : whyOpen));
+                yield break;
+            }
+            yield return null;
+
+            var cv = GameObject.Find(canvasName);
+            if (cv == null) { Fail("点了「" + btnName + "」但面板没建出"); yield break; }
+            _panel.Built = true;
+
+            int t, k;
+            _panel.Bad = ProbeTree(cv.transform, out t, out k);
+            _panel.Total = t; _panel.Ok = k;
+
+            var closeNode = cv.transform.Find("Panel/CloseBtn");
+            string whyClose = "";
+            if (closeNode == null || !UIHitTest.Click(closeNode.GetComponent<Button>(), out whyClose))
+            {
+                Fail(canvasName + "「关闭」点不到：" + (closeNode == null ? "按钮缺失" : whyClose));
+                yield break;
+            }
+            yield return null;
+
+            // Hide() 是把画布 SetActive(false)：对象还在，只是不可见
+            var still = GameObject.Find(canvasName);
+            if (still != null && still.activeInHierarchy)
+                Fail(canvasName + "点了关闭仍然可见");
+            else _panel.Closed = true;
+        }
+
+        private struct PanelResult
+        {
+            public bool Built;      // 面板建出来了
+            public int Total;       // 面板里 Button 总数
+            public int Ok;          // 其中 raycast 点得到的颗数
+            public string Bad;      // 点不到的明细
+            public bool Closed;     // 「关闭」点了真的收了
+        }
+
+        /// <summary>取某个子节点上的 Button（不存在返回 null，不抛）。</summary>
+        private static Button BtnIn(Transform root, string child)
+        {
+            if (root == null) return null;
+            var t = root.Find(child);
+            return t != null ? t.GetComponent<Button>() : null;
+        }
+
+        /// <summary>
+        /// 把一棵子树里所有 Button 逐个做命中测试，返回不可达明细。
+        /// 逐颗过而不是只看面板根：<c>GetComponentsInChildren</c> 会把叶子里的每一颗都翻出来，
+        /// 而点不到的那颗很可能正是唯一能关掉这个面板的那颗。
+        /// </summary>
+        private string ProbeTree(Transform root, out int total, out int ok)
+        {
+            total = 0; ok = 0;
+            var bad = new List<string>();
+            foreach (var b in root.GetComponentsInChildren<Button>(true))
+            {
+                if (b == null) continue;
+                total++;
+                var h = UIHitTest.Probe(b);
+                if (h.Reachable) ok++;
+                else bad.Add(b.name + "：" + UIHitTest.Describe(h));
+            }
+            return bad.Count == 0 ? "<无>" : string.Join(" | ", bad.ToArray());
         }
 
         private static Transform MenuRoot()
@@ -666,6 +828,10 @@ namespace StarPixel.Dev
             if (_scene == "PROGRESSION")
                 pass = pass && _weaponsDamaged == _weaponsFired && _combosOk == _combosChecked &&
                        _statsOk == _statsChecked && _capOk && _noMaxedOffer;
+            if (_scene == "MENU")
+                pass = pass && _menuBtnOk == _menuBtnTotal && _codexBuilt && _codexOk == _codexTotal &&
+                       _codexClosed && _settBuilt && _settOk == _settTotal && _settClosed &&
+                       _startClicked && _startWorld;
 
             Debug.Log("[SMOKE] ===== 选角/成长链路实测结果 =====");
             Debug.Log("[SMOKE] 场景              " + _scene);
@@ -678,6 +844,20 @@ namespace StarPixel.Dev
                     Debug.Log("[SMOKE] 重复应用幂等      " + Yn(_applyIdempotent));
                     Debug.Log("[SMOKE] 换角色不叠乘      " + Yn(_applySwapClean));
                     Debug.Log("[SMOKE] 换角色差异        " + _applySwapDiff);
+                    break;
+                case "MENU":
+                    Debug.Log("[SMOKE] 主菜单按钮可达    " + _menuBtnOk + "/" + _menuBtnTotal);
+                    Debug.Log("[SMOKE] 不可达明细        " + _menuBtnBad);
+                    Debug.Log("[SMOKE] 图鉴面板已建出    " + Yn(_codexBuilt));
+                    Debug.Log("[SMOKE] 图鉴按钮可达      " + _codexOk + "/" + _codexTotal);
+                    Debug.Log("[SMOKE] 图鉴不可达明细    " + _codexBad);
+                    Debug.Log("[SMOKE] 图鉴关闭已收      " + Yn(_codexClosed));
+                    Debug.Log("[SMOKE] 设置面板已建出    " + Yn(_settBuilt));
+                    Debug.Log("[SMOKE] 设置按钮可达      " + _settOk + "/" + _settTotal);
+                    Debug.Log("[SMOKE] 设置不可达明细    " + _settBad);
+                    Debug.Log("[SMOKE] 设置关闭已收      " + Yn(_settClosed));
+                    Debug.Log("[SMOKE] 开始游戏已点击    " + Yn(_startClicked));
+                    Debug.Log("[SMOKE] 开局世界已建出    " + Yn(_startWorld));
                     break;
                 case "PROGRESSION":
                     Debug.Log("[SMOKE] 武器开火覆盖      " + _weaponsFired + "/10");
