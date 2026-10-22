@@ -86,6 +86,13 @@ namespace StarPixel
             // M55：组队码（码的校验位 / 发现报文 / 房间目录与解析）无头实测
             if (HasArg("-roomProbe")) { StartRoomProbe(); return; }
 
+            // M56：传输层（种类说明书 / 装配与反查 / 目标与端口分派）无头实测。
+            // 整段进条件编译：探针要直接构造 Transport/TransportManager，
+            // 没有 Fish-Net 时这些类型根本不存在。
+#if FISHNET_ENABLED
+            if (HasArg("-transportProbe")) { StartTransportProbe(); return; }
+#endif
+
             // M29：静态事件总线订阅对称性（反射自检 / 重开累积 / 升级面板重复）无头实测
             if (HasArg("-subProbe")) { StartSubProbe(); return; }
 
@@ -651,6 +658,25 @@ namespace StarPixel
             PrepareStage();
             StarPixel.Dev.RoomProbe.Start(ArgValue("-roomScene", "CODE"));
         }
+
+        /// <summary>
+        /// M56 无头实测入口：交给 <see cref="Dev.TransportProbe"/> 验证传输层装配与目标分派。
+        /// 参数：-transportScene SPEC|INSTALL|TARGET（默认 SPEC）
+        ///
+        /// 换传输层的失败模式同样不是崩溃，而是**静默失效**：
+        /// FishyEOS 把 SetClientAddress / SetPort 都覆写成空实现，塞进去的东西会被扔掉，
+        /// 不报错，只是永远连不上。所以这一层必须先在无头环境里被钉死。
+        /// </summary>
+#if FISHNET_ENABLED
+        private static void StartTransportProbe()
+        {
+            Core.SettingsManager.Ensure();
+            Core.SaveManager.Ensure();
+            Application.targetFrameRate = 60;
+            PrepareStage();
+            StarPixel.Dev.TransportProbe.Start(ArgValue("-transportScene", "SPEC"));
+        }
+#endif
 
         private static void StartOrphanProbe()
         {

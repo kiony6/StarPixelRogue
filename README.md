@@ -84,6 +84,7 @@
 | `look_m53.md` + `m53_inject.py` | M53 报告与区分力注入（六个程序化形状 / 池化特效 `Effects.Fx` / 选卡稀有度着色 / `VisualProbe` 三场景 / 六组注入失败面互不相交 / `gpu_probe` 护栏假红的修法） |
 | `login_m54.md` + `m54_inject.py` | M54 报告与区分力注入（本地账号库 `AccountStore` / 登录注册页 / 主菜单收敛为四颗按钮 / 排行榜 / `AUTH` 场景 / 八组注入——含两组专门摘按钮回调，证明"都在"不等于"都能用"） |
 | `room_probe.py` + `m55_inject.py` | M55 组队码无头实测与区分力注入：3 场景（`CODE` 码的校验位与规范化 / `WIRE` 发现报文编解码与拒绝坏报文 / `ROOM` 目录·过期·解析·建房关房），八组注入红面互不相交 |
+| `transport_probe.py` + `m56_inject.py` | M56 传输层无头实测与区分力注入：3 场景（`SPEC` 说明书能力位与类型名 / `INSTALL` 装配·幂等·缺 SDK 如实失败不回落·能力提示两面 / `TARGET` 目标与端口按种类分派），九组注入红面互不相交 |
 > | `push_safe.py` | git 推送自愈入口：推送前预检凭据链路（gh 登录 / credential helper 是否指向 gh / 端到端能否真取到令牌），缺失时自动跑 `gh auth setup-git`，撞 403·401 自动重接后重试一次，其余失败归入 6 类并给出对应动作；`--check` 只体检、`--selftest` 8 个夹具反向验证分类判据互不串扰 |
 > | `balance_sim.py` + `balance_*.md` / `balance_*.txt` | 数值平衡模拟器与实验报告 |
 > | `gen_assets.py` | 像素精灵 / 音效资源生成脚本 |
@@ -2919,6 +2920,68 @@ Product / Sandbox / Deployment / Client ID / Client Secret 五项（步骤见 `r
 
 **已知取舍**：主菜单上没有「退出登录」入口——需求限定主页面只有那四颗按钮，
 所以换号目前只能靠清 `accounts.json` 里的 remember 字段。
+
+### M56 · 传输层那一层（本次新增）
+
+M55 之后，组队码还只能在**同一个局域网**里用。跨公网要走平台中继，而凭据还在你手上。
+
+但翻 FishyEOS 源码时翻出一件必须先处理的事：
+
+```csharp
+/// <summary>EOS Not Used</summary>
+public override void SetClientAddress(string address) { _ = address; }
+public override void SetPort(ushort port) { _ = port; }
+```
+
+**参数被直接扔掉。** 而项目此前正是靠 `SetClientAddress` 告诉传输层"连谁"。
+凭据一到、把 Tugboat 换成 FishyEOS，它会**立刻静默失效**：不报错、不打日志、
+点了"加入"没反应——和"网络本来就不通"完全无法区分。
+
+所以这一轮做的是**把"换传输层"变成一个可验证的操作**，顺手拔掉这颗雷。完整报告见 `room_m56.md`。
+
+| 新增 | 作用 |
+|---|---|
+| `Net/NetTransport.cs` | 一张说明书：类型全名 / 能否跨公网 / 要不要登录 / 有没有端口 / 怎么设目标。**换传输层 = 改 `Default` 一行** |
+| `Net/NetTransportSetup.cs` | 装配与设参：`EnsureOn` / `EnsureInstalled` / `ApplyTarget` / `ApplyPort` / `KindOf`（整个文件包在 `FISHNET_ENABLED` 里） |
+
+**三处会静默失效的地方，各堵一个：**
+
+1. **目标设置方式不同**——按种类分派。EOS 走组件上的 `RemoteProductUserId`，用反射设，
+   所以**没有 SDK 的构建也能编过**，SDK 装好后这段代码一行不用改。
+   类型不符就拒绝，绝不退化成"反正都是 Transport，一律 `SetClientAddress`"。
+2. **端口有无不同**——`ApplyPort` 只在 `UsesPort` 为真时才动实例，否则如实返回 false 且**不碰它**。
+3. **认的是哪个组件**——FishNet 的 `TryAddDefaultTransport` 在 `Transport` 为空时用
+   `TryGetComponent` 抓"场景里任意一个"。只有一个传输层时这没问题，**M56 之前的代码正是靠它兜住的**；
+   一旦局域网兜底与公网主路同时装着，跑哪个就取决于组件顺序。现在装配完**显式**写 `TransportManager.Transport`。
+
+顺手修掉一处真实错位：场景里 Tugboat 序列化的是 `_port: 7770`，而 `NetProtocol.DefaultPort = 7777`
+被写进局域网发现应答发给了队友。眼下没出事，纯粹因为客户端也从不设端口、两边一起用 7770。
+现在端口只认一个源，在 `ConfigureTransport` 里统一设一次。
+
+大厅在有传输层不能跨公网时多一句提示：**"当前传输层只在同一局域网内可用"**。
+不写这句，玩家会理所当然地以为"把码发给外地的朋友就能连"。
+
+`transport_probe.py` 三场景 26 条判据，九组区分力注入红面互不相交。
+最要紧的是 **Q2（只装组件、不赋 `Transport`）**——那正是 M56 之前的代码，
+它会让「装配后管理器认它」「装配类型正确」「反查得到 Tugboat」三条一起变红；
+对偶的 **Q3（缺 SDK 时悄悄回落成 Tugboat）** 堵住反方向。
+
+**这一轮抓出的三处问题**（都记在 `room_m56.md` §4.1）：
+
+1. **注入脚本自己读错了输出**：`JUDGE_RE` 用 `\S+` 取判据名，遇到带空格的判据名就在空格处截断、
+   整行匹配失败——判据红了，脚本看不见。改成 `.+?` 后九组一次全对；`m55_inject.py` 同一写法一并改了。
+   **判据红了却读不到，等于没红**，所以 `Line()` 末尾固定补两个空格。
+2. **静态审计：条件编译不一致**——`NetTransport` 一开始一半在 `#if` 里，审计说
+   "读者无法判断没装插件时它存不存在"。拆成两个文件，而不是给检查加豁免。
+3. **静态审计：枚举分支缺失**——`Describe` 靠 `switch` 之后的 `return null` 兜底。
+   补了 `case TransportKind.Unknown: default:`，这本来也是更准确的写法。
+
+**接外网还等你提供凭据**：EOS 路线免费，需要 Epic 开发者账号的
+Product ID / Sandbox ID / Deployment ID / Client ID / Client Secret 五项
+（`room_m56.md` §5 有逐步清单）。拿到之后我这边要做的六步里，**第 4 步只是把 `Default` 改成 `Eos`**。
+
+回归：三套构建 `error CS` = 0；静态自检 30 项 ERROR 0 / WARN 0（夹具全过）；
+20 个专项探针分次独立调用全过；单机长局 5 场景、联机长局通过。
 
 ### 还剩多少
 

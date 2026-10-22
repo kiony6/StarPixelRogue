@@ -234,20 +234,24 @@ namespace StarPixel.EditorTools
         private static void AddDefaultTransport(Component nm)
         {
             if (nm == null) return;
-            // M18 双开实测修复：Fish-Net 4.x 的 Tugboat 类型全名是
+            // M18 双开实测修复（保留结论）：Fish-Net 4.x 的 Tugboat 类型全名是
             // 「命名空间 FishNet.Transporting.Tugboat」+「类名 Tugboat」= FishNet.Transporting.Tugboat.Tugboat。
             // 旧候选里 "…TugboatTransport" 不存在，而 "…Tugboat" 是**命名空间名**而非类型名，
             // 传进 Type.GetType 恒为 null —— 结果传输层从来没被添加，NetworkManager 实际不可用。
-            var t = FindType("FishNet.Transporting.Tugboat.Tugboat")
-                 ?? FindType("FishNet.Transporting.Tugboat.TugboatTransport")
-                 ?? FindType("FishNet.Transporting.Multipass.Multipass");
+            //
+            // M56：类型名不再写死在这个脚本里，改成向 NetTransport 要说明书。
+            // 编辑器装配与运行时装配用的是**同一份**类型名，因此不可能出现
+            // "编辑器装的是 A、运行时以为在跑 B"——那正是换传输层时最容易漏的一处。
+            var spec = Net.NetTransport.Describe(Net.NetTransport.Default);
+            var t = spec != null ? FindType(spec.TypeName) : null;
             if (t == null)
             {
-                Debug.LogWarning("[StarPixel] 未找到可用传输层（Tugboat/Multipass），请手动为 NetworkManager 添加");
+                Debug.LogWarning("[StarPixel] 未找到传输层 " +
+                                 (spec != null ? spec.TypeName : "<未知种类>") +
+                                 "，请确认对应插件已安装，或手动为 NetworkManager 添加");
                 return;
             }
-            var existing = nm.GetComponent(t);
-            if (existing == null) nm.gameObject.AddComponent(t);
+            if (nm.GetComponent(t) == null) nm.gameObject.AddComponent(t);
         }
 
         /// <summary>

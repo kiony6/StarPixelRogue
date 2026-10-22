@@ -24,6 +24,7 @@ namespace StarPixel.Net
 
         private InputField _codeField;
         private Text _myCodeText;
+        private Text _scopeText;
 
         /// <summary>输入框里的当前内容（探针用：写进来 = 模拟玩家输入）。</summary>
         public string CodeText
@@ -37,6 +38,13 @@ namespace StarPixel.Net
 
         /// <summary>大厅上展示给房主的码文案（探针用：确认码真的上屏了，而不只是生成了）。</summary>
         public string MyCodeText => _myCodeText != null ? _myCodeText.text : "";
+
+        /// <summary>
+        /// M56：能力提示行（"仅限同一网络"）。当前传输层能跨公网时为空串。
+        /// <para>探针用：这句话只在某个传输层下成立，所以必须两面都能断言，
+        /// 否则"永远显示"和"永远不显示"都察觉得到。</para>
+        /// </summary>
+        public string ScopeText => _scopeText != null ? _scopeText.text : "";
 
         /// <summary>
         /// 当前大厅 UI 根（M18 续四：为无头 UI 探针提供定位入口）。
@@ -127,7 +135,26 @@ namespace StarPixel.Net
             // 空着不显示是因为"房间 K7M-2QX"这种行在还没建房时是句谎话。
             _myCodeText = CreateText(_root.transform, "", new Vector2(0, -150), 22);
             _myCodeText.color = Core.UIFactory.Palette.Gold;
+
+            // M56：能力提示。当前传输层是裸 UDP，只在**同一局域网**内可用。
+            // 这句话不写在界面上，玩家会理所当然地以为"把码发给外地的朋友就能连"，
+            // 然后把连不上归咎于游戏——而这一层确实还做不到，只是没人说过。
+            _scopeText = CreateText(_root.transform, "", new Vector2(0, -105), 16);
+            _scopeText.color = new Color(0.75f, 0.78f, 0.85f, 0.9f);
+
             RefreshMyCode();
+            RefreshScope();
+        }
+
+        /// <summary>
+        /// M56：刷新"能连多远"的提示。能跨公网时留空。
+        /// <para>public 是给无头探针用的：它要能改完 <see cref="NetTransport.Default"/> 再刷新一次，
+        /// 从而断言这句话**不是**恒显示的——恒显示的提示等于没提示。</para>
+        /// </summary>
+        public void RefreshScope()
+        {
+            if (_scopeText == null) return;
+            _scopeText.text = NetTransport.CanCrossInternet ? "" : Core.Localization.T("net.lan_only");
         }
 
         /// <summary>把本机的码刷到界面上（未开房则留空）。</summary>

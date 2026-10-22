@@ -63,7 +63,9 @@ JUDGES = {
 # room_probe.py 的判据行形如：
 #   "      x 相邻位念反被挡       期望 是        实际 否"
 # 第一个字符是 x（不达标）或空格（达标）
-JUDGE_RE = re.compile(r"^\s{4,}(?P<mark>x| )\s+(?P<key>\S+)\s+期望\s+(?P<exp>\S+)\s+实际\s+(?P<got>.*)$")
+# 判据名允许含空格（"IP 直通仍可用"），所以用 .+? 而不是 \S+。
+# 用 \S+ 不会报错，只会让带空格的判据**变红时整行匹配不上、凭空消失**（M56 踩到过）。
+JUDGE_RE = re.compile(r"^\s{4,}(?P<mark>x| )\s+(?P<key>.+?)\s+期望\s+(?P<exp>\S+)\s+实际\s+(?P<got>.*)$")
 
 CASES = [
     dict(

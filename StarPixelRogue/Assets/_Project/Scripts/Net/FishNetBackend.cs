@@ -4,8 +4,9 @@ using FishNet.Managing;
 using FishNet.Managing.Object;      // M18：DefaultPrefabObjects（运行时补注册可生成预制体）
 using FishNet.Object;               // M18：NetworkObject
 using FishNet.Transporting;
-using FishNet.Transporting.Tugboat; // M18：Tugboat（兜底传输层）
 using UnityEngine;
+// M56：不再直接引用 Tugboat 类型。传输层的类型名、能力、目标设置方式统一收在
+// NetTransport（Net/NetTransport.cs）里，换 EOS 只改那一处的 Default。
 
 namespace StarPixel.Net
 {
@@ -47,6 +48,10 @@ namespace StarPixel.Net
             NetReconnectStore.ClearAll();         // 房主：清空上一局残留的进度快照
             NetReconnect.Ensure()?.ResetState();
 
+            // M56：先把端口与目标按当前传输层设好。必须早于 StartConnection——
+            // 服务端在这一刻才去 bind，之后再改端口已经晚了。
+            ConfigureTransport(true, "");
+
             // 房主 = 服务端 + 本地客户端同时启动
             _nm.ServerManager.StartConnection();
             _nm.ClientManager.StartConnection();
@@ -63,8 +68,10 @@ namespace StarPixel.Net
             NetSession.GenerateReconnectToken();
             NetReconnect.Ensure()?.ResetState();
 
-            var transport = _nm.TransportManager != null ? _nm.TransportManager.Transport : null;
-            if (transport != null) transport.SetClientAddress(address);
+            // M56：目标不再直接塞给 SetClientAddress。FishyEOS 把它覆写成了空实现
+            // （`_ = address;`），直接塞会**静默丢失**——不报错，只是永远连不上。
+            // 按传输层种类分派这件事收在 NetTransportSetup.ApplyTarget 里。
+            ConfigureTransport(false, address);
             _nm.ClientManager.StartConnection();
             // 模式在连接就绪回调里置为 Client
         }
@@ -74,8 +81,7 @@ namespace StarPixel.Net
         {
             EnsureNetworkManager();
             if (_nm == null) return;
-            var transport = _nm.TransportManager != null ? _nm.TransportManager.Transport : null;
-            if (transport != null) transport.SetClientAddress(_intentHost ? "127.0.0.1" : NetSession.RemoteAddress);
+            ConfigureTransport(_intentHost, NetSession.RemoteAddress);
             _nm.ClientManager.StartConnection();
             // 模式在连接就绪回调里按 _intentHost 重新置位
         }
@@ -185,6 +191,9 @@ namespace StarPixel.Net
                 EnsureSpawnablesPopulated(_nm);
             }
 
+            // M56：此刻物体已激活、TransportManager 已存在，可以显式钉住"用哪一个"了。
+            PinTransport(_nm);
+
             if (_nm.ClientManager == null)
             {
                 Debug.LogError("[Net] NetworkManager 初始化不完整（ClientManager 为空）——" +
@@ -247,12 +256,66 @@ namespace StarPixel.Net
                                  "（说明资产未正确生成，建议重跑 StarPixel/Setup FishNet）");
         }
 
-        /// <summary>兜底 NM 的传输层：没有 transport 时 StartConnection 会直接失败，联机无从谈起。</summary>
+        /// <summary>
+        /// 兜底 NM 的传输层：没有 transport 时 StartConnection 会直接失败，联机无从谈起。
+        /// <para>
+        /// 注意调用时机：这段在物体**激活前**执行，此时 <c>NetworkManager</c> 还没把
+        /// <c>TransportManager</c> 建出来，所以这里只装组件、不指定"用哪一个"。
+        /// 指定发生在激活之后（见 <see cref="EnsureNetworkManager"/> 末尾的 <see cref="PinTransport"/>）。
+        /// </para>
+        /// </summary>
         private static void AddFallbackTransport(NetworkManager nm)
         {
             if (nm == null) return;
-            if (nm.GetComponent<Tugboat>() != null) return;
-            nm.gameObject.AddComponent<Tugboat>();
+            string reason;
+            if (NetTransportSetup.EnsureOn(nm.gameObject, NetTransport.Default, out reason) == null)
+                Debug.LogWarning("[Net] 传输层装配失败: " + reason);
+        }
+
+        /// <summary>
+        /// M56：显式指定 <c>TransportManager</c> 用哪一个传输层。
+        /// <para>
+        /// FishNet 自己的 <c>TryAddDefaultTransport</c> 只在 <c>Transport</c> 为空时
+        /// 用 <c>TryGetComponent</c> 抓"场景里任意一个"，抓不到就自己塞一个 Tugboat。
+        /// 只有一个传输层时这是便利；一旦局域网兜底与平台中继同时装着，
+        /// 真正跑的是哪一个就取决于组件顺序，而不是取决于 <see cref="NetTransport.Default"/>。
+        /// </para>
+        /// </summary>
+        private static void PinTransport(NetworkManager nm)
+        {
+            if (nm == null || nm.TransportManager == null) return;
+            string reason;
+            if (!NetTransportSetup.EnsureInstalled(nm.TransportManager, NetTransport.Default, out reason))
+                Debug.LogError("[Net] 传输层不可用: " + reason + "（当前选择 " + NetTransport.Default + "）");
+        }
+
+        /// <summary>
+        /// 把当前传输层需要的端口与目标设好。房主与客户端都走这里。
+        /// <para>
+        /// 端口只认 <see cref="NetProtocol.DefaultPort"/> 这**一个源**。
+        /// 场景里 Tugboat 序列化的是 7770，而局域网发现应答里公布的是 7777——
+        /// 眼下没出事，纯粹因为客户端也从不设端口、两边一起用 7770。
+        /// 一旦两台机器的资产端口不同，就会变成"码对、房在、怎么都连不上"。
+        /// 在这里统一设一次，公布值与绑定值从此是同一个数。
+        /// </para>
+        /// </summary>
+        private void ConfigureTransport(bool asHost, string target)
+        {
+            var tm = _nm != null ? _nm.TransportManager : null;
+            if (tm == null) return;
+
+            var kind = NetTransport.Default;
+            var spec = NetTransport.Describe(kind);
+            string reason;
+
+            if (spec != null && spec.UsesPort &&
+                !NetTransportSetup.ApplyPort(tm.Transport, kind, NetProtocol.DefaultPort, out reason))
+                Debug.LogWarning("[Net] 端口设置失败: " + reason);
+
+            // 房主的本地客户端连自己
+            string who = asHost ? "127.0.0.1" : (target ?? "");
+            if (!NetTransportSetup.ApplyTarget(tm.Transport, kind, who, out reason))
+                Debug.LogWarning("[Net] 目标设置失败: " + reason + " / 目标=" + who + " 种类=" + kind);
         }
 
         private void OnClientConnectionState(ClientConnectionStateArgs args)
